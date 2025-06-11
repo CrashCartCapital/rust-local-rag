@@ -1,0 +1,30 @@
+{
+    "rust-analyzer.server.path": "rust-analyzer",
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.checkOnSave.command": "cargo check",
+    "rust-analyzer.completion.addCallParentheses": true,
+    "rust-analyzer.completion.addCallArgumentSnippets": true,
+    "rust-analyzer.inlayHints.enable": true,
+    "rust-analyzer.inlayHints.parameterHints.enable": true,
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "rust-analyzer.lens.enable": true,
+    "rust-analyzer.lens.methodReferences": true,
+    "rust-analyzer.hover.actions.enable": true,
+    "editor.formatOnSave": true,
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+    },
+    "rust-analyzer.diagnostics.enable": true,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.cargo.allFeatures": true,
+    "rust-analyzer.cargo.loadOutDirsFromCheck": true,
+    "rust-analyzer.cargo.runBuildScripts": true,
+    "rust-analyzer.workspace.symbol.search.scope": "workspace_and_dependencies",
+    "rust-analyzer.workspace.symbol.search.kind": "all_symbols",
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.checkOnSave": true,
+    "rust-analyzer.cargo.autoreload": true
+}

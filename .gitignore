@@ -1,0 +1,8 @@
+/target
+/logs
+
+documents/*.pdf
+data/chunks.json
+
+!documents/.keep
+!data/.keep

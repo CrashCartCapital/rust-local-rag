@@ -1,0 +1,13 @@
+[alias]
+c = "check"
+cc = "clippy"
+ccf = "clippy --fix --allow-dirty --allow-staged"
+ccd = ["clippy", "--", "-D", "warnings"]
+f = "fmt"
+t = "test"
+r = "run"
+b = "build"
+br = "build --release"
+
+[build]
+rustflags = ["-D", "warnings"]
