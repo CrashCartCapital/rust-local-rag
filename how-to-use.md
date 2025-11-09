@@ -12,7 +12,8 @@
                 "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
                 "LOG_DIR": "/tmp/rust-local-rag",
                 "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10"
+                "LOG_MAX_MB": "10",
+                "OLLAMA_EMBEDDING_MODEL": "nomic-embed-text"
             }
         }
     }
@@ -30,6 +31,9 @@
 | `LOG_DIR` | Log files directory | `./logs` |
 | `LOG_LEVEL` | Logging level (error/warn/info/debug) | `info` |
 | `LOG_MAX_MB` | Log file size limit in MB | `5` |
+| `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model name (must be installed locally) | `nomic-embed-text` |
+
+> 💡 Set `OLLAMA_EMBEDDING_MODEL` to any embedding model you've installed with `ollama pull`. The server verifies your choice at startup and provides guidance if the model is missing.
 
 ## Adding Documents
 

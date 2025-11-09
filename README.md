@@ -1,13 +1,15 @@
 # Rust Local RAG
 
-A high-performance, local RAG (Retrieval-Augmented Generation) system built in Rust that integrates with Claude Desktop via the Model Context Protocol (MCP). Search and analyze your PDF documents directly within Claude conversations without sending data to external services.
+This repository is a maintained fork of [ksaritek/rust-local-rag](https://github.com/ksaritek/rust-local-rag) that adds configurability for choosing which Ollama embedding model to use.
+It remains a high-performance, local RAG (Retrieval-Augmented Generation) system built in Rust that integrates with Claude Desktop via the Model Context Protocol (MCP).
+Search and analyze your PDF documents directly within Claude conversations without sending data to external services.
 
 ## 🎯 Purpose
 
 This project demonstrates how to build a production-ready MCP server using Rust that:
 
 - **Processes PDF documents locally** using poppler for text extraction
-- **Generates embeddings** using local Ollama models (no external API calls)
+- **Generates embeddings** using your preferred local Ollama embedding model (no external API calls)
 - **Provides semantic search** through document collections
 - **Integrates seamlessly** with Claude Desktop via MCP protocol
 - **Maintains privacy** by keeping all data processing local
@@ -84,6 +86,11 @@ let service = server.serve(stdio()).await?;
 - Configurable result count (top-k)
 - Relevance scoring for search results
 
+### 🔧 **Customizable Embedding Pipeline**
+- Select any installed Ollama embedding model with the `OLLAMA_EMBEDDING_MODEL` environment variable
+- Defaults to `nomic-embed-text` for quick setup, but works with any compatible local model
+- Validates your selection against the models available in your Ollama installation at startup
+
 ### 📁 **Document Management**
 - Automatic PDF text extraction via poppler
 - Document chunking for optimal embedding generation
@@ -135,12 +142,26 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
                 "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
                 "LOG_DIR": "/tmp/rust-local-rag",
                 "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10"
+                "LOG_MAX_MB": "10",
+                "OLLAMA_EMBEDDING_MODEL": "nomic-embed-text"
             }
         }
     }
 }
 ```
+
+### Choose Your Ollama Embedding Model
+
+Set the `OLLAMA_EMBEDDING_MODEL` environment variable to any embedding model you've pulled into your Ollama installation.
+For example:
+
+```bash
+ollama pull snowflake-arctic-embed
+export OLLAMA_EMBEDDING_MODEL=snowflake-arctic-embed
+rust-local-rag
+```
+
+If the model is not installed, the server will provide a helpful error listing the available models and how to pull the requested one.
 
 ### 4. Add Documents and Use
 ```bash
