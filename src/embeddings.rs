@@ -107,7 +107,7 @@ impl EmbeddingService {
 
         let exists = models
             .iter()
-            .any(|m| m["name"].as_str().unwrap_or("").contains(&self.model));
+            .any(|m| m["name"].as_str().unwrap_or("").starts_with(&self.model));
 
         if !exists {
             let available: Vec<_> = models.iter().filter_map(|m| m["name"].as_str()).collect();
