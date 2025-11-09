@@ -94,12 +94,14 @@ let service = server.serve(stdio()).await?;
 ### 📁 **Document Management**
 - Automatic PDF text extraction via poppler
 - Document chunking for optimal embedding generation
+- Automatic reindexing when your Ollama embedding model changes
 - Real-time document list and statistics
 
 ### 🔒 **Privacy-First Design**
 - All processing happens locally
 - No external API calls for document content
 - Embeddings stored locally for fast retrieval
+- Background log maintenance with local rotation/truncation only
 
 ### ⚡ **High Performance**
 - Rust's memory safety and performance
@@ -162,6 +164,24 @@ rust-local-rag
 ```
 
 If the model is not installed, the server will provide a helpful error listing the available models and how to pull the requested one.
+
+### Environment Configuration
+
+The binary reads configuration from environment variables (and optional `.env` files). Most installs can start with the defaults, but you can customise behaviour with the following values:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `DATA_DIR` | Where embeddings and index metadata are persisted | `./data` |
+| `DOCUMENTS_DIR` | Directory scanned for PDFs to index | `./documents` |
+| `LOG_DIR` | Log output directory. Falls back to `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
+| `LOG_LEVEL` | Tracing level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
+| `LOG_MAX_MB` | Maximum log file size before automatic truncation | `5` |
+| `OLLAMA_URL` | Ollama base URL | `http://localhost:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Embedding model to request from Ollama | `nomic-embed-text` |
+| `DEVELOPMENT` / `DEV` | When set, forces pretty console logging (skips log file) | _unset_ |
+| `CONSOLE_LOGS` | Force console logging without enabling other dev toggles | _unset_ |
+
+> ℹ️  Log files are automatically truncated when they exceed `LOG_MAX_MB`. Set `CONSOLE_LOGS=true` if you prefer to view logs directly in the terminal even outside development mode.
 
 ### 4. Add Documents and Use
 ```bash

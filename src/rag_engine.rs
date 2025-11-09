@@ -322,7 +322,12 @@ impl RagEngine {
             }
 
             match serde_json::from_str::<PersistedState>(&data) {
-                Ok(PersistedState { model, chunks, needs_reindex, .. }) => {
+                Ok(PersistedState {
+                    model,
+                    chunks,
+                    needs_reindex,
+                    ..
+                }) => {
                     if model != self.embedding_service.model_name() {
                         tracing::warn!(
                             "Embedding model changed from '{}' to '{}'. Existing embeddings will be reindexed.",
