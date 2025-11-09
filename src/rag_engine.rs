@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -27,6 +27,7 @@ pub struct RagEngine {
     chunks: HashMap<String, DocumentChunk>,
     embedding_service: EmbeddingService,
     data_dir: String,
+    needs_reindex: bool,
 }
 
 impl RagEngine {
@@ -37,6 +38,7 @@ impl RagEngine {
             chunks: HashMap::new(),
             embedding_service,
             data_dir: data_dir.to_string(),
+            needs_reindex: false,
         };
 
         if let Err(e) = engine.load_from_disk().await {
@@ -44,6 +46,14 @@ impl RagEngine {
         }
 
         Ok(engine)
+    }
+
+    pub fn needs_reindex(&self) -> bool {
+        self.needs_reindex
+    }
+
+    pub fn embedding_model(&self) -> &str {
+        self.embedding_service.model_name()
     }
 
     pub async fn add_document(&mut self, filename: &str, data: &[u8]) -> Result<usize> {
@@ -139,14 +149,30 @@ impl RagEngine {
         let doc_count = self.list_documents().len();
         let chunk_count = self.chunks.len();
 
+        let status = if self.needs_reindex {
+            "reindexing"
+        } else {
+            "ready"
+        };
+
         serde_json::json!({
             "documents": doc_count,
             "chunks": chunk_count,
-            "status": "ready"
+            "status": status
         })
     }
 
     pub async fn load_documents_from_dir(&mut self, dir: &str) -> Result<()> {
+        let was_reindexing = self.needs_reindex;
+
+        if was_reindexing {
+            tracing::info!(
+                "Reindexing documents in '{}' with embedding model '{}'",
+                dir,
+                self.embedding_service.model_name()
+            );
+        }
+
         for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("pdf") {
@@ -178,6 +204,16 @@ impl RagEngine {
                     }
                 }
             }
+        }
+
+        if was_reindexing {
+            self.needs_reindex = false;
+            self.save_to_disk().await?;
+            tracing::info!(
+                "Reindexing complete. Indexed {} chunks across {} documents.",
+                self.chunks.len(),
+                self.list_documents().len()
+            );
         }
 
         Ok(())
@@ -249,8 +285,21 @@ impl RagEngine {
     }
 
     async fn save_to_disk(&self) -> Result<()> {
+        #[derive(Serialize)]
+        struct PersistedState<'a> {
+            version: u32,
+            model: &'a str,
+            chunks: &'a HashMap<String, DocumentChunk>,
+        }
+
         let path = format!("{}/chunks.json", self.data_dir);
-        let data = serde_json::to_string_pretty(&self.chunks)?;
+        let state = PersistedState {
+            version: 1,
+            model: self.embedding_service.model_name(),
+            chunks: &self.chunks,
+        };
+
+        let data = serde_json::to_string_pretty(&state)?;
         tokio::fs::write(path, data).await?;
         tracing::debug!("Saved {} chunks to disk", self.chunks.len());
         Ok(())
@@ -260,8 +309,48 @@ impl RagEngine {
         let path = format!("{}/chunks.json", self.data_dir);
         if tokio::fs::try_exists(&path).await? {
             let data = tokio::fs::read_to_string(path).await?;
-            self.chunks = serde_json::from_str(&data)?;
-            tracing::info!("Loaded {} chunks from disk", self.chunks.len());
+            #[derive(Deserialize)]
+            struct PersistedState {
+                #[serde(rename = "version")]
+                _version: u32,
+                model: String,
+                chunks: HashMap<String, DocumentChunk>,
+            }
+
+            match serde_json::from_str::<PersistedState>(&data) {
+                Ok(PersistedState { model, chunks, .. }) => {
+                    if model != self.embedding_service.model_name() {
+                        tracing::warn!(
+                            "Embedding model changed from '{}' to '{}'. Existing embeddings will be reindexed.",
+                            model,
+                            self.embedding_service.model_name()
+                        );
+                        self.chunks.clear();
+                        self.needs_reindex = true;
+                        self.save_to_disk().await?;
+                    } else {
+                        self.chunks = chunks;
+                        tracing::info!("Loaded {} chunks from disk", self.chunks.len());
+                    }
+                }
+                Err(_) => {
+                    let legacy_chunks: HashMap<String, DocumentChunk> = serde_json::from_str(&data)
+                        .context("Failed to parse legacy chunks.json")?;
+                    if !legacy_chunks.is_empty() {
+                        tracing::warn!(
+                            "Existing embeddings were created before model tracking was added. Reindexing with model '{}' is required.",
+                            self.embedding_service.model_name()
+                        );
+                        tracing::info!(
+                            "Discarding {} legacy chunks so they can be regenerated.",
+                            legacy_chunks.len()
+                        );
+                        self.needs_reindex = true;
+                    }
+                    self.chunks.clear();
+                    self.save_to_disk().await?;
+                }
+            }
         }
         Ok(())
     }
