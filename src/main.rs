@@ -152,6 +152,11 @@ async fn main() -> Result<()> {
     tracing::info!("Starting MCP server (stdin/stdout mode)");
     tracing::info!("Data directory: {}", data_dir);
     tracing::info!("Documents directory: {}", documents_dir);
+    tracing::info!(
+        "Ollama Model: {}",
+        std::env::var("OLLAMA_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "nomic-embed-text (default)".to_string())
+    );
 
     mcp_server::start_mcp_server(rag_state).await?;
 

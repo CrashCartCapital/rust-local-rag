@@ -20,13 +20,22 @@ pub struct EmbeddingService {
 
 impl EmbeddingService {
     pub async fn new() -> Result<Self> {
+        let ollama_url =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let model = std::env::var("OLLAMA_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "nomic-embed-text".to_string());
+
+        tracing::info!("Ollama URL: {}", ollama_url);
+        tracing::info!("Ollama Model: {}", model);
+
         let service = Self {
             client: reqwest::Client::new(),
-            ollama_url: "http://localhost:11434".to_string(),
-            model: "nomic-embed-text".to_string(),
+            ollama_url,
+            model,
         };
 
         service.test_connection().await?;
+        service.verify_model().await?;
 
         Ok(service)
     }
@@ -71,6 +80,46 @@ impl EmbeddingService {
         }
 
         tracing::info!("Successfully connected to Ollama at {}", self.ollama_url);
+        Ok(())
+    }
+
+    async fn verify_model(&self) -> Result<()> {
+        let response = self
+            .client
+            .get(format!("{}/api/tags", self.ollama_url))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Failed to list models from Ollama: {} - {}",
+                status,
+                body
+            ));
+        }
+
+        let tags: serde_json::Value = response.json().await?;
+        let models = tags["models"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Cannot list models"))?;
+
+        let exists = models
+            .iter()
+            .any(|m| m["name"].as_str().unwrap_or("").contains(&self.model));
+
+        if !exists {
+            let available: Vec<_> = models.iter().filter_map(|m| m["name"].as_str()).collect();
+            return Err(anyhow::anyhow!(
+                "Model '{}' not found. Available: {:?}. Run: ollama pull {}",
+                self.model,
+                available,
+                self.model
+            ));
+        }
+
+        tracing::info!("✅ Model '{}' verified", self.model);
         Ok(())
     }
 }
