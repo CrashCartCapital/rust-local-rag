@@ -173,7 +173,7 @@ The binary reads configuration from environment variables (and optional `.env` f
 |----------|---------|---------|
 | `DATA_DIR` | Where embeddings and index metadata are persisted | `./data` |
 | `DOCUMENTS_DIR` | Directory scanned for PDFs to index | `./documents` |
-| `LOG_DIR` | Log output directory. Falls back to `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
+| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise falls back to `./logs`. | Auto-detected |
 | `LOG_LEVEL` | Tracing level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
 | `LOG_MAX_MB` | Maximum log file size before automatic truncation | `5` |
 | `OLLAMA_URL` | Ollama base URL | `http://localhost:11434` |
