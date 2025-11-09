@@ -290,6 +290,7 @@ impl RagEngine {
             version: u32,
             model: &'a str,
             chunks: &'a HashMap<String, DocumentChunk>,
+            needs_reindex: bool,
         }
 
         let path = format!("{}/chunks.json", self.data_dir);
@@ -297,6 +298,7 @@ impl RagEngine {
             version: 1,
             model: self.embedding_service.model_name(),
             chunks: &self.chunks,
+            needs_reindex: self.needs_reindex,
         };
 
         let data = serde_json::to_string_pretty(&state)?;
@@ -315,10 +317,12 @@ impl RagEngine {
                 _version: u32,
                 model: String,
                 chunks: HashMap<String, DocumentChunk>,
+                #[serde(default)]
+                needs_reindex: bool,
             }
 
             match serde_json::from_str::<PersistedState>(&data) {
-                Ok(PersistedState { model, chunks, .. }) => {
+                Ok(PersistedState { model, chunks, needs_reindex, .. }) => {
                     if model != self.embedding_service.model_name() {
                         tracing::warn!(
                             "Embedding model changed from '{}' to '{}'. Existing embeddings will be reindexed.",
@@ -330,6 +334,7 @@ impl RagEngine {
                         self.save_to_disk().await?;
                     } else {
                         self.chunks = chunks;
+                        self.needs_reindex = needs_reindex;
                         tracing::info!("Loaded {} chunks from disk", self.chunks.len());
                     }
                 }
