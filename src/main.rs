@@ -135,6 +135,14 @@ async fn main() -> Result<()> {
     tracing::info!("Started automatic log cleanup task (max: {}MB)", log_max_mb);
 
     let rag_engine = RagEngine::new(&data_dir).await?;
+
+    if rag_engine.needs_reindex() {
+        tracing::warn!(
+            "Embedding model changed to '{}'. Existing embeddings were cleared and a full reindex will start shortly.",
+            rag_engine.embedding_model()
+        );
+    }
+
     let rag_state = Arc::new(RwLock::new(rag_engine));
 
     let document_loading_state = rag_state.clone();
@@ -142,6 +150,14 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         tracing::info!("Starting document loading in background...");
         let mut engine = document_loading_state.write().await;
+
+        if engine.needs_reindex() {
+            tracing::info!(
+                "Starting reindex to rebuild embeddings using model '{}'...",
+                engine.embedding_model()
+            );
+        }
+
         if let Err(e) = engine.load_documents_from_dir(&docs_dir).await {
             tracing::error!("Failed to load documents: {}", e);
         } else {

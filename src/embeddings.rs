@@ -40,6 +40,10 @@ impl EmbeddingService {
         Ok(service)
     }
 
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     pub async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
         let request = OllamaEmbeddingRequest {
             model: self.model.clone(),
