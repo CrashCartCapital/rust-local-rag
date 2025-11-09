@@ -28,12 +28,17 @@
 |----------|-------------|---------|
 | `DATA_DIR` | Embeddings storage directory | `./data` |
 | `DOCUMENTS_DIR` | PDF documents directory | `./documents` |
-| `LOG_DIR` | Log files directory | `./logs` |
-| `LOG_LEVEL` | Logging level (error/warn/info/debug) | `info` |
-| `LOG_MAX_MB` | Log file size limit in MB | `5` |
+| `LOG_DIR` | Log files directory. Uses `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
+| `LOG_LEVEL` | Logging level (error/warn/info/debug/trace) | `info` |
+| `LOG_MAX_MB` | Log file size limit in MB before truncation | `5` |
+| `OLLAMA_URL` | Base URL for the Ollama API | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model name (must be installed locally) | `nomic-embed-text` |
+| `DEVELOPMENT` / `DEV` | When set, prefer console logging over file logging | _unset_ |
+| `CONSOLE_LOGS` | Force console logging even in production mode | _unset_ |
 
 > 💡 Set `OLLAMA_EMBEDDING_MODEL` to any embedding model you've installed with `ollama pull`. The server verifies your choice at startup and provides guidance if the model is missing.
+
+> 🗒️  All configuration values can be defined in a `.env` file alongside the binary. The server loads it automatically on startup.
 
 ## Adding Documents
 

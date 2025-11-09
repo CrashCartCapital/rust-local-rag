@@ -59,6 +59,8 @@ mkdir -p /tmp/rust-local-rag
 cp your-pdfs/*.pdf ~/Documents/rag/
 ```
 
+> ℹ️  By default the server writes logs to `/var/log/rust-local-rag` when it can, otherwise `./logs`. Creating `/tmp/rust-local-rag` gives you a convenient writable location that you can point `LOG_DIR` at from your Claude configuration.
+
 ## Claude Desktop Integration
 
 ### 1. Find Claude Desktop Config
@@ -77,7 +79,8 @@ cp your-pdfs/*.pdf ~/Documents/rag/
                 "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
                 "LOG_DIR": "/tmp/rust-local-rag",
                 "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10"
+                "LOG_MAX_MB": "10",
+                "OLLAMA_URL": "http://localhost:11434"
             }
         }
     }
@@ -142,3 +145,21 @@ grep -i error /tmp/rust-local-rag/rust-local-rag.log
 ```
 
 That's it! Your documents will be automatically indexed and searchable in Claude Desktop.
+
+## Environment Reference
+
+You can customise the server using environment variables or a `.env` file placed alongside the binary. Common options include:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `DATA_DIR` | Local storage for embeddings | `./data` |
+| `DOCUMENTS_DIR` | Directory scanned for PDFs | `./documents` |
+| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
+| `LOG_LEVEL` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
+| `LOG_MAX_MB` | Maximum log file size before truncation | `5` |
+| `OLLAMA_URL` | Base URL for Ollama | `http://localhost:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Embedding model name | `nomic-embed-text` |
+| `DEVELOPMENT` / `DEV` | Prefer console logging (development friendly) | _unset_ |
+| `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |
+
+> 🧹 Logs larger than `LOG_MAX_MB` are automatically truncated by a background task to keep disk usage predictable.

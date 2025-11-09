@@ -103,13 +103,15 @@ async fn start_log_cleanup_task(log_dir: String, max_mb: u64) {
             interval.tick().await;
 
             if let Ok(metadata) = std::fs::metadata(&log_file) {
-                if metadata.len() > max_bytes {
-                    if let Err(e) = std::fs::write(
-                        &log_file,
-                        format!("[LOG TRUNCATED - Size exceeded {}MB]\n", max_mb),
-                    ) {
-                        eprintln!("Failed to truncate log file: {}", e);
-                    }
+                if metadata.len() <= max_bytes {
+                    continue;
+                }
+
+                if let Err(e) = std::fs::write(
+                    &log_file,
+                    format!("[LOG TRUNCATED - Size exceeded {}MB]\n", max_mb),
+                ) {
+                    eprintln!("Failed to truncate log file: {}", e);
                 }
             }
         }
