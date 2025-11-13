@@ -302,19 +302,12 @@ impl RagEngine {
         let max_tokens_per_chunk = 800usize;
         let min_tokens_per_chunk = 120usize;
 
-        let estimated_chunks = if total_tokens == 0 {
-            1usize
-        } else {
-            ((total_tokens as f32) / (max_tokens_per_chunk as f32))
-                .ceil()
-                .max(1.0) as usize
-        };
+        let estimated_chunks = ((total_tokens as f32) / (max_tokens_per_chunk as f32))
+            .ceil()
+            .max(1.0) as usize;
 
-        let mut target_tokens = if total_tokens == 0 {
-            min_tokens_per_chunk
-        } else {
-            (total_tokens as f32 / estimated_chunks as f32).ceil() as usize
-        };
+        let mut target_tokens =
+            (total_tokens as f32 / estimated_chunks as f32).ceil() as usize;
         target_tokens = target_tokens.clamp(min_tokens_per_chunk, max_tokens_per_chunk);
 
         let mut overlap_tokens = (target_tokens as f32 * 0.2).round() as usize;
