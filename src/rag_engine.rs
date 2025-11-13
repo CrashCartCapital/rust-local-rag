@@ -1,10 +1,20 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::embeddings::EmbeddingService;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChunkMetadata {
+    pub page_range: Option<(usize, usize)>,
+    pub sentence_range: Option<(usize, usize)>,
+    pub section_title: Option<String>,
+    pub token_count: usize,
+    pub overlap_with_previous: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChunk {
@@ -13,6 +23,17 @@ pub struct DocumentChunk {
     pub text: String,
     pub embedding: Vec<f32>,
     pub chunk_index: usize,
+    #[serde(default)]
+    pub metadata: ChunkMetadata,
+}
+
+#[derive(Debug, Clone)]
+struct SentenceInfo {
+    text: String,
+    tokens: usize,
+    page: usize,
+    heading: Option<String>,
+    index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -64,14 +85,14 @@ impl RagEngine {
             return Err(anyhow::anyhow!("No text extracted from PDF"));
         }
 
-        let chunks = self.chunk_text(&text, 500);
+        let chunks = self.chunk_text(&text);
         tracing::info!("Created {} chunks for {}", chunks.len(), filename);
 
         self.chunks
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
-        for (i, chunk_text) in chunks.into_iter().enumerate() {
+        for (i, (chunk_text, metadata)) in chunks.into_iter().enumerate() {
             if chunk_text.trim().len() < 10 {
                 continue;
             }
@@ -85,6 +106,7 @@ impl RagEngine {
                 text: chunk_text,
                 embedding,
                 chunk_index: i,
+                metadata,
             };
 
             self.chunks.insert(chunk.id.clone(), chunk);
@@ -270,18 +292,311 @@ impl RagEngine {
         }
     }
 
-    fn chunk_text(&self, text: &str, chunk_size: usize) -> Vec<String> {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let mut chunks = Vec::new();
+    fn chunk_text(&self, text: &str) -> Vec<(String, ChunkMetadata)> {
+        let sentences = Self::extract_sentences(text);
+        if sentences.is_empty() {
+            return Vec::new();
+        }
 
-        for chunk in words.chunks(chunk_size) {
-            let chunk_text = chunk.join(" ");
-            if !chunk_text.trim().is_empty() {
-                chunks.push(chunk_text);
+        let total_tokens: usize = sentences.iter().map(|s| s.tokens).sum();
+        let max_tokens_per_chunk = 800usize;
+        let min_tokens_per_chunk = 120usize;
+
+        let estimated_chunks = if total_tokens == 0 {
+            1usize
+        } else {
+            ((total_tokens as f32) / (max_tokens_per_chunk as f32))
+                .ceil()
+                .max(1.0) as usize
+        };
+
+        let mut target_tokens = if total_tokens == 0 {
+            min_tokens_per_chunk
+        } else {
+            (total_tokens as f32 / estimated_chunks as f32).ceil() as usize
+        };
+        target_tokens = target_tokens.clamp(min_tokens_per_chunk, max_tokens_per_chunk);
+
+        let mut overlap_tokens = (target_tokens as f32 * 0.2).round() as usize;
+        if overlap_tokens == 0 {
+            overlap_tokens = 20;
+        }
+        overlap_tokens = overlap_tokens.min(target_tokens.saturating_sub(1));
+
+        let mut chunks: Vec<(String, ChunkMetadata)> = Vec::new();
+        let mut current_indices: Vec<usize> = Vec::new();
+        let mut current_token_total = 0usize;
+        let mut overlap_with_previous = 0usize;
+
+        for (idx, sentence) in sentences.iter().enumerate() {
+            let sentence_tokens = sentence.tokens.max(1);
+            if !current_indices.is_empty() && current_token_total + sentence_tokens > target_tokens
+            {
+                if let Some(chunk) =
+                    Self::finalize_chunk(&current_indices, &sentences, overlap_with_previous)
+                {
+                    chunks.push(chunk);
+                }
+
+                let mut new_indices = Vec::new();
+                let mut carried_tokens = 0usize;
+                for &rev_idx in current_indices.iter().rev() {
+                    let tokens = sentences[rev_idx].tokens.max(1);
+                    if carried_tokens + tokens > overlap_tokens {
+                        break;
+                    }
+                    new_indices.push(rev_idx);
+                    carried_tokens += tokens;
+                }
+                new_indices.reverse();
+                overlap_with_previous = carried_tokens;
+                current_indices = new_indices;
+                current_token_total = current_indices
+                    .iter()
+                    .map(|&i| sentences[i].tokens.max(1))
+                    .sum();
             }
+
+            if current_indices.is_empty() {
+                overlap_with_previous = 0;
+            }
+
+            current_indices.push(idx);
+            current_token_total += sentence_tokens;
+        }
+
+        if let Some(chunk) =
+            Self::finalize_chunk(&current_indices, &sentences, overlap_with_previous)
+        {
+            chunks.push(chunk);
         }
 
         chunks
+    }
+
+    fn finalize_chunk(
+        sentence_indices: &[usize],
+        sentences: &[SentenceInfo],
+        overlap_with_previous: usize,
+    ) -> Option<(String, ChunkMetadata)> {
+        if sentence_indices.is_empty() {
+            return None;
+        }
+
+        let mut text_parts: Vec<String> = Vec::with_capacity(sentence_indices.len());
+        let mut min_page: Option<usize> = None;
+        let mut max_page: Option<usize> = None;
+        let mut section_title: Option<String> = None;
+        let mut token_sum = 0usize;
+
+        for &idx in sentence_indices {
+            let sentence = sentences.get(idx)?;
+            text_parts.push(sentence.text.clone());
+            token_sum += sentence.tokens;
+
+            min_page = Some(match min_page {
+                Some(current_min) => current_min.min(sentence.page),
+                None => sentence.page,
+            });
+
+            max_page = Some(match max_page {
+                Some(current_max) => current_max.max(sentence.page),
+                None => sentence.page,
+            });
+
+            if let Some(title) = &sentence.heading {
+                section_title = Some(title.clone());
+            }
+        }
+
+        let start_index = sentences
+            .get(*sentence_indices.first()?)
+            .map(|s| s.index)
+            .unwrap_or(0);
+        let end_index = sentences
+            .get(*sentence_indices.last()?)
+            .map(|s| s.index)
+            .unwrap_or(start_index);
+
+        let mut chunk_text = text_parts.join(" ");
+        chunk_text = Self::normalize_whitespace(&chunk_text);
+
+        let mut metadata = ChunkMetadata {
+            page_range: min_page.zip(max_page),
+            sentence_range: Some((start_index, end_index)),
+            section_title,
+            token_count: token_sum,
+            overlap_with_previous,
+        };
+
+        if let Some(title) = metadata.section_title.as_mut() {
+            const MAX_TITLE_LEN: usize = 160;
+            if title.len() > MAX_TITLE_LEN {
+                title.truncate(MAX_TITLE_LEN);
+            }
+        }
+
+        if chunk_text.is_empty() {
+            return None;
+        }
+
+        Some((chunk_text, metadata))
+    }
+
+    fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
+        let splitter = Self::sentence_splitter();
+        let mut sentences: Vec<SentenceInfo> = Vec::new();
+        let mut sentence_index = 0usize;
+
+        for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
+            let page_number = page_idx + 1;
+            let mut last_heading: Option<String> = None;
+
+            for block in page_text.split("\n\n") {
+                let block = block.trim();
+                if block.is_empty() {
+                    continue;
+                }
+
+                let lines: Vec<&str> = block.lines().collect();
+                if lines.len() == 1 && Self::is_heading(lines[0]) {
+                    last_heading = Some(lines[0].trim().to_string());
+                    continue;
+                }
+
+                let mut paragraph_lines = Vec::new();
+                for line in lines {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if paragraph_lines.is_empty() && Self::is_heading(trimmed) {
+                        last_heading = Some(trimmed.to_string());
+                        continue;
+                    }
+                    paragraph_lines.push(trimmed);
+                }
+
+                if paragraph_lines.is_empty() {
+                    continue;
+                }
+
+                let normalized = Self::normalize_whitespace(&paragraph_lines.join(" "));
+                if normalized.is_empty() {
+                    continue;
+                }
+
+                let splits: Vec<&str> = splitter
+                    .split(&normalized)
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .collect();
+
+                let parts = if splits.is_empty() {
+                    vec![normalized.as_str()]
+                } else {
+                    splits
+                };
+
+                for part in parts {
+                    let tokens = Self::approximate_token_count(part);
+                    if tokens == 0 {
+                        continue;
+                    }
+                    sentences.push(SentenceInfo {
+                        text: part.to_string(),
+                        tokens,
+                        page: page_number,
+                        heading: last_heading.clone(),
+                        index: sentence_index,
+                    });
+                    sentence_index += 1;
+                }
+            }
+        }
+
+        if sentences.is_empty() {
+            let normalized = Self::normalize_whitespace(text);
+            if !normalized.is_empty() {
+                sentences.push(SentenceInfo {
+                    text: normalized.clone(),
+                    tokens: Self::approximate_token_count(&normalized),
+                    page: 1,
+                    heading: None,
+                    index: 0,
+                });
+            }
+        }
+
+        sentences
+    }
+
+    fn normalize_whitespace(value: &str) -> String {
+        value
+            .split_whitespace()
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn is_heading(line: &str) -> bool {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.len() > 120 {
+            return false;
+        }
+
+        let word_count = trimmed.split_whitespace().count();
+        if word_count == 0 || word_count > 12 {
+            return false;
+        }
+
+        let uppercase_letters = trimmed.chars().filter(|c| c.is_uppercase()).count();
+        let lowercase_letters = trimmed.chars().filter(|c| c.is_lowercase()).count();
+
+        if lowercase_letters == 0 && uppercase_letters > 0 {
+            return true;
+        }
+
+        if trimmed.ends_with(':') {
+            return true;
+        }
+
+        if word_count <= 4 && uppercase_letters >= lowercase_letters {
+            return true;
+        }
+
+        if trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+            && trimmed.contains('.')
+        {
+            return true;
+        }
+
+        false
+    }
+
+    fn approximate_token_count(value: &str) -> usize {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+
+        let char_count = trimmed.chars().count();
+        let word_count = trimmed.split_whitespace().count();
+        let char_estimate = (char_count + 3) / 4;
+        let word_estimate = ((word_count as f32) * 0.9).ceil() as usize;
+        char_estimate.max(word_estimate).max(1)
+    }
+
+    fn sentence_splitter() -> &'static Regex {
+        static SPLITTER: OnceLock<Regex> = OnceLock::new();
+        SPLITTER.get_or_init(|| {
+            Regex::new("(?ms)(?<=[.!?])\\s+(?=[A-Z0-9\"'])")
+                .expect("valid sentence splitting regex")
+        })
     }
 
     async fn save_to_disk(&self) -> Result<()> {
