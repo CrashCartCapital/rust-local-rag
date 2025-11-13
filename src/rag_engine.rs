@@ -536,9 +536,9 @@ impl RagEngine {
     fn normalize_whitespace(value: &str) -> String {
         value
             .split_whitespace()
-            .filter(|segment| !segment.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
+    }
     }
 
     fn is_heading(line: &str) -> bool {
