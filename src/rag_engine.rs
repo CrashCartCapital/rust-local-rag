@@ -509,6 +509,8 @@ impl SimpleRng {
 const NUM_HYPERPLANES: usize = 32;
 const EMBEDDING_WEIGHT: f32 = 0.7;
 const LEXICAL_WEIGHT: f32 = 0.3;
+const MAX_SINGLE_BIT_NEIGHBORS: usize = 32;
+const MAX_TOTAL_NEIGHBORS: usize = 64;
 
 struct AnnIndex {
     dim: usize,
@@ -649,20 +651,20 @@ impl AnnIndex {
         let mut neighbors = Vec::new();
 
         for i in 0..bits {
-            if neighbors.len() >= 32 {
+            if neighbors.len() >= MAX_SINGLE_BIT_NEIGHBORS {
                 break;
             }
             neighbors.push(hash ^ (1u64 << i));
         }
 
-        if neighbors.len() < 32 {
+        if neighbors.len() < MAX_SINGLE_BIT_NEIGHBORS {
             for i in 0..bits {
-                if neighbors.len() >= 64 {
+                if neighbors.len() >= MAX_TOTAL_NEIGHBORS {
                     break;
                 }
                 for j in (i + 1)..bits {
                     neighbors.push(hash ^ (1u64 << i) ^ (1u64 << j));
-                    if neighbors.len() >= 64 {
+                    if neighbors.len() >= MAX_TOTAL_NEIGHBORS {
                         break;
                     }
                 }
