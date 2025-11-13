@@ -394,16 +394,16 @@ impl RagEngine {
                 continue;
             }
 
-            let section = extract_section_heading(page_text);
             let page_number = page_idx + 1;
 
             for chunk in words.chunks(chunk_size) {
                 let chunk_text = chunk.join(" ");
                 if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
                     fragments.push(ChunkFragment {
                         text: chunk_text,
                         page_number,
-                        section: section.clone(),
+                        section,
                     });
                 }
             }
@@ -411,14 +411,14 @@ impl RagEngine {
 
         if fragments.is_empty() {
             let words: Vec<&str> = text.split_whitespace().collect();
-            let section = extract_section_heading(text);
             for chunk in words.chunks(chunk_size) {
                 let chunk_text = chunk.join(" ");
                 if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
                     fragments.push(ChunkFragment {
                         text: chunk_text,
                         page_number: 1,
-                        section: section.clone(),
+                        section,
                     });
                 }
             }
