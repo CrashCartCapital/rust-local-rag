@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::OnceLock};
+use srx::SRX;
+use std::{collections::HashMap, str::FromStr, sync::OnceLock};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -397,10 +398,10 @@ impl RagEngine {
                 None => sentence.page,
             });
 
-            if section_title.is_none() {
-                if let Some(title) = &sentence.heading {
-                    section_title = Some(title.clone());
-                }
+            if section_title.is_none()
+                && let Some(title) = &sentence.heading
+            {
+                section_title = Some(title.clone());
             }
         }
 
@@ -576,16 +577,22 @@ impl RagEngine {
 
         let char_count = trimmed.chars().count();
         let word_count = trimmed.split_whitespace().count();
-        let char_estimate = (char_count + 3) / 4;
+        let char_estimate = char_count.div_ceil(4);
         let word_estimate = ((word_count as f32) * 0.9).ceil() as usize;
         char_estimate.max(word_estimate).max(1)
     }
 
-    fn sentence_splitter() -> &'static Regex {
-        static SPLITTER: OnceLock<Regex> = OnceLock::new();
+    fn sentence_splitter() -> &'static srx::Rules {
+        static SPLITTER: OnceLock<srx::Rules> = OnceLock::new();
         SPLITTER.get_or_init(|| {
-            Regex::new("(?ms)(?<=[.!?])\\s+(?=[A-Z0-9\"'])")
-                .expect("valid sentence splitting regex")
+            // Load SRX rules from embedded segment.srx file
+            const SRX_XML: &str = include_str!("../data/segment.srx");
+            let srx = SRX::from_str(SRX_XML)
+                .expect("valid SRX rules from embedded segment.srx");
+            
+            // Use English language rules for sentence splitting
+            // This handles abbreviations like "Dr.", "Mr.", "etc." correctly
+            srx.language_rules("English")
         })
     }
 
