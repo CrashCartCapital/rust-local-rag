@@ -6,7 +6,10 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::embeddings::EmbeddingService;
+use crate::{
+    embeddings::EmbeddingService,
+    reranker::{RerankerCandidate, RerankerService},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkMetadata {
@@ -24,6 +27,10 @@ pub struct DocumentChunk {
     pub text: String,
     pub embedding: Vec<f32>,
     pub chunk_index: usize,
+    #[serde(default = "default_page_number")]
+    pub page_number: usize,
+    #[serde(default)]
+    pub section: Option<String>,
     #[serde(default)]
     pub metadata: ChunkMetadata,
 }
@@ -43,6 +50,9 @@ pub struct SearchResult {
     pub score: f32,
     pub document: String,
     pub chunk_id: String,
+    pub chunk_index: usize,
+    pub page_number: usize,
+    pub section: Option<String>,
 }
 
 pub struct RagEngine {
@@ -50,19 +60,52 @@ pub struct RagEngine {
     embedding_service: EmbeddingService,
     data_dir: String,
     needs_reindex: bool,
-    document_hashes: HashMap<String, String>,
+    reranker: Option<RerankerService>,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkFragment {
+    text: String,
+    page_number: usize,
+    section: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SearchCandidate {
+    chunk_id: String,
+    document: String,
+    text: String,
+    page_number: usize,
+    section: Option<String>,
+    chunk_index: usize,
+    initial_score: f32,
 }
 
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
+        
+        // Try to initialize reranker, but don't fail if it's unavailable
+        let reranker = match RerankerService::new().await {
+            Ok(service) => {
+                tracing::info!("Reranker service initialized successfully");
+                Some(service)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Reranker service unavailable, will fall back to embedding scores only: {}",
+                    e
+                );
+                None
+            }
+        };
 
         let mut engine = Self {
             chunks: HashMap::new(),
             embedding_service,
             data_dir: data_dir.to_string(),
             needs_reindex: false,
-            document_hashes: HashMap::new(),
+            reranker,
         };
 
         if let Err(e) = engine.load_from_disk().await {
@@ -155,21 +198,22 @@ impl RagEngine {
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
-        for (i, (chunk_text, metadata)) in chunks.into_iter().enumerate() {
-            if chunk_text.trim().len() < 10 {
+        for (i, fragment) in chunks.into_iter().enumerate() {
+            if fragment.text.trim().len() < 10 {
                 continue;
             }
 
             tracing::debug!("Generating embedding for chunk {} of {}", i + 1, filename);
-            let embedding = self.embedding_service.get_embedding(&chunk_text).await?;
+            let embedding = self.embedding_service.get_embedding(&fragment.text).await?;
 
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
-                text: chunk_text,
+                text: fragment.text,
                 embedding,
                 chunk_index: i,
-                metadata,
+                page_number: fragment.page_number,
+                section: fragment.section,
             };
 
             if let Some(index) = self.ann_index.as_mut() {
@@ -198,6 +242,7 @@ impl RagEngine {
             return Ok(vec![]);
         }
 
+        let top_k = top_k.max(1);
         tracing::debug!("Searching for: '{}'", query);
 
         let query_embedding = self.embedding_service.get_query_embedding(query).await?;
@@ -247,13 +292,104 @@ impl RagEngine {
             }
         }
 
-        results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
 
-        Ok(results
+        let candidates: Vec<SearchCandidate> = scores
             .into_iter()
-            .take(top_k)
-            .map(|(_, result)| result)
-            .collect())
+            .take(initial_k)
+            .map(|(score, chunk)| SearchCandidate {
+                chunk_id: chunk.id.clone(),
+                document: chunk.document_name.clone(),
+                text: chunk.text.clone(),
+                page_number: chunk.page_number,
+                section: chunk.section.clone(),
+                chunk_index: chunk.chunk_index,
+                initial_score: score,
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let reranker_inputs: Vec<RerankerCandidate> = candidates
+            .iter()
+            .map(|candidate| RerankerCandidate {
+                chunk_id: candidate.chunk_id.clone(),
+                document: candidate.document.clone(),
+                text: candidate.text.clone(),
+                page_number: candidate.page_number,
+                section: candidate.section.clone(),
+                initial_score: candidate.initial_score,
+            })
+            .collect();
+
+        let reranked = match &self.reranker {
+            Some(reranker) => match reranker.rerank(query, &reranker_inputs).await {
+                Ok(results) => results,
+                Err(err) => {
+                    tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+                    Vec::new()
+                }
+            },
+            None => {
+                tracing::debug!("Reranker not available, using embedding scores only");
+                Vec::new()
+            }
+        };
+
+        let mut ordered_results = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        if !reranked.is_empty() {
+            for result in reranked {
+                if let Some(candidate) = candidate_map.get(&result.chunk_id)
+                    && seen.insert(result.chunk_id.clone()) {
+                        ordered_results.push(SearchResult {
+                            text: candidate.text.clone(),
+                            score: result.relevance,
+                            document: candidate.document.clone(),
+                            chunk_id: candidate.chunk_id.clone(),
+                            chunk_index: candidate.chunk_index,
+                            page_number: candidate.page_number,
+                            section: candidate.section.clone(),
+                        });
+                    }
+
+                if ordered_results.len() == top_k {
+                    break;
+                }
+            }
+        }
+
+        if ordered_results.len() < top_k {
+            let mut fallback_candidates: Vec<_> = candidate_map.values().collect();
+            fallback_candidates.sort_by(|a, b| {
+                b.initial_score
+                    .partial_cmp(&a.initial_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for candidate in fallback_candidates {
+                if ordered_results.len() == top_k {
+                    break;
+                }
+
+                if seen.insert(candidate.chunk_id.clone()) {
+                    ordered_results.push(SearchResult {
+                        text: candidate.text.clone(),
+                        score: candidate.initial_score,
+                        document: candidate.document.clone(),
+                        chunk_id: candidate.chunk_id.clone(),
+                        chunk_index: candidate.chunk_index,
+                        page_number: candidate.page_number,
+                        section: candidate.section.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(ordered_results)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
@@ -395,66 +531,42 @@ impl RagEngine {
         }
     }
 
-    fn chunk_text(&self, text: &str) -> Vec<(String, ChunkMetadata)> {
-        let sentences = Self::extract_sentences(text);
-        if sentences.is_empty() {
-            return Vec::new();
-        }
+    fn chunk_text(&self, text: &str, chunk_size: usize) -> Vec<ChunkFragment> {
+        let mut fragments = Vec::new();
 
-        let total_tokens: usize = sentences.iter().map(|s| s.tokens).sum();
-        let max_tokens_per_chunk = 800usize;
-        let min_tokens_per_chunk = 120usize;
-
-        let estimated_chunks = ((total_tokens as f32) / (max_tokens_per_chunk as f32))
-            .ceil()
-            .max(1.0) as usize;
-
-        let mut target_tokens =
-            (total_tokens as f32 / estimated_chunks as f32).ceil() as usize;
-        target_tokens = target_tokens.clamp(min_tokens_per_chunk, max_tokens_per_chunk);
-
-        let mut overlap_tokens = (target_tokens as f32 * 0.2).round() as usize;
-        if overlap_tokens == 0 {
-            overlap_tokens = 20;
-        }
-        overlap_tokens = overlap_tokens.min(target_tokens.saturating_sub(1));
-
-        let mut chunks: Vec<(String, ChunkMetadata)> = Vec::new();
-        let mut current_indices: Vec<usize> = Vec::new();
-        let mut current_token_total = 0usize;
-        let mut overlap_with_previous = 0usize;
-
-        for (idx, sentence) in sentences.iter().enumerate() {
-            let sentence_tokens = sentence.tokens.max(1);
-            if !current_indices.is_empty() && current_token_total + sentence_tokens > target_tokens
-            {
-                if let Some(chunk) =
-                    Self::finalize_chunk(&current_indices, &sentences, overlap_with_previous)
-                {
-                    chunks.push(chunk);
-                }
-
-                let mut new_indices = Vec::new();
-                let mut carried_tokens = 0usize;
-                for &rev_idx in current_indices.iter().rev() {
-                    let tokens = sentences[rev_idx].tokens.max(1);
-                    if carried_tokens + tokens > overlap_tokens {
-                        break;
-                    }
-                    new_indices.push(rev_idx);
-                    carried_tokens += tokens;
-                }
-                new_indices.reverse();
-                overlap_with_previous = carried_tokens;
-                current_indices = new_indices;
-                current_token_total = current_indices
-                    .iter()
-                    .map(|&i| sentences[i].tokens.max(1))
-                    .sum();
+        for (page_idx, page_text) in text.split('\u{c}').enumerate() {
+            let words: Vec<&str> = page_text.split_whitespace().collect();
+            if words.is_empty() {
+                continue;
             }
 
-            if current_indices.is_empty() {
-                overlap_with_previous = 0;
+            let page_number = page_idx + 1;
+
+            for chunk in words.chunks(chunk_size) {
+                let chunk_text = chunk.join(" ");
+                if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
+                    fragments.push(ChunkFragment {
+                        text: chunk_text,
+                        page_number,
+                        section,
+                    });
+                }
+            }
+        }
+
+        if fragments.is_empty() {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            for chunk in words.chunks(chunk_size) {
+                let chunk_text = chunk.join(" ");
+                if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
+                    fragments.push(ChunkFragment {
+                        text: chunk_text,
+                        page_number: 1,
+                        section,
+                    });
+                }
             }
 
             current_indices.push(idx);
@@ -467,7 +579,7 @@ impl RagEngine {
             chunks.push(chunk);
         }
 
-        chunks
+        fragments
     }
 
     fn finalize_chunk(
@@ -710,7 +822,7 @@ impl RagEngine {
 
         let path = format!("{}/chunks.json", self.data_dir);
         let state = PersistedState {
-            version: 1,
+            version: 2,
             model: self.embedding_service.model_name(),
             chunks: &self.chunks,
             needs_reindex: self.needs_reindex,
@@ -729,8 +841,7 @@ impl RagEngine {
             let data = tokio::fs::read_to_string(path).await?;
             #[derive(Deserialize)]
             struct PersistedState {
-                #[serde(rename = "version")]
-                _version: u32,
+                version: u32,
                 model: String,
                 chunks: HashMap<String, DocumentChunk>,
                 #[serde(default)]
@@ -741,11 +852,10 @@ impl RagEngine {
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(PersistedState {
+                    version,
                     model,
                     chunks,
                     needs_reindex,
-                    document_hashes,
-                    ..
                 }) => {
                     if model != self.embedding_service.model_name() {
                         tracing::warn!(
@@ -757,6 +867,14 @@ impl RagEngine {
                         self.needs_reindex = true;
                         self.lexical_index.clear();
                         self.ann_index = None;
+                        self.save_to_disk().await?;
+                    } else if version < 2 {
+                        tracing::info!(
+                            "Chunk metadata version {} is outdated. Marking for reindex to capture provenance data.",
+                            version
+                        );
+                        self.chunks.clear();
+                        self.needs_reindex = true;
                         self.save_to_disk().await?;
                     } else {
                         self.chunks = chunks;
@@ -779,7 +897,7 @@ impl RagEngine {
                         .context("Failed to parse legacy chunks.json")?;
                     if !legacy_chunks.is_empty() {
                         tracing::warn!(
-                            "Existing embeddings were created before model tracking was added. Reindexing with model '{}' is required.",
+                            "Existing embeddings were created before provenance metadata was tracked. Reindexing with model '{}' is required.",
                             self.embedding_service.model_name()
                         );
                         tracing::info!(
@@ -801,6 +919,51 @@ impl RagEngine {
         let hash = Sha256::digest(data);
         format!("{:x}", hash)
     }
+}
+
+/// Extracts a section heading from page text.
+///
+/// This function scans the provided text line by line to find a suitable heading.
+/// It returns the first line that meets all of the following criteria:
+/// - Non-empty after trimming whitespace
+/// - Not purely numeric (contains at least one non-digit character)
+/// - Contains at least 3 alphabetic characters
+///
+/// The returned heading is truncated to a maximum of 120 characters.
+///
+/// # Arguments
+///
+/// * `text` - The text content to extract a heading from
+///
+/// # Returns
+///
+/// * `Some(String)` - The extracted heading (up to 120 characters) if found
+/// * `None` - If no suitable heading is found in the text
+fn extract_section_heading(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        let alphabetic_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+        if alphabetic_count < 3 {
+            continue;
+        }
+
+        let truncated: String = trimmed.chars().take(120).collect();
+        return Some(truncated);
+    }
+
+    None
+}
+
+fn default_page_number() -> usize {
+    0
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
