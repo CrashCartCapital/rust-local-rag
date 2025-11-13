@@ -533,7 +533,6 @@ impl RagEngine {
             .collect::<Vec<_>>()
             .join(" ")
     }
-    }
 
     fn is_heading(line: &str) -> bool {
         let trimmed = line.trim();
