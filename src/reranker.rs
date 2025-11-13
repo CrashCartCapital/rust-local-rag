@@ -134,11 +134,10 @@ impl RerankerService {
             }
         );
 
-        if let Some(section) = &candidate.section {
-            if !section.trim().is_empty() {
+        if let Some(section) = &candidate.section
+            && !section.trim().is_empty() {
                 prompt.push_str(&format!("Section heading: {}\n", section.trim()));
             }
-        }
 
         prompt.push_str("\nChunk:\n");
         prompt.push_str(candidate.text.trim());
