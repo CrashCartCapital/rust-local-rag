@@ -38,7 +38,7 @@ pub struct RagEngine {
     embedding_service: EmbeddingService,
     data_dir: String,
     needs_reindex: bool,
-    reranker: RerankerService,
+    reranker: Option<RerankerService>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +62,21 @@ struct SearchCandidate {
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
-        let reranker = RerankerService::new().await?;
+        
+        // Try to initialize reranker, but don't fail if it's unavailable
+        let reranker = match RerankerService::new().await {
+            Ok(service) => {
+                tracing::info!("Reranker service initialized successfully");
+                Some(service)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Reranker service unavailable, will fall back to embedding scores only: {}",
+                    e
+                );
+                None
+            }
+        };
 
         let mut engine = Self {
             chunks: HashMap::new(),
@@ -186,15 +200,16 @@ impl RagEngine {
             })
             .collect();
 
-        let mut candidate_map: HashMap<String, SearchCandidate> = HashMap::new();
-        for candidate in candidates {
-            candidate_map.insert(candidate.chunk_id.clone(), candidate);
-        }
-
-        let reranked = match self.reranker.rerank(query, &reranker_inputs).await {
-            Ok(results) => results,
-            Err(err) => {
-                tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+        let reranked = match &self.reranker {
+            Some(reranker) => match reranker.rerank(query, &reranker_inputs).await {
+                Ok(results) => results,
+                Err(err) => {
+                    tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+                    Vec::new()
+                }
+            },
+            None => {
+                tracing::debug!("Reranker not available, using embedding scores only");
                 Vec::new()
             }
         };
@@ -204,8 +219,8 @@ impl RagEngine {
 
         if !reranked.is_empty() {
             for result in reranked {
-                if let Some(candidate) = candidate_map.get(&result.chunk_id) {
-                    if seen.insert(result.chunk_id.clone()) {
+                if let Some(candidate) = candidate_map.get(&result.chunk_id)
+                    && seen.insert(result.chunk_id.clone()) {
                         ordered_results.push(SearchResult {
                             text: candidate.text.clone(),
                             score: result.relevance,
@@ -216,7 +231,6 @@ impl RagEngine {
                             section: candidate.section.clone(),
                         });
                     }
-                }
 
                 if ordered_results.len() == top_k {
                     break;

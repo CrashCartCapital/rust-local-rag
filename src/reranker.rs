@@ -3,12 +3,19 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
+/// Represents a candidate chunk for reranking, containing metadata and initial retrieval score.
 pub struct RerankerCandidate {
+    /// Unique identifier for the chunk.
     pub chunk_id: String,
+    /// Name or identifier of the source document.
     pub document: String,
+    /// The text content of the chunk.
     pub text: String,
+    /// The page number in the source document where the chunk is located.
     pub page_number: usize,
+    /// The section name or identifier within the document, if available.
     pub section: Option<String>,
+    /// Embedding similarity score from the first-stage retrieval.
     pub initial_score: f32,
 }
 
@@ -129,6 +136,7 @@ impl RerankerService {
             })
             .collect();
 
+        reranked.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
         reranked.sort_by(|a, b| {
             b.relevance
                 .partial_cmp(&a.relevance)
@@ -181,11 +189,10 @@ impl RerankerService {
             }
         );
 
-        if let Some(section) = &candidate.section {
-            if !section.trim().is_empty() {
+        if let Some(section) = &candidate.section
+            && !section.trim().is_empty() {
                 prompt.push_str(&format!("Section heading: {}\n", section.trim()));
             }
-        }
 
         prompt.push_str("\nChunk:\n");
         prompt.push_str(candidate.text.trim());
