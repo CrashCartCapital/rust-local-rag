@@ -129,15 +129,15 @@ impl RagEngine {
 
         let query_embedding = self.embedding_service.get_embedding(query).await?;
 
-        let ann_candidates: Vec<String> = match &self.ann_index {
-            Some(index) => index.search(&query_embedding, top_k.saturating_mul(5)),
-            None => self.chunks.keys().cloned().collect(),
+        let ann_candidate_iter = match &self.ann_index {
+            Some(index) => Box::new(index.search(&query_embedding, top_k.saturating_mul(5)).into_iter()) as Box<dyn Iterator<Item = String>>,
+            None => Box::new(self.chunks.keys().cloned()) as Box<dyn Iterator<Item = String>>,
         };
 
         let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
-        let mut candidate_ids: HashSet<String> = ann_candidates.into_iter().collect();
+        let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
         candidate_ids.extend(lexical_map.keys().cloned());
 
         if candidate_ids.is_empty() {
