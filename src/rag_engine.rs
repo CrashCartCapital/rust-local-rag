@@ -565,13 +565,8 @@ impl RagEngine {
             return true;
         }
 
-        if trimmed
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_digit())
-            .unwrap_or(false)
-            && trimmed.contains('.')
-        {
+        // Refined: match lines starting with digit(s), dot, and whitespace (e.g., "1. Introduction")
+        if Regex::new(r"^\d+\.\s").unwrap().is_match(trimmed) {
             return true;
         }
 
