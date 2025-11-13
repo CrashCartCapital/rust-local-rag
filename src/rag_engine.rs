@@ -527,6 +527,13 @@ impl AnnIndex {
             for _ in 0..dim {
                 plane.push(rng.next());
             }
+            // Normalize the hyperplane to unit length
+            let magnitude = plane.iter().map(|&x| x * x).sum::<f32>().sqrt();
+            if magnitude > 0.0 {
+                for val in &mut plane {
+                    *val /= magnitude;
+                }
+            }
             hyperplanes.push(plane);
         }
 
