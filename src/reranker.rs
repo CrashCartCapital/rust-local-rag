@@ -43,6 +43,22 @@ pub struct RerankerService {
 }
 
 impl RerankerService {
+    /// Creates a new reranker service backed by Ollama.
+    /// 
+    /// This method initializes the service, validates the connection to Ollama,
+    /// and verifies that the specified model is available.
+    /// 
+    /// # Configuration
+    /// 
+    /// The service is configured via environment variables:
+    /// * `OLLAMA_URL` - The Ollama API endpoint (default: `http://localhost:11434`)
+    /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `llama3.1`)
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if:
+    /// * Cannot connect to Ollama at the configured URL
+    /// * The specified model is not available (not pulled)
     pub async fn new() -> Result<Self> {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
