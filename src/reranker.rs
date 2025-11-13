@@ -12,7 +12,7 @@ pub struct RerankerCandidate {
 }
 
 /// Represents the result of reranking a candidate chunk using an LLM.
-/// 
+///
 /// The `relevance` field is the LLM-based reranking score (from 0.0 to 1.0),
 /// which differs from the embedding similarity score.
 pub struct RerankedResult {
@@ -163,6 +163,7 @@ impl RerankerService {
         }
 
         number
+            .trim()
             .parse::<f32>()
             .ok()
             .map(|score| score.clamp(0.0, 1.0))
