@@ -516,6 +516,24 @@ impl RagEngine {
     }
 }
 
+/// Extracts a section heading from page text.
+///
+/// This function scans the provided text line by line to find a suitable heading.
+/// It returns the first line that meets all of the following criteria:
+/// - Non-empty after trimming whitespace
+/// - Not purely numeric (contains at least one non-digit character)
+/// - Contains at least 3 alphabetic characters
+///
+/// The returned heading is truncated to a maximum of 120 characters.
+///
+/// # Arguments
+///
+/// * `text` - The text content to extract a heading from
+///
+/// # Returns
+///
+/// * `Some(String)` - The extracted heading (up to 120 characters) if found
+/// * `None` - If no suitable heading is found in the text
 fn extract_section_heading(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
