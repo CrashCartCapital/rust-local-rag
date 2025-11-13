@@ -1,6 +1,7 @@
 use anyhow::Result;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use tokio::sync::RwLock;
 
 #[derive(Serialize)]
@@ -22,7 +23,7 @@ pub struct EmbeddingService {
     client: reqwest::Client,
     ollama_url: String,
     model: String,
-    query_cache: RwLock<HashMap<String, Vec<f32>>>,
+    query_cache: RwLock<LruCache<String, Vec<f32>>>,
 }
 
 impl EmbeddingService {
@@ -39,7 +40,7 @@ impl EmbeddingService {
             client: reqwest::Client::new(),
             ollama_url,
             model,
-            query_cache: RwLock::new(HashMap::new()),
+            query_cache: RwLock::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
         };
 
         service.test_connection().await?;
@@ -79,7 +80,7 @@ impl EmbeddingService {
     }
 
     pub async fn get_query_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        if let Some(cached) = self.query_cache.read().await.get(text) {
+        if let Some(cached) = self.query_cache.write().await.get(text) {
             return Ok(cached.clone());
         }
 
@@ -87,7 +88,7 @@ impl EmbeddingService {
         self.query_cache
             .write()
             .await
-            .insert(text.to_string(), embedding.clone());
+            .put(text.to_string(), embedding.clone());
         Ok(embedding)
     }
 
