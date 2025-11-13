@@ -153,7 +153,7 @@ impl RagEngine {
             })
             .collect();
 
-        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
 
         let mut candidates: Vec<SearchCandidate> = scores
