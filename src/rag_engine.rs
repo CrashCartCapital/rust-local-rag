@@ -404,8 +404,10 @@ impl RagEngine {
                 None => sentence.page,
             });
 
-            if let Some(title) = &sentence.heading {
-                section_title = Some(title.clone());
+            if section_title.is_none() {
+                if let Some(title) = &sentence.heading {
+                    section_title = Some(title.clone());
+                }
             }
         }
 
