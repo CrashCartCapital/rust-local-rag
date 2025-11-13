@@ -498,7 +498,7 @@ impl SimpleRng {
     fn next(&mut self) -> f32 {
         self.state = self
             .state
-            .wrapping_mul(636_413_622_384_679_3005)
+            .wrapping_mul(6364136223846793005)
             .wrapping_add(1);
         let bits = (self.state >> 32) as u32;
         let value = bits as f32 / u32::MAX as f32;
