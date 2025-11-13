@@ -44,12 +44,24 @@ impl RagMcpServer {
                         .iter()
                         .enumerate()
                         .map(|(i, result)| {
+                            let provenance = if result.page_number > 0 {
+                                format!("{} (page {})", result.document, result.page_number)
+                            } else {
+                                result.document.clone()
+                            };
+                            let section = result
+                                .section
+                                .as_ref()
+                                .map(|s| format!("Section: {}\n", s))
+                                .unwrap_or_default();
                             format!(
-                                "**Result {}** (Score: {:.3}) [{}] (Chunk: {})\n{}\n",
+                                "**Result {}** (Relevance: {:.3}) [{}] (Chunk: {} / idx {})\n{}{}\n",
                                 i + 1,
                                 result.score,
-                                result.document,
+                                provenance,
                                 result.chunk_id,
+                                result.chunk_index,
+                                section,
                                 result.text
                             )
                         })

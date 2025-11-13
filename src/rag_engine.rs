@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::embeddings::EmbeddingService;
+use crate::{
+    embeddings::EmbeddingService,
+    reranker::{RerankerCandidate, RerankerService},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChunk {
@@ -13,6 +16,10 @@ pub struct DocumentChunk {
     pub text: String,
     pub embedding: Vec<f32>,
     pub chunk_index: usize,
+    #[serde(default = "default_page_number")]
+    pub page_number: usize,
+    #[serde(default)]
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +28,9 @@ pub struct SearchResult {
     pub score: f32,
     pub document: String,
     pub chunk_id: String,
+    pub chunk_index: usize,
+    pub page_number: usize,
+    pub section: Option<String>,
 }
 
 pub struct RagEngine {
@@ -28,17 +38,38 @@ pub struct RagEngine {
     embedding_service: EmbeddingService,
     data_dir: String,
     needs_reindex: bool,
+    reranker: RerankerService,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkFragment {
+    text: String,
+    page_number: usize,
+    section: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SearchCandidate {
+    chunk_id: String,
+    document: String,
+    text: String,
+    page_number: usize,
+    section: Option<String>,
+    chunk_index: usize,
+    initial_score: f32,
 }
 
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
+        let reranker = RerankerService::new().await?;
 
         let mut engine = Self {
             chunks: HashMap::new(),
             embedding_service,
             data_dir: data_dir.to_string(),
             needs_reindex: false,
+            reranker,
         };
 
         if let Err(e) = engine.load_from_disk().await {
@@ -71,20 +102,22 @@ impl RagEngine {
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
-        for (i, chunk_text) in chunks.into_iter().enumerate() {
-            if chunk_text.trim().len() < 10 {
+        for (i, fragment) in chunks.into_iter().enumerate() {
+            if fragment.text.trim().len() < 10 {
                 continue;
             }
 
             tracing::debug!("Generating embedding for chunk {} of {}", i + 1, filename);
-            let embedding = self.embedding_service.get_embedding(&chunk_text).await?;
+            let embedding = self.embedding_service.get_embedding(&fragment.text).await?;
 
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
-                text: chunk_text,
+                text: fragment.text,
                 embedding,
                 chunk_index: i,
+                page_number: fragment.page_number,
+                section: fragment.section,
             };
 
             self.chunks.insert(chunk.id.clone(), chunk);
@@ -106,6 +139,7 @@ impl RagEngine {
             return Ok(vec![]);
         }
 
+        let top_k = top_k.max(1);
         tracing::debug!("Searching for: '{}'", query);
 
         let query_embedding = self.embedding_service.get_embedding(query).await?;
@@ -120,17 +154,98 @@ impl RagEngine {
             .collect();
 
         scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
 
-        Ok(scores
+        let mut candidates: Vec<SearchCandidate> = scores
             .into_iter()
-            .take(top_k)
-            .map(|(score, chunk)| SearchResult {
-                text: chunk.text.clone(),
-                score,
-                document: chunk.document_name.clone(),
+            .take(initial_k)
+            .map(|(score, chunk)| SearchCandidate {
                 chunk_id: chunk.id.clone(),
+                document: chunk.document_name.clone(),
+                text: chunk.text.clone(),
+                page_number: chunk.page_number,
+                section: chunk.section.clone(),
+                chunk_index: chunk.chunk_index,
+                initial_score: score,
             })
-            .collect())
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut candidate_map: HashMap<String, SearchCandidate> = HashMap::new();
+        for candidate in candidates.clone() {
+            candidate_map.insert(candidate.chunk_id.clone(), candidate);
+        }
+
+        let reranker_inputs: Vec<RerankerCandidate> = candidates
+            .iter()
+            .map(|candidate| RerankerCandidate {
+                chunk_id: candidate.chunk_id.clone(),
+                document: candidate.document.clone(),
+                text: candidate.text.clone(),
+                page_number: candidate.page_number,
+                section: candidate.section.clone(),
+                initial_score: candidate.initial_score,
+            })
+            .collect();
+
+        let reranked = match self.reranker.rerank(query, &reranker_inputs).await {
+            Ok(results) => results,
+            Err(err) => {
+                tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+                Vec::new()
+            }
+        };
+
+        let mut ordered_results = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        if !reranked.is_empty() {
+            for result in reranked {
+                if let Some(candidate) = candidate_map.get(&result.chunk_id) {
+                    if seen.insert(result.chunk_id.clone()) {
+                        ordered_results.push(SearchResult {
+                            text: candidate.text.clone(),
+                            score: result.relevance,
+                            document: candidate.document.clone(),
+                            chunk_id: candidate.chunk_id.clone(),
+                            chunk_index: candidate.chunk_index,
+                            page_number: candidate.page_number,
+                            section: candidate.section.clone(),
+                        });
+                    }
+                }
+
+                if ordered_results.len() == top_k {
+                    break;
+                }
+            }
+        }
+
+        if ordered_results.len() < top_k {
+            candidates.sort_by(|a, b| b.initial_score.partial_cmp(&a.initial_score).unwrap());
+            for candidate in candidates {
+                if ordered_results.len() == top_k {
+                    break;
+                }
+
+                if seen.insert(candidate.chunk_id.clone()) {
+                    ordered_results.push(SearchResult {
+                        text: candidate.text.clone(),
+                        score: candidate.initial_score,
+                        document: candidate.document.clone(),
+                        chunk_id: candidate.chunk_id.clone(),
+                        chunk_index: candidate.chunk_index,
+                        page_number: candidate.page_number,
+                        section: candidate.section.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(ordered_results)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
@@ -270,18 +385,46 @@ impl RagEngine {
         }
     }
 
-    fn chunk_text(&self, text: &str, chunk_size: usize) -> Vec<String> {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let mut chunks = Vec::new();
+    fn chunk_text(&self, text: &str, chunk_size: usize) -> Vec<ChunkFragment> {
+        let mut fragments = Vec::new();
 
-        for chunk in words.chunks(chunk_size) {
-            let chunk_text = chunk.join(" ");
-            if !chunk_text.trim().is_empty() {
-                chunks.push(chunk_text);
+        for (page_idx, page_text) in text.split('\u{c}').enumerate() {
+            let words: Vec<&str> = page_text.split_whitespace().collect();
+            if words.is_empty() {
+                continue;
+            }
+
+            let section = extract_section_heading(page_text);
+            let page_number = page_idx + 1;
+
+            for chunk in words.chunks(chunk_size) {
+                let chunk_text = chunk.join(" ");
+                if !chunk_text.trim().is_empty() {
+                    fragments.push(ChunkFragment {
+                        text: chunk_text,
+                        page_number,
+                        section: section.clone(),
+                    });
+                }
             }
         }
 
-        chunks
+        if fragments.is_empty() {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let section = extract_section_heading(text);
+            for chunk in words.chunks(chunk_size) {
+                let chunk_text = chunk.join(" ");
+                if !chunk_text.trim().is_empty() {
+                    fragments.push(ChunkFragment {
+                        text: chunk_text,
+                        page_number: 1,
+                        section: section.clone(),
+                    });
+                }
+            }
+        }
+
+        fragments
     }
 
     async fn save_to_disk(&self) -> Result<()> {
@@ -295,7 +438,7 @@ impl RagEngine {
 
         let path = format!("{}/chunks.json", self.data_dir);
         let state = PersistedState {
-            version: 1,
+            version: 2,
             model: self.embedding_service.model_name(),
             chunks: &self.chunks,
             needs_reindex: self.needs_reindex,
@@ -313,8 +456,7 @@ impl RagEngine {
             let data = tokio::fs::read_to_string(path).await?;
             #[derive(Deserialize)]
             struct PersistedState {
-                #[serde(rename = "version")]
-                _version: u32,
+                version: u32,
                 model: String,
                 chunks: HashMap<String, DocumentChunk>,
                 #[serde(default)]
@@ -323,16 +465,24 @@ impl RagEngine {
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(PersistedState {
+                    version,
                     model,
                     chunks,
                     needs_reindex,
-                    ..
                 }) => {
                     if model != self.embedding_service.model_name() {
                         tracing::warn!(
                             "Embedding model changed from '{}' to '{}'. Existing embeddings will be reindexed.",
                             model,
                             self.embedding_service.model_name()
+                        );
+                        self.chunks.clear();
+                        self.needs_reindex = true;
+                        self.save_to_disk().await?;
+                    } else if version < 2 {
+                        tracing::info!(
+                            "Chunk metadata version {} is outdated. Marking for reindex to capture provenance data.",
+                            version
                         );
                         self.chunks.clear();
                         self.needs_reindex = true;
@@ -348,7 +498,7 @@ impl RagEngine {
                         .context("Failed to parse legacy chunks.json")?;
                     if !legacy_chunks.is_empty() {
                         tracing::warn!(
-                            "Existing embeddings were created before model tracking was added. Reindexing with model '{}' is required.",
+                            "Existing embeddings were created before provenance metadata was tracked. Reindexing with model '{}' is required.",
                             self.embedding_service.model_name()
                         );
                         tracing::info!(
@@ -364,6 +514,33 @@ impl RagEngine {
         }
         Ok(())
     }
+}
+
+fn extract_section_heading(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        let alphabetic_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+        if alphabetic_count < 3 {
+            continue;
+        }
+
+        let truncated: String = trimmed.chars().take(120).collect();
+        return Some(truncated);
+    }
+
+    None
+}
+
+fn default_page_number() -> usize {
+    0
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

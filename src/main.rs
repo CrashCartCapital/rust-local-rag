@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 mod embeddings;
 mod mcp_server;
 mod rag_engine;
+mod reranker;
 
 use rag_engine::RagEngine;
 
