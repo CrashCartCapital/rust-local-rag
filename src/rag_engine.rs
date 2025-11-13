@@ -175,7 +175,7 @@ impl RagEngine {
         }
 
         let mut candidate_map: HashMap<String, SearchCandidate> = HashMap::new();
-        for candidate in candidates.clone() {
+        for candidate in candidates {
             candidate_map.insert(candidate.chunk_id.clone(), candidate);
         }
 
