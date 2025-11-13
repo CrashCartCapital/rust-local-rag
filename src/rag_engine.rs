@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -82,7 +83,7 @@ impl RagEngine {
         let chunks = self.chunk_text(&text, 500);
         tracing::info!("Created {} chunks for {}", chunks.len(), filename);
 
-        let mut filtered_chunks: Vec<(usize, String)> = chunks
+        let filtered_chunks: Vec<(usize, String)> = chunks
             .into_iter()
             .enumerate()
             .filter_map(|(i, chunk_text)| {
@@ -442,16 +443,8 @@ impl RagEngine {
     }
 
     fn compute_document_hash(data: &[u8]) -> String {
-        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
-
-        let mut hash = FNV_OFFSET_BASIS;
-        for byte in data {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-
-        format!("{:016x}", hash)
+        let hash = Sha256::digest(data);
+        format!("{:x}", hash)
     }
 }
 
