@@ -816,7 +816,7 @@ impl LexicalIndex {
         }
 
         let mut results: Vec<(String, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if limit > 0 && results.len() > limit {
             results.truncate(limit);
         }
