@@ -406,13 +406,9 @@ impl RagEngine {
                         self.chunks = chunks;
                         self.needs_reindex = needs_reindex;
                         self.document_hashes = document_hashes;
-                        let existing_docs: HashSet<String> = self
-                            .chunks
-                            .values()
-                            .map(|chunk| chunk.document_name.clone())
-                            .collect();
-                        self.document_hashes
-                            .retain(|doc, _| existing_docs.contains(doc));
+                        // Do not filter document_hashes based on existing_docs.
+                        // This preserves hashes for documents that have zero chunks due to filtering.
+                        // If you need to clean up hashes for deleted documents, implement that logic separately.
                         if self.document_hashes.is_empty() && !self.chunks.is_empty() {
                             tracing::info!(
                                 "No document fingerprints found in cache. Existing documents will be reindexed to initialize change detection."
