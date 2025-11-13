@@ -86,7 +86,7 @@ impl RerankerService {
             });
         }
 
-        reranked.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap());
+        reranked.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
         Ok(reranked)
     }
 
