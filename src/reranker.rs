@@ -60,6 +60,20 @@ impl RerankerService {
         Ok(service)
     }
 
+    /// Performs second-stage reranking of search candidates using an LLM.
+    ///
+    /// This method scores each candidate's relevance to the query using an LLM,
+    /// sorts the results by relevance score (highest first), and gracefully falls
+    /// back to the initial embedding score if LLM scoring fails for any candidate.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query to evaluate candidates against
+    /// * `candidates` - The list of candidates to rerank
+    ///
+    /// # Returns
+    ///
+    /// A vector of reranked results sorted by relevance score in descending order
     pub async fn rerank(
         &self,
         query: &str,
