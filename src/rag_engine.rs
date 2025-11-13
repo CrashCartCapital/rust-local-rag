@@ -170,7 +170,7 @@ impl RagEngine {
         scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
 
-        let mut candidates: Vec<SearchCandidate> = scores
+        let candidates: Vec<SearchCandidate> = scores
             .into_iter()
             .take(initial_k)
             .map(|(score, chunk)| SearchCandidate {
@@ -186,11 +186,6 @@ impl RagEngine {
 
         if candidates.is_empty() {
             return Ok(vec![]);
-        }
-
-        let mut candidate_map: HashMap<String, SearchCandidate> = HashMap::new();
-        for candidate in candidates {
-            candidate_map.insert(candidate.chunk_id.clone(), candidate);
         }
 
         let reranker_inputs: Vec<RerankerCandidate> = candidates
@@ -244,12 +239,13 @@ impl RagEngine {
         }
 
         if ordered_results.len() < top_k {
-            candidates.sort_by(|a, b| {
+            let mut fallback_candidates: Vec<_> = candidate_map.values().collect();
+            fallback_candidates.sort_by(|a, b| {
                 b.initial_score
                     .partial_cmp(&a.initial_score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            for candidate in candidates {
+            for candidate in fallback_candidates {
                 if ordered_results.len() == top_k {
                     break;
                 }

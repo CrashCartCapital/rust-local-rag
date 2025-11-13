@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -102,26 +103,38 @@ impl RerankerService {
         query: &str,
         candidates: &[RerankerCandidate],
     ) -> Result<Vec<RerankedResult>> {
-        let mut reranked = Vec::with_capacity(candidates.len());
+        // Create futures for scoring all candidates concurrently
+        let score_futures: Vec<_> = candidates
+            .iter()
+            .map(|candidate| self.score_candidate(query, candidate))
+            .collect();
 
-        for candidate in candidates {
-            let score = match self.score_candidate(query, candidate).await {
-                Ok(score) => score,
-                Err(err) => {
-                    tracing::warn!(
-                        "Falling back to embedding score for chunk {}: {}",
-                        candidate.chunk_id,
-                        err
-                    );
-                    candidate.initial_score
+        // Execute all scoring requests concurrently
+        let scores = join_all(score_futures).await;
+
+        // Build results, falling back to initial score on error
+        let mut reranked: Vec<RerankedResult> = candidates
+            .iter()
+            .zip(scores.into_iter())
+            .map(|(candidate, score_result)| {
+                let score = match score_result {
+                    Ok(score) => score,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Falling back to embedding score for chunk {}: {}",
+                            candidate.chunk_id,
+                            err
+                        );
+                        candidate.initial_score
+                    }
+                };
+                
+                RerankedResult {
+                    chunk_id: candidate.chunk_id.clone(),
+                    relevance: score,
                 }
-            };
-
-            reranked.push(RerankedResult {
-                chunk_id: candidate.chunk_id.clone(),
-                relevance: score,
-            });
-        }
+            })
+            .collect();
 
         reranked.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
         reranked.sort_by(|a, b| {
