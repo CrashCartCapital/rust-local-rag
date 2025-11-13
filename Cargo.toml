@@ -33,5 +33,4 @@ tracing-subscriber = { version = "0.3", features = [
 uuid = { version = "1.17", features = ["v4"] }
 walkdir = "2.5"
 dotenv = "0.15"
-regex = "1.10"
-srx = { version = "0.1.4", features = ["from_xml"] }
+sha2 = "0.10"
