@@ -225,7 +225,7 @@ impl RagEngine {
         }
 
         if ordered_results.len() < top_k {
-            candidates.sort_by(|a, b| b.initial_score.partial_cmp(&a.initial_score).unwrap());
+            candidates.sort_by(|a, b| b.initial_score.partial_cmp(&a.initial_score).unwrap_or(std::cmp::Ordering::Equal));
             for candidate in candidates {
                 if ordered_results.len() == top_k {
                     break;
