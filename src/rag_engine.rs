@@ -133,7 +133,7 @@ impl RagEngine {
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
-        for ((i, chunk_text), embedding) in filtered_chunks.drain(..).zip(embeddings.into_iter()) {
+        for ((i, chunk_text), embedding) in filtered_chunks.into_iter().zip(embeddings.into_iter()) {
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
