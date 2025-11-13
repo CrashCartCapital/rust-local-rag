@@ -779,10 +779,6 @@ impl LexicalIndex {
             self.total_length as f32 / self.total_docs as f32
         };
 
-        if avg_doc_len == 0.0 {
-            return Vec::new();
-        }
-
         let k1 = 1.5_f32;
         let b = 0.75_f32;
         let mut scores: HashMap<String, f32> = HashMap::new();
