@@ -11,8 +11,15 @@ pub struct RerankerCandidate {
     pub initial_score: f32,
 }
 
+/// Represents the result of reranking a candidate chunk using an LLM.
+/// 
+/// The `relevance` field is the LLM-based reranking score (from 0.0 to 1.0),
+/// which differs from the embedding similarity score.
 pub struct RerankedResult {
+    /// The identifier of the chunk that was reranked.
     pub chunk_id: String,
+    /// The LLM-based relevance score (0.0 to 1.0) assigned during reranking.
+    /// This is distinct from the embedding similarity score.
     pub relevance: f32,
 }
 
