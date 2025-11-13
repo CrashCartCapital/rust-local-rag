@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -82,7 +83,7 @@ impl RagEngine {
         let chunks = self.chunk_text(&text, 500);
         tracing::info!("Created {} chunks for {}", chunks.len(), filename);
 
-        let mut filtered_chunks: Vec<(usize, String)> = chunks
+        let filtered_chunks: Vec<(usize, String)> = chunks
             .into_iter()
             .enumerate()
             .filter_map(|(i, chunk_text)| {
@@ -133,7 +134,7 @@ impl RagEngine {
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
-        for ((i, chunk_text), embedding) in filtered_chunks.drain(..).zip(embeddings.into_iter()) {
+        for ((i, chunk_text), embedding) in filtered_chunks.into_iter().zip(embeddings.into_iter()) {
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
@@ -350,7 +351,7 @@ impl RagEngine {
             model: &'a str,
             chunks: &'a HashMap<String, DocumentChunk>,
             needs_reindex: bool,
-            #[serde(skip_serializing_if = "HashMap::is_empty")]
+            #[serde(default, skip_serializing_if = "HashMap::is_empty")]
             document_hashes: &'a HashMap<String, String>,
         }
 
@@ -406,13 +407,9 @@ impl RagEngine {
                         self.chunks = chunks;
                         self.needs_reindex = needs_reindex;
                         self.document_hashes = document_hashes;
-                        let existing_docs: HashSet<String> = self
-                            .chunks
-                            .values()
-                            .map(|chunk| chunk.document_name.clone())
-                            .collect();
-                        self.document_hashes
-                            .retain(|doc, _| existing_docs.contains(doc));
+                        // Do not filter document_hashes based on existing_docs.
+                        // This preserves hashes for documents that have zero chunks due to filtering.
+                        // If you need to clean up hashes for deleted documents, implement that logic separately.
                         if self.document_hashes.is_empty() && !self.chunks.is_empty() {
                             tracing::info!(
                                 "No document fingerprints found in cache. Existing documents will be reindexed to initialize change detection."
@@ -446,16 +443,8 @@ impl RagEngine {
     }
 
     fn compute_document_hash(data: &[u8]) -> String {
-        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
-
-        let mut hash = FNV_OFFSET_BASIS;
-        for byte in data {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-
-        format!("{:016x}", hash)
+        let hash = Sha256::digest(data);
+        format!("{:x}", hash)
     }
 }
 
