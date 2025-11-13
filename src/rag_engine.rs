@@ -433,8 +433,8 @@ impl RagEngine {
 
         if let Some(title) = metadata.section_title.as_mut() {
             const MAX_TITLE_LEN: usize = 160;
-            if title.len() > MAX_TITLE_LEN {
-                title.truncate(MAX_TITLE_LEN);
+            if title.chars().count() > MAX_TITLE_LEN {
+                *title = title.chars().take(MAX_TITLE_LEN).collect();
             }
         }
 
