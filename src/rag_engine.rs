@@ -350,7 +350,7 @@ impl RagEngine {
             model: &'a str,
             chunks: &'a HashMap<String, DocumentChunk>,
             needs_reindex: bool,
-            #[serde(skip_serializing_if = "HashMap::is_empty")]
+            #[serde(default, skip_serializing_if = "HashMap::is_empty")]
             document_hashes: &'a HashMap<String, String>,
         }
 
