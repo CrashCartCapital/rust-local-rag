@@ -2,12 +2,19 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
+/// Represents a candidate chunk for reranking, containing metadata and initial retrieval score.
 pub struct RerankerCandidate {
+    /// Unique identifier for the chunk.
     pub chunk_id: String,
+    /// Name or identifier of the source document.
     pub document: String,
+    /// The text content of the chunk.
     pub text: String,
+    /// The page number in the source document where the chunk is located.
     pub page_number: usize,
+    /// The section name or identifier within the document, if available.
     pub section: Option<String>,
+    /// Embedding similarity score from the first-stage retrieval.
     pub initial_score: f32,
 }
 
