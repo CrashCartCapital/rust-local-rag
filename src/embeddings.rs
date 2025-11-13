@@ -53,12 +53,29 @@ impl EmbeddingService {
     }
 
     pub async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        let single = vec![text.to_string()];
-        let embeddings = self.embed_texts(&single).await?;
-        embeddings
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No embedding returned from Ollama"))
+        let request = OllamaEmbeddingRequest::Single {
+            model: &self.model,
+            prompt: text,
+        };
+        let response = self
+            .client
+            .post(format!("{}/api/embeddings", self.ollama_url))
+            .json(&request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Ollama API error: {} - {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ));
+        }
+        let embedding_response: OllamaEmbeddingResponse = response.json().await?;
+        if let Some(embedding) = embedding_response.embedding {
+            Ok(embedding)
+        } else {
+            Err(anyhow::anyhow!("No embedding returned from Ollama"))
+        }
     }
 
     pub async fn get_query_embedding(&self, text: &str) -> Result<Vec<f32>> {
