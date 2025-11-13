@@ -197,6 +197,7 @@ impl RerankerService {
         }
 
         number
+            .trim()
             .parse::<f32>()
             .ok()
             .map(|score| score.clamp(0.0, 1.0))
