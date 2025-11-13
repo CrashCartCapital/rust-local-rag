@@ -38,7 +38,7 @@ pub struct RagEngine {
     embedding_service: EmbeddingService,
     data_dir: String,
     needs_reindex: bool,
-    reranker: RerankerService,
+    reranker: Option<RerankerService>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +62,21 @@ struct SearchCandidate {
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
-        let reranker = RerankerService::new().await?;
+        
+        // Try to initialize reranker, but don't fail if it's unavailable
+        let reranker = match RerankerService::new().await {
+            Ok(service) => {
+                tracing::info!("Reranker service initialized successfully");
+                Some(service)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Reranker service unavailable, will fall back to embedding scores only: {}",
+                    e
+                );
+                None
+            }
+        };
 
         let mut engine = Self {
             chunks: HashMap::new(),
@@ -175,7 +189,7 @@ impl RagEngine {
         }
 
         let mut candidate_map: HashMap<String, SearchCandidate> = HashMap::new();
-        for candidate in candidates.clone() {
+        for candidate in candidates {
             candidate_map.insert(candidate.chunk_id.clone(), candidate);
         }
 
@@ -191,10 +205,16 @@ impl RagEngine {
             })
             .collect();
 
-        let reranked = match self.reranker.rerank(query, &reranker_inputs).await {
-            Ok(results) => results,
-            Err(err) => {
-                tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+        let reranked = match &self.reranker {
+            Some(reranker) => match reranker.rerank(query, &reranker_inputs).await {
+                Ok(results) => results,
+                Err(err) => {
+                    tracing::warn!("Reranker failed, falling back to embedding scores: {}", err);
+                    Vec::new()
+                }
+            },
+            None => {
+                tracing::debug!("Reranker not available, using embedding scores only");
                 Vec::new()
             }
         };
@@ -204,8 +224,8 @@ impl RagEngine {
 
         if !reranked.is_empty() {
             for result in reranked {
-                if let Some(candidate) = candidate_map.get(&result.chunk_id) {
-                    if seen.insert(result.chunk_id.clone()) {
+                if let Some(candidate) = candidate_map.get(&result.chunk_id)
+                    && seen.insert(result.chunk_id.clone()) {
                         ordered_results.push(SearchResult {
                             text: candidate.text.clone(),
                             score: result.relevance,
@@ -216,7 +236,6 @@ impl RagEngine {
                             section: candidate.section.clone(),
                         });
                     }
-                }
 
                 if ordered_results.len() == top_k {
                     break;
@@ -225,7 +244,11 @@ impl RagEngine {
         }
 
         if ordered_results.len() < top_k {
-            candidates.sort_by(|a, b| b.initial_score.partial_cmp(&a.initial_score).unwrap_or(std::cmp::Ordering::Equal));
+            candidates.sort_by(|a, b| {
+                b.initial_score
+                    .partial_cmp(&a.initial_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             for candidate in candidates {
                 if ordered_results.len() == top_k {
                     break;
@@ -394,16 +417,16 @@ impl RagEngine {
                 continue;
             }
 
-            let section = extract_section_heading(page_text);
             let page_number = page_idx + 1;
 
             for chunk in words.chunks(chunk_size) {
                 let chunk_text = chunk.join(" ");
                 if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
                     fragments.push(ChunkFragment {
                         text: chunk_text,
                         page_number,
-                        section: section.clone(),
+                        section,
                     });
                 }
             }
@@ -411,14 +434,14 @@ impl RagEngine {
 
         if fragments.is_empty() {
             let words: Vec<&str> = text.split_whitespace().collect();
-            let section = extract_section_heading(text);
             for chunk in words.chunks(chunk_size) {
                 let chunk_text = chunk.join(" ");
                 if !chunk_text.trim().is_empty() {
+                    let section = extract_section_heading(&chunk_text);
                     fragments.push(ChunkFragment {
                         text: chunk_text,
                         page_number: 1,
-                        section: section.clone(),
+                        section,
                     });
                 }
             }
@@ -516,6 +539,24 @@ impl RagEngine {
     }
 }
 
+/// Extracts a section heading from page text.
+///
+/// This function scans the provided text line by line to find a suitable heading.
+/// It returns the first line that meets all of the following criteria:
+/// - Non-empty after trimming whitespace
+/// - Not purely numeric (contains at least one non-digit character)
+/// - Contains at least 3 alphabetic characters
+///
+/// The returned heading is truncated to a maximum of 120 characters.
+///
+/// # Arguments
+///
+/// * `text` - The text content to extract a heading from
+///
+/// # Returns
+///
+/// * `Some(String)` - The extracted heading (up to 120 characters) if found
+/// * `None` - If no suitable heading is found in the text
 fn extract_section_heading(text: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();

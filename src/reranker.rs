@@ -2,17 +2,24 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
+/// Represents a candidate chunk for reranking, containing metadata and initial retrieval score.
 pub struct RerankerCandidate {
+    /// Unique identifier for the chunk.
     pub chunk_id: String,
+    /// Name or identifier of the source document.
     pub document: String,
+    /// The text content of the chunk.
     pub text: String,
+    /// The page number in the source document where the chunk is located.
     pub page_number: usize,
+    /// The section name or identifier within the document, if available.
     pub section: Option<String>,
+    /// Embedding similarity score from the first-stage retrieval.
     pub initial_score: f32,
 }
 
 /// Represents the result of reranking a candidate chunk using an LLM.
-/// 
+///
 /// The `relevance` field is the LLM-based reranking score (from 0.0 to 1.0),
 /// which differs from the embedding similarity score.
 pub struct RerankedResult {
@@ -43,6 +50,22 @@ pub struct RerankerService {
 }
 
 impl RerankerService {
+    /// Creates a new reranker service backed by Ollama.
+    /// 
+    /// This method initializes the service, validates the connection to Ollama,
+    /// and verifies that the specified model is available.
+    /// 
+    /// # Configuration
+    /// 
+    /// The service is configured via environment variables:
+    /// * `OLLAMA_URL` - The Ollama API endpoint (default: `http://localhost:11434`)
+    /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `llama3.1`)
+    /// 
+    /// # Errors
+    /// 
+    /// Returns an error if:
+    /// * Cannot connect to Ollama at the configured URL
+    /// * The specified model is not available (not pulled)
     pub async fn new() -> Result<Self> {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
@@ -60,6 +83,20 @@ impl RerankerService {
         Ok(service)
     }
 
+    /// Performs second-stage reranking of search candidates using an LLM.
+    ///
+    /// This method scores each candidate's relevance to the query using an LLM,
+    /// sorts the results by relevance score (highest first), and gracefully falls
+    /// back to the initial embedding score if LLM scoring fails for any candidate.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query to evaluate candidates against
+    /// * `candidates` - The list of candidates to rerank
+    ///
+    /// # Returns
+    ///
+    /// A vector of reranked results sorted by relevance score in descending order
     pub async fn rerank(
         &self,
         query: &str,
@@ -87,6 +124,11 @@ impl RerankerService {
         }
 
         reranked.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(reranked)
     }
 
@@ -134,11 +176,10 @@ impl RerankerService {
             }
         );
 
-        if let Some(section) = &candidate.section {
-            if !section.trim().is_empty() {
+        if let Some(section) = &candidate.section
+            && !section.trim().is_empty() {
                 prompt.push_str(&format!("Section heading: {}\n", section.trim()));
             }
-        }
 
         prompt.push_str("\nChunk:\n");
         prompt.push_str(candidate.text.trim());
@@ -163,6 +204,7 @@ impl RerankerService {
         }
 
         number
+            .trim()
             .parse::<f32>()
             .ok()
             .map(|score| score.clamp(0.0, 1.0))
