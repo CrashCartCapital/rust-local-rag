@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -28,8 +29,7 @@ pub struct RagEngine {
     embedding_service: EmbeddingService,
     data_dir: String,
     needs_reindex: bool,
-    ann_index: Option<AnnIndex>,
-    lexical_index: LexicalIndex,
+    document_hashes: HashMap<String, String>,
 }
 
 impl RagEngine {
@@ -41,8 +41,7 @@ impl RagEngine {
             embedding_service,
             data_dir: data_dir.to_string(),
             needs_reindex: false,
-            ann_index: None,
-            lexical_index: LexicalIndex::new(),
+            document_hashes: HashMap::new(),
         };
 
         if let Err(e) = engine.load_from_disk().await {
@@ -63,6 +62,19 @@ impl RagEngine {
     pub async fn add_document(&mut self, filename: &str, data: &[u8]) -> Result<usize> {
         tracing::info!("Processing document: {}", filename);
 
+        let document_hash = Self::compute_document_hash(data);
+        if let Some(existing_hash) = self.document_hashes.get(filename) {
+            if existing_hash == &document_hash {
+                tracing::info!(
+                    "Document {} unchanged since last index. Skipping re-embedding.",
+                    filename
+                );
+                return Ok(0);
+            }
+
+            tracing::info!("Document {} has changed. Refreshing embeddings.", filename);
+        }
+
         let text = self.extract_pdf_text(data)?;
         if text.trim().is_empty() {
             return Err(anyhow::anyhow!("No text extracted from PDF"));
@@ -71,28 +83,58 @@ impl RagEngine {
         let chunks = self.chunk_text(&text, 500);
         tracing::info!("Created {} chunks for {}", chunks.len(), filename);
 
-        let existing_ids: Vec<String> = self
-            .chunks
-            .values()
-            .filter(|chunk| chunk.document_name == filename)
-            .map(|chunk| chunk.id.clone())
+        let filtered_chunks: Vec<(usize, String)> = chunks
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, chunk_text)| {
+                if chunk_text.trim().len() < 10 {
+                    None
+                } else {
+                    Some((i, chunk_text))
+                }
+            })
             .collect();
 
-        for chunk_id in existing_ids {
-            self.remove_chunk_by_id(&chunk_id);
+        if filtered_chunks.is_empty() {
+            tracing::warn!(
+                "Document {} produced no sizeable chunks after filtering. Removing any cached chunks for this file.",
+                filename
+            );
+            self.chunks
+                .retain(|_, chunk| chunk.document_name != filename);
+            self.document_hashes
+                .insert(filename.to_string(), document_hash);
+            self.save_to_disk().await?;
+            return Ok(0);
         }
 
+        let chunk_texts: Vec<String> = filtered_chunks
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect();
+
+        tracing::debug!(
+            "Generating embeddings for {} chunks from {} in a single request",
+            chunk_texts.len(),
+            filename
+        );
+
+        let embeddings = self.embedding_service.embed_texts(&chunk_texts).await?;
+
+        if embeddings.len() != filtered_chunks.len() {
+            return Err(anyhow::anyhow!(
+                "Received {} embeddings for {} chunks in {}",
+                embeddings.len(),
+                filtered_chunks.len(),
+                filename
+            ));
+        }
+
+        self.chunks
+            .retain(|_, chunk| chunk.document_name != filename);
+
         let mut chunk_count = 0;
-        for (i, chunk_text) in chunks.into_iter().enumerate() {
-            if chunk_text.trim().len() < 10 {
-                continue;
-            }
-
-            tracing::debug!("Generating embedding for chunk {} of {}", i + 1, filename);
-            let embedding = self.embedding_service.get_embedding(&chunk_text).await?;
-
-            self.ensure_ann_index(embedding.len());
-
+        for ((i, chunk_text), embedding) in filtered_chunks.into_iter().zip(embeddings.into_iter()) {
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
@@ -110,6 +152,8 @@ impl RagEngine {
             chunk_count += 1;
         }
 
+        self.document_hashes
+            .insert(filename.to_string(), document_hash);
         self.save_to_disk().await?;
 
         tracing::info!(
@@ -127,7 +171,7 @@ impl RagEngine {
 
         tracing::debug!("Searching for: '{}'", query);
 
-        let query_embedding = self.embedding_service.get_embedding(query).await?;
+        let query_embedding = self.embedding_service.get_query_embedding(query).await?;
 
         let ann_candidate_iter = match &self.ann_index {
             Some(index) => Box::new(index.search(&query_embedding, top_k.saturating_mul(5)).into_iter()) as Box<dyn Iterator<Item = String>>,
@@ -228,21 +272,23 @@ impl RagEngine {
             if path.extension().and_then(|s| s.to_str()) == Some("pdf") {
                 let filename = path.file_name().unwrap().to_str().unwrap();
 
-                if self.chunks.values().any(|c| c.document_name == filename) {
-                    tracing::info!("Document {} already processed, skipping", filename);
-                    continue;
-                }
-
                 match tokio::fs::read(&path).await {
                     Ok(data) => {
                         tracing::info!("Loading document: {}", filename);
                         match self.add_document(filename, &data).await {
                             Ok(chunk_count) => {
-                                tracing::info!(
-                                    "Successfully processed {} with {} chunks",
-                                    filename,
-                                    chunk_count
-                                );
+                                if chunk_count > 0 {
+                                    tracing::info!(
+                                        "Successfully processed {} with {} chunks",
+                                        filename,
+                                        chunk_count
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "{} is already up to date. No reindex needed.",
+                                        filename
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Skipping {}: {}", filename, e);
@@ -341,6 +387,8 @@ impl RagEngine {
             model: &'a str,
             chunks: &'a HashMap<String, DocumentChunk>,
             needs_reindex: bool,
+            #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+            document_hashes: &'a HashMap<String, String>,
         }
 
         let path = format!("{}/chunks.json", self.data_dir);
@@ -349,6 +397,7 @@ impl RagEngine {
             model: self.embedding_service.model_name(),
             chunks: &self.chunks,
             needs_reindex: self.needs_reindex,
+            document_hashes: &self.document_hashes,
         };
 
         let data = serde_json::to_string_pretty(&state)?;
@@ -369,6 +418,8 @@ impl RagEngine {
                 chunks: HashMap<String, DocumentChunk>,
                 #[serde(default)]
                 needs_reindex: bool,
+                #[serde(default)]
+                document_hashes: HashMap<String, String>,
             }
 
             match serde_json::from_str::<PersistedState>(&data) {
@@ -376,6 +427,7 @@ impl RagEngine {
                     model,
                     chunks,
                     needs_reindex,
+                    document_hashes,
                     ..
                 }) => {
                     if model != self.embedding_service.model_name() {
@@ -392,7 +444,16 @@ impl RagEngine {
                     } else {
                         self.chunks = chunks;
                         self.needs_reindex = needs_reindex;
-                        self.rebuild_indexes();
+                        self.document_hashes = document_hashes;
+                        // Do not filter document_hashes based on existing_docs.
+                        // This preserves hashes for documents that have zero chunks due to filtering.
+                        // If you need to clean up hashes for deleted documents, implement that logic separately.
+                        if self.document_hashes.is_empty() && !self.chunks.is_empty() {
+                            tracing::info!(
+                                "No document fingerprints found in cache. Existing documents will be reindexed to initialize change detection."
+                            );
+                            self.needs_reindex = true;
+                        }
                         tracing::info!("Loaded {} chunks from disk", self.chunks.len());
                     }
                 }
@@ -411,8 +472,7 @@ impl RagEngine {
                         self.needs_reindex = true;
                     }
                     self.chunks.clear();
-                    self.lexical_index.clear();
-                    self.ann_index = None;
+                    self.document_hashes.clear();
                     self.save_to_disk().await?;
                 }
             }
@@ -420,53 +480,9 @@ impl RagEngine {
         Ok(())
     }
 
-    fn ensure_ann_index(&mut self, dim: usize) {
-        let rebuild = match &self.ann_index {
-            Some(index) => index.dim() != dim,
-            None => true,
-        };
-
-        if rebuild {
-            let mut index = AnnIndex::new(dim);
-            for chunk in self.chunks.values() {
-                if chunk.embedding.len() == dim {
-                    index.insert(&chunk.id, &chunk.embedding);
-                }
-            }
-            self.ann_index = Some(index);
-        }
-    }
-
-    fn remove_chunk_by_id(&mut self, chunk_id: &str) {
-        if self.chunks.remove(chunk_id).is_some() {
-            if let Some(index) = self.ann_index.as_mut() {
-                index.remove(chunk_id);
-            }
-            self.lexical_index.remove_chunk(chunk_id);
-        }
-    }
-
-    fn rebuild_indexes(&mut self) {
-        self.lexical_index.clear();
-        let dim = self
-            .chunks
-            .values()
-            .next()
-            .map(|chunk| chunk.embedding.len());
-
-        self.ann_index = dim.map(|dim| {
-            let mut index = AnnIndex::new(dim);
-            for chunk in self.chunks.values() {
-                if chunk.embedding.len() == dim {
-                    index.insert(&chunk.id, &chunk.embedding);
-                }
-            }
-            index
-        });
-
-        for chunk in self.chunks.values() {
-            self.lexical_index.add_chunk(&chunk.id, &chunk.text);
-        }
+    fn compute_document_hash(data: &[u8]) -> String {
+        let hash = Sha256::digest(data);
+        format!("{:x}", hash)
     }
 }
 
