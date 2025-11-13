@@ -1,21 +1,28 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 
 #[derive(Serialize)]
-struct OllamaEmbeddingRequest {
-    model: String,
-    prompt: String,
+#[serde(untagged)]
+enum OllamaEmbeddingRequest<'a> {
+    Single { model: &'a str, prompt: &'a str },
+    Batch { model: &'a str, input: &'a [String] },
 }
 
 #[derive(Deserialize)]
 struct OllamaEmbeddingResponse {
-    embedding: Vec<f32>,
+    #[serde(default)]
+    embedding: Option<Vec<f32>>,
+    #[serde(default)]
+    embeddings: Option<Vec<Vec<f32>>>,
 }
 
 pub struct EmbeddingService {
     client: reqwest::Client,
     ollama_url: String,
     model: String,
+    query_cache: RwLock<HashMap<String, Vec<f32>>>,
 }
 
 impl EmbeddingService {
@@ -32,6 +39,7 @@ impl EmbeddingService {
             client: reqwest::Client::new(),
             ollama_url,
             model,
+            query_cache: RwLock::new(HashMap::new()),
         };
 
         service.test_connection().await?;
@@ -45,9 +53,42 @@ impl EmbeddingService {
     }
 
     pub async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        let request = OllamaEmbeddingRequest {
-            model: self.model.clone(),
-            prompt: text.to_string(),
+        let single = vec![text.to_string()];
+        let embeddings = self.embed_texts(&single).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No embedding returned from Ollama"))
+    }
+
+    pub async fn get_query_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        if let Some(cached) = self.query_cache.read().await.get(text) {
+            return Ok(cached.clone());
+        }
+
+        let embedding = self.get_embedding(text).await?;
+        self.query_cache
+            .write()
+            .await
+            .insert(text.to_string(), embedding.clone());
+        Ok(embedding)
+    }
+
+    pub async fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let request = if texts.len() == 1 {
+            OllamaEmbeddingRequest::Single {
+                model: &self.model,
+                prompt: &texts[0],
+            }
+        } else {
+            OllamaEmbeddingRequest::Batch {
+                model: &self.model,
+                input: texts,
+            }
         };
 
         let response = self
@@ -66,7 +107,16 @@ impl EmbeddingService {
         }
 
         let embedding_response: OllamaEmbeddingResponse = response.json().await?;
-        Ok(embedding_response.embedding)
+
+        if let Some(embedding) = embedding_response.embedding {
+            Ok(vec![embedding])
+        } else if let Some(embeddings) = embedding_response.embeddings {
+            Ok(embeddings)
+        } else {
+            Err(anyhow::anyhow!(
+                "Ollama returned no embeddings for the provided input"
+            ))
+        }
     }
 
     async fn test_connection(&self) -> Result<()> {
