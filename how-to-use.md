@@ -67,15 +67,38 @@ Search through your documents using semantic similarity.
 - **Tool**: `search_documents`
 - **Parameters**: `query` (string), `top_k` (optional number, default: 5)
 
-### 2. List Documents  
+### 2. List Documents
 Get a list of all indexed documents.
 - **Tool**: `list_documents`
 - **Parameters**: None
 
 ### 3. Get Statistics
 View RAG system statistics and status.
-- **Tool**: `get_stats` 
+- **Tool**: `get_stats`
 - **Parameters**: None
+
+### 4. Start Reindex
+Trigger background reindexing of all documents.
+- **Tool**: `start_reindex`
+- **Parameters**: None
+- **Returns**: Job ID for tracking progress
+
+### 5. Get Job Status
+Check the status of a background job (like reindexing).
+- **Tool**: `get_job_status`
+- **Parameters**: `job_id` (string)
+
+### 6. Calibrate Reranker
+Measure LLM reranking latencies and get timeout recommendations.
+- **Tool**: `calibrate_reranker`
+- **Parameters**: `query` (string), `sample_size` (optional number, default: 100)
+
+## Health Endpoints
+
+The server exposes HTTP health endpoints on port 3046 (configurable via `MCP_HTTP_BIND`):
+
+- **`GET /healthz`** - Liveness probe, always returns 200 OK if the process is alive
+- **`GET /readyz`** - Readiness probe, returns 200 OK if the engine can be accessed within 100ms
 
 ## Usage in Claude
 
@@ -96,6 +119,43 @@ Once configured, you can ask Claude to:
 - "Compare what different documents say about security best practices"
 - "Find common themes across all my documentation"
 
+## Switching Embedding Models
+
+You can switch between different Ollama embedding models without losing your indexed data. Each model's embeddings are stored in a separate file.
+
+### How It Works
+- Each model gets its own index file: `chunks_{model}.json`
+- Switching models preserves all existing indexes
+- Switching back to a previous model instantly restores its index
+
+### Example: Trying a Different Model
+
+```bash
+# Currently using nomic-embed-text
+# Index stored in: data/chunks_nomic-embed-text.json
+
+# Switch to mxbai-embed-large
+ollama pull mxbai-embed-large
+# Update OLLAMA_EMBEDDING_MODEL in Claude Desktop config to "mxbai-embed-large"
+# Restart Claude Desktop
+
+# New index will be created: data/chunks_mxbai-embed-large.json
+# Your nomic-embed-text index is preserved!
+
+# Later: Switch back to nomic-embed-text
+# Simply update config back to "nomic-embed-text" and restart
+# Instantly restores your original index - no re-indexing needed
+```
+
+### Index Files in DATA_DIR
+```
+data/
+├── chunks_nomic-embed-text.json      # Index for nomic-embed-text model
+├── chunks_mxbai-embed-large.json     # Index for mxbai-embed-large model
+├── chunks_snowflake-arctic-embed.json # Index for snowflake model
+└── jobs.db                            # Job tracking database
+```
+
 ## PDF Processing Details
 
 ### Supported PDF Types
@@ -105,10 +165,10 @@ Once configured, you can ask Claude to:
 - ❌ **Password-protected**: Encrypted PDFs cannot be processed
 
 ### Text Extraction Process
-1. **PDF to Text**: Uses poppler's `pdftotext` for reliable extraction
-2. **Text Chunking**: Splits documents into ~500-1000 character segments
-3. **Embedding Generation**: Creates vector embeddings using Ollama
-4. **Indexing**: Stores embeddings for fast semantic search
+1. **PDF to Text**: Primary extraction via pure-Rust `lopdf` crate, with automatic fallback to poppler's `pdftotext` for complex PDFs
+2. **Text Chunking**: Sentence-aware splitting into ~500-1000 character segments with metadata
+3. **Embedding Generation**: Creates vector embeddings using Ollama (runs in spawn_blocking to avoid blocking async runtime)
+4. **Indexing**: Stores embeddings for fast semantic search with SHA-256 document fingerprinting
 
 ### Performance Notes
 - **First-time indexing**: May take several minutes for large document collections

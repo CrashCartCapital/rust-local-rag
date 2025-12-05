@@ -23,7 +23,10 @@ ollama serve
 ollama pull nomic-embed-text
 ```
 
-### 3. Install Poppler (for PDF parsing)
+### 3. Install Poppler (Optional - for fallback PDF parsing)
+
+The server uses pure-Rust `lopdf` for PDF extraction by default. Poppler is only needed as a fallback for complex PDFs that lopdf cannot handle.
+
 ```bash
 # macOS
 brew install poppler
@@ -34,6 +37,8 @@ sudo apt-get install poppler-utils
 # Linux (CentOS/RHEL)
 sudo yum install poppler-utils
 ```
+
+> 💡 If you skip this step, the server will still work for most PDFs. You'll see a warning in logs if a PDF requires the poppler fallback but it's not installed.
 
 ## Setup
 
@@ -105,14 +110,16 @@ which rust-local-rag
 The application automatically:
 
 1. **Scans the documents directory** on startup for PDF files
-2. **Extracts text** using poppler's `pdftotext` utility
-3. **Chunks the text** into manageable segments (typically 500-1000 characters)
-4. **Generates embeddings** using Ollama's `nomic-embed-text` model
-5. **Stores embeddings** in the data directory for fast retrieval
-6. **Indexes documents** for semantic search
+2. **Extracts text** using pure-Rust `lopdf` crate (with automatic fallback to poppler's `pdftotext` for complex PDFs)
+3. **Chunks the text** into sentence-aware segments (typically 500-1000 characters) with metadata
+4. **Generates embeddings** using Ollama's configured embedding model (runs in spawn_blocking to avoid blocking async runtime)
+5. **Stores embeddings** in model-specific index files (e.g., `chunks_nomic-embed-text.json`)
+6. **Indexes documents** for semantic search with SHA-256 fingerprinting to detect changes
+
+> 💡 Each embedding model gets its own index file. Switching models preserves existing indexes, allowing you to switch back without re-indexing.
 
 Supported formats:
-- PDF files (via poppler)
+- PDF files (via lopdf or poppler fallback)
 - Text extraction preserves basic formatting
 - Each document is split into searchable chunks
 
@@ -121,7 +128,7 @@ Supported formats:
 ### Installation Issues
 1. **Rust not found**: Restart terminal after installing Rust
 2. **Ollama connection failed**: Ensure `ollama serve` is running
-3. **Poppler not found**: Verify installation with `pdftotext --version`
+3. **Poppler not found**: Optional - only needed for complex PDFs. Install with `brew install poppler` if you see fallback warnings
 
 ### Claude Desktop Issues
 1. **Binary not found**: Check path with `which rust-local-rag`
@@ -152,7 +159,7 @@ You can customise the server using environment variables or a `.env` file placed
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `DATA_DIR` | Local storage for embeddings | `./data` |
+| `DATA_DIR` | Local storage for embeddings (per-model index files) | `./data` |
 | `DOCUMENTS_DIR` | Directory scanned for PDFs | `./documents` |
 | `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
 | `LOG_LEVEL` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |

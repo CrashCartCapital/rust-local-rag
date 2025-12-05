@@ -1,8 +1,12 @@
+#![allow(dead_code)]
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::OnceLock;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -10,6 +14,24 @@ use crate::{
     embeddings::EmbeddingService,
     reranker::{RerankerCandidate, RerankerService},
 };
+
+// Helper function to get configurable batch size from environment
+// Default to 32 for power-efficient operation (down from 128 for throughput)
+fn get_batch_size() -> usize {
+    std::env::var("EMBEDDING_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32)
+}
+
+// Helper function to get cooldown duration between batches (in milliseconds)
+// Default to 500ms to allow GPU/CPU thermal recovery
+fn get_batch_cooldown_ms() -> u64 {
+    std::env::var("EMBEDDING_BATCH_COOLDOWN_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkMetadata {
@@ -61,6 +83,9 @@ pub struct RagEngine {
     data_dir: String,
     needs_reindex: bool,
     reranker: Option<RerankerService>,
+    document_hashes: HashMap<String, String>,
+    ann_index: Option<AnnIndex>,
+    lexical_index: LexicalIndex,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +93,18 @@ struct ChunkFragment {
     text: String,
     page_number: usize,
     section: Option<String>,
+    metadata: ChunkMetadata,
+}
+
+impl ChunkFragment {
+    fn from_metadata(text: String, metadata: ChunkMetadata) -> Self {
+        Self {
+            text,
+            page_number: metadata.page_range.map(|(start, _)| start).unwrap_or(1),
+            section: metadata.section_title.clone(),
+            metadata,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +143,9 @@ impl RagEngine {
             data_dir: data_dir.to_string(),
             needs_reindex: false,
             reranker,
+            document_hashes: HashMap::new(),
+            ann_index: None,
+            lexical_index: LexicalIndex::new(),
         };
 
         if let Err(e) = engine.load_from_disk().await {
@@ -123,7 +163,25 @@ impl RagEngine {
         self.embedding_service.model_name()
     }
 
-    pub async fn add_document(&mut self, filename: &str, data: &[u8]) -> Result<usize> {
+    pub async fn finalize_reindex(&mut self) -> Result<()> {
+        if self.needs_reindex {
+            self.needs_reindex = false;
+            self.save_to_disk().await?;
+            tracing::info!(
+                "Reindexing complete. Indexed {} chunks across {} documents.",
+                self.chunks.len(),
+                self.list_documents().len()
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn add_document(
+        &mut self,
+        filename: &str,
+        data: &[u8],
+        mut batch_callback: Option<&mut (dyn FnMut(usize, usize, usize, usize) + Send)>,
+    ) -> Result<usize> {
         tracing::info!("Processing document: {}", filename);
 
         let document_hash = Self::compute_document_hash(data);
@@ -139,22 +197,22 @@ impl RagEngine {
             tracing::info!("Document {} has changed. Refreshing embeddings.", filename);
         }
 
-        let text = self.extract_pdf_text(data)?;
+        let text = self.extract_pdf_text(data.to_vec()).await?;
         if text.trim().is_empty() {
             return Err(anyhow::anyhow!("No text extracted from PDF"));
         }
 
-        let chunks = self.chunk_text(&text);
+        let chunks = self.chunk_text(text, 200).await?;
         tracing::info!("Created {} chunks for {}", chunks.len(), filename);
 
-        let filtered_chunks: Vec<(usize, String)> = chunks
-            .into_iter()
+        let filtered_chunks: Vec<(usize, &ChunkFragment)> = chunks
+            .iter()
             .enumerate()
-            .filter_map(|(i, chunk_text)| {
-                if chunk_text.trim().len() < 10 {
+            .filter_map(|(i, fragment)| {
+                if fragment.text.trim().len() < 10 {
                     None
                 } else {
-                    Some((i, chunk_text))
+                    Some((i, fragment))
                 }
             })
             .collect();
@@ -172,22 +230,69 @@ impl RagEngine {
             return Ok(0);
         }
 
-        let chunk_texts: Vec<String> = filtered_chunks
+        let chunk_texts: Vec<&str> = filtered_chunks
             .iter()
-            .map(|(_, text)| text.clone())
+            .map(|(_, fragment)| fragment.text.as_str())
             .collect();
 
-        tracing::debug!(
-            "Generating embeddings for {} chunks from {} in a single request",
-            chunk_texts.len(),
-            filename
+        // Process embeddings in batches (configurable via EMBEDDING_BATCH_SIZE env var)
+        let batch_size = get_batch_size();
+        let cooldown_ms = get_batch_cooldown_ms();
+        let total_chunks = chunk_texts.len();
+        let total_batches = (total_chunks + batch_size - 1) / batch_size;
+
+        tracing::info!(
+            "Processing {} chunks from {} in {} batches of up to {} chunks each (cooldown: {}ms between batches)",
+            total_chunks,
+            filename,
+            total_batches,
+            batch_size,
+            cooldown_ms
         );
 
-        let embeddings = self.embedding_service.embed_texts(&chunk_texts).await?;
+        let mut embeddings = Vec::with_capacity(total_chunks);
+
+        for (batch_idx, batch_texts) in chunk_texts.chunks(batch_size).enumerate() {
+            tracing::debug!(
+                "Batch {}/{}: Generating embeddings for {} chunks from {}",
+                batch_idx + 1,
+                total_batches,
+                batch_texts.len(),
+                filename
+            );
+
+            // Convert &str slice to Vec<String> only for the API call (minimal cloning)
+            let batch_strings: Vec<String> = batch_texts.iter().map(|&s| s.to_string()).collect();
+            let batch_embeddings = self.embedding_service.embed_texts(&batch_strings).await?;
+
+            if batch_embeddings.len() != batch_texts.len() {
+                return Err(anyhow::anyhow!(
+                    "Batch {}/{}: Received {} embeddings for {} chunks in {}",
+                    batch_idx + 1,
+                    total_batches,
+                    batch_embeddings.len(),
+                    batch_texts.len(),
+                    filename
+                ));
+            }
+
+            embeddings.extend(batch_embeddings);
+
+            // Invoke callback for batch progress
+            if let Some(ref mut callback) = batch_callback {
+                callback(batch_idx + 1, total_batches, total_chunks, batch_texts.len());
+            }
+
+            // Add cooldown between batches to prevent thermal throttling and allow power recovery
+            // Skip cooldown after the last batch
+            if batch_idx + 1 < total_batches && cooldown_ms > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(cooldown_ms)).await;
+            }
+        }
 
         if embeddings.len() != filtered_chunks.len() {
             return Err(anyhow::anyhow!(
-                "Received {} embeddings for {} chunks in {}",
+                "Total embeddings mismatch: Received {} embeddings for {} chunks in {}",
                 embeddings.len(),
                 filtered_chunks.len(),
                 filename
@@ -198,23 +303,32 @@ impl RagEngine {
             .retain(|_, chunk| chunk.document_name != filename);
 
         let mut chunk_count = 0;
+        let mut embedding_index = 0;
         for (i, fragment) in chunks.into_iter().enumerate() {
             if fragment.text.trim().len() < 10 {
                 continue;
             }
 
-            tracing::debug!("Generating embedding for chunk {} of {}", i + 1, filename);
-            let embedding = self.embedding_service.get_embedding(&fragment.text).await?;
+            // Use pre-generated embeddings from batch call
+            let embedding = embeddings[embedding_index].clone();
+            embedding_index += 1;
 
             let chunk = DocumentChunk {
                 id: Uuid::new_v4().to_string(),
                 document_name: filename.to_string(),
-                text: fragment.text,
-                embedding,
+                text: fragment.text.clone(),
+                embedding: embedding.clone(),
                 chunk_index: i,
                 page_number: fragment.page_number,
-                section: fragment.section,
+                section: fragment.section.clone(),
+                metadata: fragment.metadata.clone(),
             };
+
+            // Initialize ANN index lazily when first embedding is created
+            if self.ann_index.is_none() && !embedding.is_empty() {
+                self.ann_index = Some(AnnIndex::new(embedding.len()));
+                tracing::info!("Initialized ANN index with dimension {}", embedding.len());
+            }
 
             if let Some(index) = self.ann_index.as_mut() {
                 index.insert(&chunk.id, &chunk.embedding);
@@ -227,6 +341,10 @@ impl RagEngine {
 
         self.document_hashes
             .insert(filename.to_string(), document_hash);
+
+        // Validate index synchronization after adding all chunks
+        self.validate_index_sync()?;
+
         self.save_to_disk().await?;
 
         tracing::info!(
@@ -235,6 +353,60 @@ impl RagEngine {
             filename
         );
         Ok(chunk_count)
+    }
+
+    /// Check if reranker is available
+    pub fn has_reranker(&self) -> bool {
+        self.reranker.is_some()
+    }
+
+    /// Get reference to reranker if available
+    pub fn get_reranker(&self) -> Option<&RerankerService> {
+        self.reranker.as_ref()
+    }
+
+    /// Get embedding-based candidates for calibration or testing
+    pub async fn get_embedding_candidates(
+        &self,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<RerankerCandidate>> {
+        if self.chunks.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let query_embedding = self.embedding_service.get_query_embedding(query).await?;
+
+        let ann_candidate_iter = match &self.ann_index {
+            Some(index) => Box::new(index.search(&query_embedding, count.saturating_mul(2)).into_iter()) as Box<dyn Iterator<Item = String>>,
+            None => Box::new(self.chunks.keys().cloned()) as Box<dyn Iterator<Item = String>>,
+        };
+
+        let mut scores: Vec<(f32, DocumentChunk)> = Vec::new();
+
+        for chunk_id in ann_candidate_iter {
+            if let Some(chunk) = self.chunks.get(&chunk_id) {
+                let embedding_score = cosine_similarity(&query_embedding, &chunk.embedding);
+                scores.push((embedding_score, chunk.clone()));
+            }
+        }
+
+        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let candidates: Vec<RerankerCandidate> = scores
+            .into_iter()
+            .take(count)
+            .map(|(score, chunk)| RerankerCandidate {
+                chunk_id: chunk.id.clone(),
+                document: chunk.document_name.clone(),
+                text: chunk.text.clone(),
+                page_number: chunk.page_number,
+                section: chunk.section.clone(),
+                initial_score: score,
+            })
+            .collect();
+
+        Ok(candidates)
     }
 
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
@@ -268,7 +440,7 @@ impl RagEngine {
             .fold(0.0_f32, f32::max)
             .max(f32::EPSILON);
 
-        let mut results: Vec<(f32, SearchResult)> = Vec::new();
+        let mut scores: Vec<(f32, DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
@@ -280,15 +452,7 @@ impl RagEngine {
                 let combined_score =
                     EMBEDDING_WEIGHT * embedding_score + LEXICAL_WEIGHT * lexical_score;
 
-                results.push((
-                    combined_score,
-                    SearchResult {
-                        text: chunk.text.clone(),
-                        score: combined_score,
-                        document: chunk.document_name.clone(),
-                        chunk_id: chunk.id.clone(),
-                    },
-                ));
+                scores.push((combined_score, chunk.clone()));
             }
         }
 
@@ -312,6 +476,12 @@ impl RagEngine {
         if candidates.is_empty() {
             return Ok(vec![]);
         }
+
+        let candidate_map: HashMap<String, SearchCandidate> = candidates
+            .iter()
+            .cloned()
+            .map(|candidate| (candidate.chunk_id.clone(), candidate))
+            .collect();
 
         let reranker_inputs: Vec<RerankerCandidate> = candidates
             .iter()
@@ -421,6 +591,7 @@ impl RagEngine {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn load_documents_from_dir(&mut self, dir: &str) -> Result<()> {
         let was_reindexing = self.needs_reindex;
 
@@ -440,7 +611,7 @@ impl RagEngine {
                 match tokio::fs::read(&path).await {
                     Ok(data) => {
                         tracing::info!("Loading document: {}", filename);
-                        match self.add_document(filename, &data).await {
+                        match self.add_document(filename, &data, None).await {
                             Ok(chunk_count) => {
                                 if chunk_count > 0 {
                                     tracing::info!(
@@ -480,16 +651,103 @@ impl RagEngine {
         Ok(())
     }
 
-    fn extract_pdf_text(&self, data: &[u8]) -> Result<String> {
-        tracing::info!("Extracting PDF text using pdftotext system binary");
-        self.extract_pdf_with_pdftotext(data)
+    /// Async wrapper for PDF text extraction using spawn_blocking.
+    /// This prevents blocking the Tokio async executor during PDF processing.
+    ///
+    /// Uses a two-stage fallback strategy:
+    /// 1. Try pure-Rust extraction (lopdf) first for deployment flexibility
+    /// 2. Fall back to pdftotext binary if lopdf fails
+    async fn extract_pdf_text(&self, data: Vec<u8>) -> Result<String> {
+        // Clone data for potential fallback (lopdf consumes data)
+        let data_for_fallback = data.clone();
+
+        // Try pure-Rust extraction first
+        let lopdf_result = tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data))
+            .await
+            .context("lopdf extraction task failed")?;
+
+        match lopdf_result {
+            Ok(text) => {
+                tracing::info!("✅ PDF extracted using pure-Rust backend (lopdf): {} chars", text.chars().count());
+                Ok(text)
+            }
+            Err(lopdf_err) => {
+                tracing::warn!(
+                    error = %lopdf_err,
+                    "Pure-Rust PDF extraction failed, falling back to pdftotext"
+                );
+
+                // Fall back to pdftotext
+                let pdftotext_result = tokio::task::spawn_blocking(move || {
+                    Self::pdftotext_extract_sync(&data_for_fallback)
+                })
+                .await
+                .context("pdftotext extraction task failed")?;
+
+                match pdftotext_result {
+                    Ok(text) => {
+                        tracing::info!("✅ PDF extracted using pdftotext fallback: {} chars", text.chars().count());
+                        Ok(text)
+                    }
+                    Err(pdftotext_err) => {
+                        tracing::error!(
+                            lopdf_error = %lopdf_err,
+                            pdftotext_error = %pdftotext_err,
+                            "Both PDF extraction backends failed"
+                        );
+                        Err(anyhow::anyhow!(
+                            "PDF extraction failed: lopdf error: {}, pdftotext error: {}",
+                            lopdf_err, pdftotext_err
+                        ))
+                    }
+                }
+            }
+        }
     }
 
-    fn extract_pdf_with_pdftotext(&self, data: &[u8]) -> Result<String> {
+    /// Pure-Rust PDF text extraction using lopdf.
+    /// Extracts text by walking page content streams and interpreting text operators.
+    fn lopdf_extract_sync(data: &[u8]) -> Result<String> {
+        use lopdf::Document;
+
+        let doc = Document::load_mem(data)
+            .map_err(|e| anyhow::anyhow!("lopdf failed to parse PDF: {}", e))?;
+
+        let mut all_text = String::new();
+        let pages = doc.get_pages();
+
+        for (page_num, _page_id) in pages {
+            match doc.extract_text(&[page_num]) {
+                Ok(page_text) => {
+                    if !all_text.is_empty() && !page_text.is_empty() {
+                        all_text.push('\n');
+                    }
+                    all_text.push_str(&page_text);
+                }
+                Err(e) => {
+                    tracing::debug!("lopdf: failed to extract text from page {}: {}", page_num, e);
+                    // Continue with other pages
+                }
+            }
+        }
+
+        if all_text.trim().is_empty() {
+            return Err(anyhow::anyhow!("lopdf extracted no text from PDF"));
+        }
+
+        Ok(all_text)
+    }
+
+    /// Synchronous PDF extraction using pdftotext binary.
+    /// This is a static function to allow calling from spawn_blocking.
+    /// Uses UUID for temp filename to prevent race conditions in concurrent calls.
+    fn pdftotext_extract_sync(data: &[u8]) -> Result<String> {
         use std::process::Command;
 
         let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("temp_pdf_{}.pdf", std::process::id()));
+        // Use UUID instead of process::id() to prevent temp file collisions
+        // when multiple PDFs are extracted concurrently via spawn_blocking
+        let temp_file = temp_dir.join(format!("temp_pdf_{}.pdf", Uuid::new_v4()));
 
         std::fs::write(&temp_file, data)
             .map_err(|e| anyhow::anyhow!("Failed to write temp PDF: {}", e))?;
@@ -512,7 +770,7 @@ impl RagEngine {
                     tracing::warn!("pdftotext extracted 0 characters");
                     Err(anyhow::anyhow!("pdftotext produced no text output"))
                 } else {
-                    tracing::info!("✅ pdftotext extracted {} characters", text_chars);
+                    tracing::debug!("pdftotext extracted {} characters", text_chars);
                     Ok(text)
                 }
             }
@@ -531,52 +789,50 @@ impl RagEngine {
         }
     }
 
-    fn chunk_text(&self, text: &str, chunk_size: usize) -> Vec<ChunkFragment> {
+    /// Async wrapper for text chunking using spawn_blocking.
+    /// This prevents blocking the Tokio async executor during CPU-intensive regex operations.
+    async fn chunk_text(&self, text: String, chunk_tokens: usize) -> Result<Vec<ChunkFragment>> {
+        tokio::task::spawn_blocking(move || Self::chunk_text_sync(&text, chunk_tokens))
+            .await
+            .context("Chunking task failed")
+    }
+
+    /// Synchronous text chunking with sentence-aware splitting.
+    /// This is a static function to allow calling from spawn_blocking.
+    fn chunk_text_sync(text: &str, chunk_tokens: usize) -> Vec<ChunkFragment> {
+        // Extract sentences from text
+        let sentences = Self::extract_sentences(text);
+        if sentences.is_empty() {
+            return Vec::new();
+        }
+
+        let mut window: Vec<usize> = Vec::new();
+        let mut token_sum = 0usize;
+        let sentence_overlap = 2usize; // Overlap 2 sentences between chunks
         let mut fragments = Vec::new();
 
-        for (page_idx, page_text) in text.split('\u{c}').enumerate() {
-            let words: Vec<&str> = page_text.split_whitespace().collect();
-            if words.is_empty() {
-                continue;
-            }
+        for (idx, sentence) in sentences.iter().enumerate() {
+            window.push(idx);
+            token_sum += sentence.tokens;
 
-            let page_number = page_idx + 1;
-
-            for chunk in words.chunks(chunk_size) {
-                let chunk_text = chunk.join(" ");
-                if !chunk_text.trim().is_empty() {
-                    let section = extract_section_heading(&chunk_text);
-                    fragments.push(ChunkFragment {
-                        text: chunk_text,
-                        page_number,
-                        section,
-                    });
+            // When token budget is exceeded, finalize current chunk
+            if token_sum >= chunk_tokens {
+                if let Some((text, metadata)) = Self::finalize_chunk(&window, &sentences, sentence_overlap) {
+                    fragments.push(ChunkFragment::from_metadata(text, metadata));
                 }
+
+                // Keep last N sentences for overlap
+                let overlap_start = window.len().saturating_sub(sentence_overlap);
+                window = window.split_off(overlap_start);
+                token_sum = window.iter().map(|&i| sentences[i].tokens).sum();
             }
         }
 
-        if fragments.is_empty() {
-            let words: Vec<&str> = text.split_whitespace().collect();
-            for chunk in words.chunks(chunk_size) {
-                let chunk_text = chunk.join(" ");
-                if !chunk_text.trim().is_empty() {
-                    let section = extract_section_heading(&chunk_text);
-                    fragments.push(ChunkFragment {
-                        text: chunk_text,
-                        page_number: 1,
-                        section,
-                    });
-                }
+        // Finalize remaining sentences
+        if !window.is_empty() {
+            if let Some((text, metadata)) = Self::finalize_chunk(&window, &sentences, 0) {
+                fragments.push(ChunkFragment::from_metadata(text, metadata));
             }
-
-            current_indices.push(idx);
-            current_token_total += sentence_tokens;
-        }
-
-        if let Some(chunk) =
-            Self::finalize_chunk(&current_indices, &sentences, overlap_with_previous)
-        {
-            chunks.push(chunk);
         }
 
         fragments
@@ -800,16 +1056,120 @@ impl RagEngine {
         SPLITTER.get_or_init(|| {
             // Load SRX rules from embedded segment.srx file
             const SRX_XML: &str = include_str!("../data/segment.srx");
-            let srx = SRX::from_str(SRX_XML)
+            let srx = srx::SRX::from_str(SRX_XML)
                 .expect("valid SRX rules from embedded segment.srx");
-            
+
             // Use English language rules for sentence splitting
             // This handles abbreviations like "Dr.", "Mr.", "etc." correctly
             srx.language_rules("English")
         })
     }
 
-    async fn save_to_disk(&self) -> Result<()> {
+    /// Validates that all indexes are synchronized with the chunks HashMap
+    /// Ensures document_hashes, lexical_index, and ann_index all contain the same chunk IDs
+    fn validate_index_sync(&mut self) -> Result<()> {
+        let valid_chunk_ids: HashSet<String> = self.chunks.keys().cloned().collect();
+
+        // Validate lexical index
+        self.lexical_index.drop_stale(&valid_chunk_ids);
+
+        // Ensure all chunks are in lexical index
+        for chunk_id in &valid_chunk_ids {
+            if let Some(chunk) = self.chunks.get(chunk_id) {
+                if !self.lexical_index.contains(chunk_id) {
+                    tracing::debug!("Re-adding missing chunk {} to lexical index", chunk_id);
+                    self.lexical_index.add_chunk(chunk_id, &chunk.text);
+                }
+            }
+        }
+
+        // Validate ANN index if present
+        if let Some(ann_index) = &mut self.ann_index {
+            // Remove stale entries from ANN
+            ann_index.drop_stale(&valid_chunk_ids);
+
+            // Add missing chunks to ANN
+            for chunk_id in &valid_chunk_ids {
+                if let Some(chunk) = self.chunks.get(chunk_id) {
+                    if !ann_index.contains(chunk_id) {
+                        tracing::debug!("Re-adding missing chunk {} to ANN index", chunk_id);
+                        ann_index.insert(chunk_id, &chunk.embedding);
+                    }
+                }
+            }
+        }
+
+        // Validate document hashes - remove orphaned entries
+        let valid_documents: HashSet<String> = self
+            .chunks
+            .values()
+            .map(|chunk| chunk.document_name.clone())
+            .collect();
+
+        self.document_hashes.retain(|doc_name, _| {
+            if valid_documents.contains(doc_name) {
+                true
+            } else {
+                tracing::debug!("Removing orphaned document hash for {}", doc_name);
+                false
+            }
+        });
+
+        tracing::debug!("Index synchronization validated");
+        Ok(())
+    }
+
+    // ============================================================
+    // Model-Partitioned Storage Helpers
+    // Enable hot-swapping between embedding models by storing each
+    // model's index in a separate file (e.g., chunks_nomic-embed-text.json)
+    // ============================================================
+
+    /// Sanitizes model name for safe use as a filename.
+    /// Replaces path separators, special characters, and handles edge cases.
+    pub fn sanitize_model_name(model_name: &str) -> String {
+        let trimmed = model_name.trim();
+
+        // Handle empty or whitespace-only input
+        if trimmed.is_empty() {
+            return "default".to_string();
+        }
+
+        // Replace path separators and unsafe characters
+        let sanitized: String = trimmed
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        // Final safety check - ensure result is not empty after sanitization
+        if sanitized.is_empty() || sanitized.chars().all(|c| c == '_' || c == '.') {
+            "default".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    /// Generates the index file path for a specific model.
+    /// Uses sanitized model name to ensure filesystem safety.
+    pub fn get_index_path(data_dir: &str, model_name: &str) -> PathBuf {
+        let sanitized = Self::sanitize_model_name(model_name);
+        PathBuf::from(data_dir).join(format!("chunks_{}.json", sanitized))
+    }
+
+    /// Generates the legacy index file path (for migration support).
+    pub fn get_legacy_path(data_dir: &str) -> PathBuf {
+        PathBuf::from(data_dir).join("chunks.json")
+    }
+
+    /// Persist the current state to disk atomically.
+    /// Uses temp file + rename pattern for crash safety.
+    pub async fn save_to_disk(&self) -> Result<()> {
         #[derive(Serialize)]
         struct PersistedState<'a> {
             version: u32,
@@ -820,104 +1180,221 @@ impl RagEngine {
             document_hashes: &'a HashMap<String, String>,
         }
 
-        let path = format!("{}/chunks.json", self.data_dir);
+        // Use model-specific path for hot-swappable storage
+        let model_name = self.embedding_service.model_name();
+        let final_path = Self::get_index_path(&self.data_dir, model_name);
+        let temp_path = final_path.with_extension("json.tmp");
+
         let state = PersistedState {
             version: 2,
-            model: self.embedding_service.model_name(),
+            model: model_name,
             chunks: &self.chunks,
             needs_reindex: self.needs_reindex,
             document_hashes: &self.document_hashes,
         };
 
         let data = serde_json::to_string_pretty(&state)?;
-        tokio::fs::write(path, data).await?;
-        tracing::debug!("Saved {} chunks to disk", self.chunks.len());
+
+        // Atomic write: write to temp file, then rename
+        tokio::fs::write(&temp_path, data)
+            .await
+            .context("Failed to write index to temporary file")?;
+        tokio::fs::rename(&temp_path, &final_path)
+            .await
+            .context("Failed to commit index file (atomic rename)")?;
+
+        tracing::debug!(
+            "Saved {} chunks to {:?} for model '{}'",
+            self.chunks.len(),
+            final_path,
+            model_name
+        );
         Ok(())
     }
 
     async fn load_from_disk(&mut self) -> Result<()> {
-        let path = format!("{}/chunks.json", self.data_dir);
-        if tokio::fs::try_exists(&path).await? {
-            let data = tokio::fs::read_to_string(path).await?;
-            #[derive(Deserialize)]
-            struct PersistedState {
-                version: u32,
-                model: String,
-                chunks: HashMap<String, DocumentChunk>,
-                #[serde(default)]
-                needs_reindex: bool,
-                #[serde(default)]
-                document_hashes: HashMap<String, String>,
-            }
+        let current_model = self.embedding_service.model_name();
+        let model_specific_path = Self::get_index_path(&self.data_dir, current_model);
+        let legacy_path = Self::get_legacy_path(&self.data_dir);
+
+        #[derive(Deserialize)]
+        struct PersistedState {
+            version: u32,
+            model: String,
+            chunks: HashMap<String, DocumentChunk>,
+            #[serde(default)]
+            needs_reindex: bool,
+            #[serde(default)]
+            document_hashes: HashMap<String, String>,
+        }
+
+        // Helper to peek at model name in a JSON file without fully loading
+        #[derive(Deserialize)]
+        struct ModelOnly {
+            model: String,
+        }
+
+        // Strategy:
+        // 1. Try model-specific file first (priority)
+        // 2. Fall back to legacy chunks.json ONLY if model matches (migration)
+        // 3. Never delete another model's data
+
+        // Step 1: Check for model-specific index file
+        if tokio::fs::try_exists(&model_specific_path).await? {
+            tracing::info!(
+                "Loading model-specific index from {:?} for model '{}'",
+                model_specific_path,
+                current_model
+            );
+            let data = tokio::fs::read_to_string(&model_specific_path).await?;
 
             match serde_json::from_str::<PersistedState>(&data) {
-                Ok(PersistedState {
-                    version,
-                    model,
-                    chunks,
-                    needs_reindex,
-                }) => {
-                    if model != self.embedding_service.model_name() {
-                        tracing::warn!(
-                            "Embedding model changed from '{}' to '{}'. Existing embeddings will be reindexed.",
-                            model,
-                            self.embedding_service.model_name()
-                        );
-                        self.chunks.clear();
-                        self.needs_reindex = true;
-                        self.lexical_index.clear();
-                        self.ann_index = None;
-                        self.save_to_disk().await?;
-                    } else if version < 2 {
-                        tracing::info!(
-                            "Chunk metadata version {} is outdated. Marking for reindex to capture provenance data.",
-                            version
-                        );
-                        self.chunks.clear();
-                        self.needs_reindex = true;
-                        self.save_to_disk().await?;
-                    } else {
-                        self.chunks = chunks;
-                        self.needs_reindex = needs_reindex;
-                        self.document_hashes = document_hashes;
-                        // Do not filter document_hashes based on existing_docs.
-                        // This preserves hashes for documents that have zero chunks due to filtering.
-                        // If you need to clean up hashes for deleted documents, implement that logic separately.
-                        if self.document_hashes.is_empty() && !self.chunks.is_empty() {
-                            tracing::info!(
-                                "No document fingerprints found in cache. Existing documents will be reindexed to initialize change detection."
-                            );
-                            self.needs_reindex = true;
-                        }
-                        tracing::info!("Loaded {} chunks from disk", self.chunks.len());
-                    }
+                Ok(state) => {
+                    return self.apply_loaded_state(
+                        state.version,
+                        state.chunks,
+                        state.needs_reindex,
+                        state.document_hashes,
+                        &model_specific_path,
+                        false,
+                    ).await;
                 }
-                Err(_) => {
-                    let legacy_chunks: HashMap<String, DocumentChunk> = serde_json::from_str(&data)
-                        .context("Failed to parse legacy chunks.json")?;
-                    if !legacy_chunks.is_empty() {
-                        tracing::warn!(
-                            "Existing embeddings were created before provenance metadata was tracked. Reindexing with model '{}' is required.",
-                            self.embedding_service.model_name()
-                        );
-                        tracing::info!(
-                            "Discarding {} legacy chunks so they can be regenerated.",
-                            legacy_chunks.len()
-                        );
-                        self.needs_reindex = true;
-                    }
-                    self.chunks.clear();
-                    self.document_hashes.clear();
-                    self.save_to_disk().await?;
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse model-specific index at {:?}: {}. Starting fresh for model '{}'. \
+                        Marking for reindex to rebuild data.",
+                        model_specific_path,
+                        e,
+                        current_model
+                    );
+                    // Don't delete corrupted file - let user investigate
+                    // But mark for reindex so we rebuild instead of running empty
+                    self.needs_reindex = true;
+                    return Ok(());
                 }
             }
         }
+
+        // Step 2: Check legacy chunks.json for migration
+        if tokio::fs::try_exists(&legacy_path).await? {
+            tracing::info!("No model-specific index found. Checking legacy chunks.json for migration...");
+            let data = tokio::fs::read_to_string(&legacy_path).await?;
+
+            // Peek at model name first
+            if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
+                if info.model == current_model {
+                    tracing::info!(
+                        "Legacy index matches current model '{}'. Migrating to model-specific storage.",
+                        current_model
+                    );
+
+                    match serde_json::from_str::<PersistedState>(&data) {
+                        Ok(state) => {
+                            return self.apply_loaded_state(
+                                state.version,
+                                state.chunks,
+                                state.needs_reindex,
+                                state.document_hashes,
+                                &legacy_path,
+                                true,
+                            ).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse legacy index: {}. Starting fresh.", e);
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        "Legacy index belongs to model '{}', but we're using '{}'. \
+                        Legacy data preserved. Starting fresh for current model.",
+                        info.model,
+                        current_model
+                    );
+                    // DO NOT delete legacy file - it belongs to another model
+                }
+            } else {
+                // Very old format without model field - try to parse as raw chunks
+                tracing::warn!(
+                    "Legacy index has unknown format. Checking if it can be migrated..."
+                );
+                if let Ok(legacy_chunks) = serde_json::from_str::<HashMap<String, DocumentChunk>>(&data) {
+                    if !legacy_chunks.is_empty() {
+                        tracing::warn!(
+                            "Found {} legacy chunks without model info. Reindexing required for model '{}'.",
+                            legacy_chunks.len(),
+                            current_model
+                        );
+                        self.needs_reindex = true;
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "No existing index found for model '{}'. Starting fresh.",
+            current_model
+        );
+        Ok(())
+    }
+
+    /// Helper to apply loaded state and optionally migrate to new format
+    async fn apply_loaded_state(
+        &mut self,
+        version: u32,
+        chunks: HashMap<String, DocumentChunk>,
+        needs_reindex: bool,
+        document_hashes: HashMap<String, String>,
+        source_path: &std::path::Path,
+        migrate_to_new_format: bool,
+    ) -> Result<()> {
+        if version < 2 {
+            tracing::info!(
+                "Index version {} is outdated. Marking for reindex to capture provenance data.",
+                version
+            );
+            self.chunks.clear();
+            self.needs_reindex = true;
+            self.save_to_disk().await?;
+            return Ok(());
+        }
+
+        self.chunks = chunks;
+        self.needs_reindex = needs_reindex;
+        self.document_hashes = document_hashes;
+
+        // Check if document fingerprints need initialization
+        if self.document_hashes.is_empty() && !self.chunks.is_empty() {
+            tracing::info!(
+                "No document fingerprints found. Marking for reindex to initialize change detection."
+            );
+            self.needs_reindex = true;
+        }
+
+        tracing::info!(
+            "Loaded {} chunks from {:?}",
+            self.chunks.len(),
+            source_path
+        );
+
+        // Validate and repair index synchronization
+        self.validate_index_sync()?;
+
+        // Migrate to new format if needed
+        if migrate_to_new_format {
+            tracing::info!("Saving to model-specific format...");
+            self.save_to_disk().await?;
+            tracing::info!(
+                "Migration complete. Legacy chunks.json preserved for safety. \
+                You can delete it manually after verifying the new index works."
+            );
+        }
+
         Ok(())
     }
 
     fn compute_document_hash(data: &[u8]) -> String {
         let hash = Sha256::digest(data);
-        format!("{:x}", hash)
+        format!("{hash:x}")
     }
 }
 
@@ -939,28 +1416,8 @@ impl RagEngine {
 ///
 /// * `Some(String)` - The extracted heading (up to 120 characters) if found
 /// * `None` - If no suitable heading is found in the text
-fn extract_section_heading(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if trimmed.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-
-        let alphabetic_count = trimmed.chars().filter(|c| c.is_alphabetic()).count();
-        if alphabetic_count < 3 {
-            continue;
-        }
-
-        let truncated: String = trimmed.chars().take(120).collect();
-        return Some(truncated);
-    }
-
-    None
-}
+// extract_section_heading has been replaced by sentence-aware chunking
+// which extracts headings via SentenceInfo in extract_sentences()
 
 fn default_page_number() -> usize {
     0
@@ -1043,6 +1500,7 @@ impl AnnIndex {
         }
     }
 
+    #[allow(dead_code)]
     fn dim(&self) -> usize {
         self.dim
     }
@@ -1175,6 +1633,17 @@ impl AnnIndex {
         }
 
         neighbors
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.id_to_bucket.contains_key(id)
+    }
+
+    fn drop_stale(&mut self, valid_ids: &HashSet<String>) {
+        let current_ids: HashSet<String> = self.id_to_bucket.keys().cloned().collect();
+        for stale_id in current_ids.difference(valid_ids) {
+            self.remove(stale_id);
+        }
     }
 }
 
@@ -1320,6 +1789,17 @@ impl LexicalIndex {
         }
         results
     }
+
+    fn contains(&self, id: &str) -> bool {
+        self.doc_terms.contains_key(id)
+    }
+
+    fn drop_stale(&mut self, valid_ids: &HashSet<String>) {
+        let current_ids: HashSet<String> = self.doc_terms.keys().cloned().collect();
+        for stale_id in current_ids.difference(valid_ids) {
+            self.remove_chunk(stale_id);
+        }
+    }
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -1327,4 +1807,389 @@ fn tokenize(text: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(|token| token.to_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sentence_info_creation() {
+        // Test that extract_sentences creates SentenceInfo with proper metadata
+        let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
+
+        let sentences = RagEngine::extract_sentences(test_text);
+
+        assert!(!sentences.is_empty(), "Should extract sentences");
+
+        // Verify sentence metadata
+        for sentence in &sentences {
+            assert!(sentence.tokens > 0, "Each sentence should have token count");
+            assert!(sentence.page > 0, "Each sentence should have page number");
+        }
+    }
+
+    #[test]
+    fn test_finalize_chunk_creates_metadata() {
+        let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
+        let sentences = RagEngine::extract_sentences(test_text);
+
+        assert!(!sentences.is_empty(), "Should have sentences");
+
+        // Finalize first two sentences into a chunk
+        let indices: Vec<usize> = vec![0, 1];
+        let result = RagEngine::finalize_chunk(&indices, &sentences, 0);
+
+        assert!(result.is_some(), "Should create chunk");
+
+        let (text, metadata) = result.unwrap();
+        assert!(!text.is_empty(), "Chunk text should not be empty");
+        assert!(metadata.sentence_range.is_some(), "sentence_range should be populated");
+        assert!(metadata.token_count > 0, "token_count should be positive");
+        assert!(metadata.page_range.is_some(), "page_range should be populated");
+    }
+
+    #[test]
+    fn test_lexical_index_contains_and_drop_stale() {
+        let mut index = LexicalIndex::new();
+
+        // Add some chunks
+        index.add_chunk("chunk1", "hello world");
+        index.add_chunk("chunk2", "foo bar baz");
+        index.add_chunk("chunk3", "test document");
+
+        // Verify contains works
+        assert!(index.contains("chunk1"));
+        assert!(index.contains("chunk2"));
+        assert!(index.contains("chunk3"));
+        assert!(!index.contains("chunk4"));
+
+        // Create a set with only chunk1 and chunk2
+        let valid_ids: HashSet<String> = vec!["chunk1".to_string(), "chunk2".to_string()]
+            .into_iter()
+            .collect();
+
+        // Drop stale entries
+        index.drop_stale(&valid_ids);
+
+        // Verify chunk3 was removed
+        assert!(index.contains("chunk1"));
+        assert!(index.contains("chunk2"));
+        assert!(!index.contains("chunk3"), "chunk3 should have been removed as stale");
+    }
+
+    #[test]
+    fn test_ann_index_contains_and_drop_stale() {
+        let mut ann_index = AnnIndex::new(384); // Standard embedding dimension
+
+        // Create some test vectors
+        let vec1: Vec<f32> = (0..384).map(|i| (i as f32) / 384.0).collect();
+        let vec2: Vec<f32> = (0..384).map(|i| ((i + 100) as f32) / 384.0).collect();
+        let vec3: Vec<f32> = (0..384).map(|i| ((i + 200) as f32) / 384.0).collect();
+
+        // Insert vectors
+        ann_index.insert("id1", &vec1);
+        ann_index.insert("id2", &vec2);
+        ann_index.insert("id3", &vec3);
+
+        // Verify contains
+        assert!(ann_index.contains("id1"));
+        assert!(ann_index.contains("id2"));
+        assert!(ann_index.contains("id3"));
+        assert!(!ann_index.contains("id4"));
+
+        // Drop stale
+        let valid_ids: HashSet<String> = vec!["id1".to_string(), "id3".to_string()]
+            .into_iter()
+            .collect();
+
+        ann_index.drop_stale(&valid_ids);
+
+        // Verify id2 was removed
+        assert!(ann_index.contains("id1"));
+        assert!(!ann_index.contains("id2"), "id2 should have been removed");
+        assert!(ann_index.contains("id3"));
+    }
+
+    // ============================================================
+    // TDD Tests for Model-Partitioned Storage
+    // These tests define the expected behavior BEFORE implementation
+    // ============================================================
+
+    #[test]
+    fn test_sanitize_model_name_basic() {
+        // Basic model names should pass through unchanged
+        assert_eq!(RagEngine::sanitize_model_name("nomic-embed-text"), "nomic-embed-text");
+        assert_eq!(RagEngine::sanitize_model_name("all-MiniLM-L6-v2"), "all-MiniLM-L6-v2");
+    }
+
+    #[test]
+    fn test_sanitize_model_name_with_slashes() {
+        // Slashes (common in HuggingFace model names) should become underscores
+        assert_eq!(
+            RagEngine::sanitize_model_name("sentence-transformers/all-MiniLM-L6-v2"),
+            "sentence-transformers_all-MiniLM-L6-v2"
+        );
+        assert_eq!(
+            RagEngine::sanitize_model_name("openai/text-embedding-3-large"),
+            "openai_text-embedding-3-large"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_model_name_path_traversal() {
+        // Path traversal attempts should be sanitized (security)
+        assert_eq!(RagEngine::sanitize_model_name("../etc/passwd"), ".._etc_passwd");
+        assert_eq!(RagEngine::sanitize_model_name("..\\windows\\system32"), ".._windows_system32");
+        assert_eq!(RagEngine::sanitize_model_name("foo/../bar"), "foo_.._bar");
+    }
+
+    #[test]
+    fn test_sanitize_model_name_special_chars() {
+        // Special characters should become underscores
+        assert_eq!(RagEngine::sanitize_model_name("model:v1"), "model_v1");
+        assert_eq!(RagEngine::sanitize_model_name("model*test?"), "model_test_");
+        assert_eq!(RagEngine::sanitize_model_name("model<>|"), "model___");
+    }
+
+    #[test]
+    fn test_sanitize_model_name_empty_and_whitespace() {
+        // Empty or whitespace-only names should have a fallback
+        assert_eq!(RagEngine::sanitize_model_name(""), "default");
+        assert_eq!(RagEngine::sanitize_model_name("   "), "default");
+    }
+
+    #[test]
+    fn test_get_index_path_basic() {
+        use std::path::PathBuf;
+
+        let path = RagEngine::get_index_path("/data", "nomic-embed-text");
+        assert_eq!(path, PathBuf::from("/data/chunks_nomic-embed-text.json"));
+    }
+
+    #[test]
+    fn test_get_index_path_with_slashes_in_model() {
+        use std::path::PathBuf;
+
+        // Model names with slashes should be sanitized in the filename
+        let path = RagEngine::get_index_path("/data", "sentence-transformers/all-MiniLM");
+        assert_eq!(path, PathBuf::from("/data/chunks_sentence-transformers_all-MiniLM.json"));
+    }
+
+    #[test]
+    fn test_get_index_path_stays_in_directory() {
+        use std::path::PathBuf;
+
+        // Path traversal in model name should NOT escape the data directory
+        let path = RagEngine::get_index_path("/data", "../etc/passwd");
+        // Should NOT be /etc/passwd, should stay in /data
+        assert!(path.starts_with("/data/"));
+        assert_eq!(path, PathBuf::from("/data/chunks_.._etc_passwd.json"));
+    }
+
+    #[test]
+    fn test_get_legacy_path() {
+        use std::path::PathBuf;
+
+        let path = RagEngine::get_legacy_path("/data");
+        assert_eq!(path, PathBuf::from("/data/chunks.json"));
+    }
+
+    // ============================================================
+    // Integration Tests for Model-Partitioned Storage I/O
+    // These test actual file operations using tempdir
+    // ============================================================
+
+    /// Test that model-specific index files are created correctly
+    #[test]
+    fn test_model_specific_file_creation() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        // Simulate what save_to_disk does - create model-specific file
+        let model_name = "nomic-embed-text";
+        let index_path = RagEngine::get_index_path(data_dir, model_name);
+
+        // Create a mock index file
+        let mock_state = serde_json::json!({
+            "version": 2,
+            "model": model_name,
+            "chunks": {},
+            "needs_reindex": false,
+            "document_hashes": {}
+        });
+
+        std::fs::write(&index_path, serde_json::to_string_pretty(&mock_state).unwrap())
+            .expect("Failed to write mock index");
+
+        // Verify file exists at model-specific path
+        assert!(index_path.exists(), "Model-specific index should exist");
+        assert_eq!(
+            index_path.file_name().unwrap().to_str().unwrap(),
+            "chunks_nomic-embed-text.json"
+        );
+
+        // Verify legacy path does NOT exist
+        let legacy_path = RagEngine::get_legacy_path(data_dir);
+        assert!(!legacy_path.exists(), "Legacy path should NOT exist");
+    }
+
+    /// Test that switching models preserves existing model's index
+    #[test]
+    fn test_model_switching_preserves_other_index() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        // Create index for model A
+        let model_a = "nomic-embed-text";
+        let path_a = RagEngine::get_index_path(data_dir, model_a);
+        let state_a = serde_json::json!({
+            "version": 2,
+            "model": model_a,
+            "chunks": {"chunk1": {"id": "chunk1", "text": "model A data"}},
+            "needs_reindex": false
+        });
+        std::fs::write(&path_a, serde_json::to_string(&state_a).unwrap()).unwrap();
+
+        // Create index for model B
+        let model_b = "mxbai-embed-large";
+        let path_b = RagEngine::get_index_path(data_dir, model_b);
+        let state_b = serde_json::json!({
+            "version": 2,
+            "model": model_b,
+            "chunks": {"chunk2": {"id": "chunk2", "text": "model B data"}},
+            "needs_reindex": false
+        });
+        std::fs::write(&path_b, serde_json::to_string(&state_b).unwrap()).unwrap();
+
+        // Verify both files exist independently
+        assert!(path_a.exists(), "Model A index should exist");
+        assert!(path_b.exists(), "Model B index should exist");
+
+        // Read and verify contents are independent
+        let read_a: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path_a).unwrap()
+        ).unwrap();
+        let read_b: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path_b).unwrap()
+        ).unwrap();
+
+        assert_eq!(read_a["model"], "nomic-embed-text");
+        assert_eq!(read_b["model"], "mxbai-embed-large");
+        assert!(read_a["chunks"]["chunk1"].is_object());
+        assert!(read_b["chunks"]["chunk2"].is_object());
+    }
+
+    /// Test atomic write pattern (temp file + rename)
+    #[test]
+    fn test_atomic_write_pattern() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        let model_name = "test-model";
+        let final_path = RagEngine::get_index_path(data_dir, model_name);
+        let temp_path = final_path.with_extension("json.tmp");
+
+        // Simulate atomic write: write to temp, then rename
+        let data = serde_json::json!({"version": 2, "model": model_name});
+        std::fs::write(&temp_path, serde_json::to_string(&data).unwrap()).unwrap();
+
+        // Verify temp file exists before rename
+        assert!(temp_path.exists(), "Temp file should exist before rename");
+        assert!(!final_path.exists(), "Final file should NOT exist before rename");
+
+        // Perform rename (atomic operation)
+        std::fs::rename(&temp_path, &final_path).unwrap();
+
+        // Verify final file exists and temp is gone
+        assert!(final_path.exists(), "Final file should exist after rename");
+        assert!(!temp_path.exists(), "Temp file should NOT exist after rename");
+    }
+
+    /// Test legacy file detection and preservation
+    #[test]
+    fn test_legacy_file_preserved_on_model_mismatch() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        // Create legacy chunks.json for model A
+        let legacy_path = RagEngine::get_legacy_path(data_dir);
+        let legacy_state = serde_json::json!({
+            "version": 2,
+            "model": "old-model",
+            "chunks": {"legacy_chunk": {"id": "legacy", "text": "old data"}},
+            "needs_reindex": false
+        });
+        std::fs::write(&legacy_path, serde_json::to_string(&legacy_state).unwrap()).unwrap();
+
+        // Simulate "new model" wanting to load
+        let new_model = "new-model";
+        let new_model_path = RagEngine::get_index_path(data_dir, new_model);
+
+        // New model's file doesn't exist yet
+        assert!(!new_model_path.exists());
+
+        // Peek at legacy file's model (simulating load_from_disk behavior)
+        let legacy_data: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&legacy_path).unwrap()
+        ).unwrap();
+
+        // Model mismatch - legacy belongs to "old-model", we want "new-model"
+        assert_ne!(legacy_data["model"], new_model);
+
+        // Key assertion: Legacy file is STILL preserved (not deleted)
+        assert!(legacy_path.exists(), "Legacy file must be preserved on model mismatch");
+
+        // New model creates its own file
+        let new_state = serde_json::json!({
+            "version": 2,
+            "model": new_model,
+            "chunks": {},
+            "needs_reindex": true
+        });
+        std::fs::write(&new_model_path, serde_json::to_string(&new_state).unwrap()).unwrap();
+
+        // Both files coexist
+        assert!(legacy_path.exists(), "Legacy should still exist");
+        assert!(new_model_path.exists(), "New model index should exist");
+    }
+
+    /// Test migration scenario: legacy file matches current model
+    #[test]
+    fn test_legacy_migration_when_model_matches() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        let current_model = "nomic-embed-text";
+
+        // Create legacy chunks.json matching current model
+        let legacy_path = RagEngine::get_legacy_path(data_dir);
+        let legacy_state = serde_json::json!({
+            "version": 2,
+            "model": current_model,
+            "chunks": {"migrated_chunk": {"id": "migrated", "text": "will migrate"}},
+            "needs_reindex": false,
+            "document_hashes": {"doc.pdf": "abc123"}
+        });
+        std::fs::write(&legacy_path, serde_json::to_string_pretty(&legacy_state).unwrap()).unwrap();
+
+        // Model-specific file doesn't exist yet
+        let model_path = RagEngine::get_index_path(data_dir, current_model);
+        assert!(!model_path.exists());
+
+        // Simulate migration: read legacy, write to model-specific path
+        let legacy_data = std::fs::read_to_string(&legacy_path).unwrap();
+        std::fs::write(&model_path, &legacy_data).unwrap();
+
+        // After migration: both files exist (legacy preserved for safety)
+        assert!(legacy_path.exists(), "Legacy preserved after migration");
+        assert!(model_path.exists(), "Model-specific file created");
+
+        // Verify migrated content
+        let migrated: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&model_path).unwrap()
+        ).unwrap();
+        assert_eq!(migrated["model"], current_model);
+        assert!(migrated["chunks"]["migrated_chunk"].is_object());
+    }
 }

@@ -8,7 +8,7 @@ Search and analyze your PDF documents directly within Claude conversations witho
 
 This project demonstrates how to build a production-ready MCP server using Rust that:
 
-- **Processes PDF documents locally** using poppler for text extraction
+- **Processes PDF documents locally** using pure-Rust lopdf with poppler fallback for text extraction
 - **Generates embeddings** using your preferred local Ollama embedding model (no external API calls)
 - **Provides semantic search** through document collections
 - **Integrates seamlessly** with Claude Desktop via MCP protocol
@@ -92,10 +92,17 @@ let service = server.serve(stdio()).await?;
 - Validates your selection against the models available in your Ollama installation at startup
 
 ### 📁 **Document Management**
-- Automatic PDF text extraction via poppler
+- Automatic PDF text extraction via pure-Rust lopdf (no external dependencies) with poppler fallback
 - Document chunking for optimal embedding generation
 - Automatic reindexing when your Ollama embedding model changes
 - Real-time document list and statistics
+- Background job system for non-blocking document processing
+
+### 🔄 **Model-Partitioned Storage**
+- Each embedding model gets its own index file (`chunks_{model}.json`)
+- Hot-swap between models without losing previously computed embeddings
+- Switch back to a previous model and instantly restore its index
+- Atomic file writes prevent data corruption during saves
 
 ### 🔒 **Privacy-First Design**
 - All processing happens locally
@@ -105,8 +112,9 @@ let service = server.serve(stdio()).await?;
 
 ### ⚡ **High Performance**
 - Rust's memory safety and performance
-- Async/await for non-blocking operations
+- Async/await for non-blocking operations with `spawn_blocking` for CPU-bound work
 - Efficient vector storage and retrieval
+- Lock instrumentation for monitoring and debugging
 
 ## 🚀 Quick Start
 
@@ -118,7 +126,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Install Ollama
 brew install ollama
 
-# Install Poppler (for PDF parsing)
+# (Optional) Install Poppler for fallback PDF parsing
+# The server uses pure-Rust lopdf by default, but falls back to pdftotext for complex PDFs
 brew install poppler
 
 # Start Ollama and install embedding model
@@ -226,15 +235,37 @@ cp your-files.pdf ~/Documents/rag/
    - **Input**: Query string, optional result count
    - **Output**: Ranked search results with similarity scores
 
-2. **`list_documents`**  
+2. **`list_documents`**
    - **Purpose**: Document inventory management
    - **Input**: None
    - **Output**: List of all indexed documents
 
 3. **`get_stats`**
    - **Purpose**: System monitoring and debugging
-   - **Input**: None  
+   - **Input**: None
    - **Output**: Embedding counts, memory usage, performance metrics
+
+4. **`start_reindex`**
+   - **Purpose**: Trigger background document reindexing
+   - **Input**: None
+   - **Output**: Job ID for tracking progress
+
+5. **`get_job_status`**
+   - **Purpose**: Check status of background jobs
+   - **Input**: Job ID
+   - **Output**: Job progress and status details
+
+6. **`calibrate_reranker`**
+   - **Purpose**: Measure and calibrate reranker timeout settings
+   - **Input**: Sample query, optional sample size
+   - **Output**: Latency statistics and recommended timeout
+
+### Health Endpoints
+
+The server exposes HTTP health endpoints for monitoring:
+
+- **`/healthz`** - Liveness probe (always returns 200 if process is running)
+- **`/readyz`** - Readiness probe (returns 200 if engine lock can be acquired within 100ms)
 
 ## 📚 Documentation
 
