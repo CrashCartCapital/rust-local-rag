@@ -564,7 +564,7 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 - **worker.rs**: Background worker supervisor that processes reindexing jobs asynchronously, handles job resumption on restart, implements poison pill handling for document failures, and provides lock instrumentation via TimedWriteLockGuard for monitoring lock durations
 - **rag_engine.rs**: Core RAG logic - sentence-aware chunking with metadata, embedding storage, similarity search, reranking orchestration, SHA-256 document fingerprinting, persistence, pure-Rust PDF extraction via lopdf with pdftotext fallback
 - **embeddings.rs**: Ollama API client for generating embeddings with LRU caching (1000 entries) for query embeddings and batch embedding support
-- **reranker.rs**: LLM-based relevance reranking service using Ollama, performs concurrent second-stage scoring of search candidates
+- **reranker.rs**: LLM-based relevance reranking service using Ollama with Phi-4-mini, performs concurrent second-stage scoring of search candidates using JSON-structured prompts with Phi chat template
 
 ### Key Design Patterns
 
@@ -766,7 +766,7 @@ When `RagEngine::load_from_disk()` detects a model change:
 
 ### Two-Stage Retrieval with Reranking
 
-The search process now uses a two-stage approach:
+The search process uses a two-stage approach:
 
 #### Stage 1: Embedding-based Retrieval
 - Query embedded using cached embedding service
@@ -777,11 +777,46 @@ The search process now uses a two-stage approach:
 - If `RerankerService` is available, candidates are reranked
 - Concurrent scoring using `futures::join_all` for parallel processing
 - LLM evaluates relevance with full context (query, document name, page, section, chunk text)
-- Scores parsed from LLM response, clamped to [0.0, 1.0]
+- Scores parsed from LLM response, normalized to [0.0, 1.0]
 - Falls back to embedding score if reranking fails for any candidate
 - Results sorted by final relevance score
 
 **Graceful Degradation**: If reranker model is unavailable at startup, system continues with embedding-only search.
+
+#### Reranker Prompt Architecture (Phi-4-Mini)
+
+The reranker uses a specialized prompt format for Phi-family models. See `prompts/reranker.txt` for the full template.
+
+**Key Implementation Details**:
+
+1. **Phi Chat Template**: Uses `<|user|>...<|end|><|assistant|>` tokens required for Phi models to follow instructions (vs text completion mode)
+
+2. **JSON Output Format**: Forces structured output via JSON syntax:
+   ```json
+   {"classification": "DIRECT_ANSWER", "reasoning": "...", "score": 95}
+   ```
+
+3. **Pre-fill Technique**: Prompt ends with `{"classification": "` to force the model into JSON completion mode, preventing early EOS prediction
+
+4. **Stop Sequences**: Configured with `["<|end|>", "<|user|>"]` to prevent run-on generation
+
+5. **Score Parsing**: `parse_score()` reconstructs full JSON by prepending the pre-fill, extracts the `score` field, normalizes 0-100 → 0.0-1.0
+
+6. **Fallback Chain**: If JSON parsing fails, falls back to text-based score extraction (finds "score" followed by a number)
+
+**Scoring Rubric**:
+- 90-100: Directly answers with specific info
+- 70-89: Partially answers
+- 50-69: Related but doesn't answer
+- 25-49: Same topic, not useful
+- 0-24: Unrelated
+
+**Penalties Applied**:
+- Prefaces/intros: MAX 40
+- Table of contents: MAX 30
+- Keywords but no answer: MAX 65
+
+**Debugging Reference**: See `docs/RERANKER_DEBUGGING_POSTMORTEM.md` for detailed documentation of the prompt engineering process and lessons learned.
 
 ### MCP Tool Definitions
 

@@ -49,6 +49,16 @@ struct OllamaGenerateRequest {
     prompt: String,
     #[serde(default)]
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +70,7 @@ pub struct RerankerService {
     client: reqwest::Client,
     ollama_url: String,
     model: String,
+    prompt_template: String,
 }
 
 impl RerankerService {
@@ -75,7 +86,7 @@ impl RerankerService {
     /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `llama3.1`)
     /// 
     /// # Errors
-    /// 
+    ///
     /// Returns an error if:
     /// * Cannot connect to Ollama at the configured URL
     /// * The specified model is not available (not pulled)
@@ -83,6 +94,9 @@ impl RerankerService {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
         let model = std::env::var("OLLAMA_RERANK_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+
+        // Load prompt template from file or use default
+        let prompt_template = Self::load_prompt_template();
 
         // Configure client with optimized connection pooling settings
         // to avoid connection overhead on each request
@@ -98,12 +112,54 @@ impl RerankerService {
             client,
             ollama_url,
             model,
+            prompt_template,
         };
 
         service.test_connection().await?;
         service.verify_model().await?;
 
         Ok(service)
+    }
+
+    /// Load prompt template from external file or fall back to default
+    fn load_prompt_template() -> String {
+        let prompts_dir = std::env::var("PROMPTS_DIR").unwrap_or_else(|_| "./prompts".to_string());
+        let prompt_path = std::path::Path::new(&prompts_dir).join("reranker.txt");
+
+        match std::fs::read_to_string(&prompt_path) {
+            Ok(template) => {
+                tracing::info!("Loaded reranker prompt from {}", prompt_path.display());
+                template
+            }
+            Err(_) => {
+                tracing::info!("Using default reranker prompt (no external file found at {})", prompt_path.display());
+                Self::default_prompt_template()
+            }
+        }
+    }
+
+    /// Default prompt template (compiled in as fallback)
+    fn default_prompt_template() -> String {
+        r#"You are a semantic relevance judge for a RAG system. Your job is to score how well a document chunk ANSWERS the user's underlying question - not just whether it contains matching keywords.
+
+Scoring guidelines (0-100):
+- 90-100: Directly answers the question with actionable information
+- 70-89: Highly relevant context that helps answer the question
+- 50-69: Related topic but doesn't directly address the question
+- 30-49: Tangentially related, mostly background information
+- 0-29: Not relevant to what the user is actually asking
+
+IMPORTANT: A chunk mentioning the same words as the query is NOT automatically relevant. Judge whether the chunk would actually help someone who asked this question.
+
+Query: {query}
+Document: {document}
+Page: {page}
+Section: {section}
+
+Chunk:
+{text}
+
+Score (0-100):"#.to_string()
     }
 
     /// Performs second-stage reranking of search candidates using an LLM.
@@ -206,12 +262,16 @@ impl RerankerService {
         let prompt = self.build_prompt(query, candidate);
         let phase1_elapsed = phase1_start.elapsed().as_millis();
 
-        // Phase 2: Create request
+        // Phase 2: Create request with stop sequences for Phi template
         let phase2_start = Instant::now();
         let request = OllamaGenerateRequest {
             model: self.model.clone(),
             prompt,
             stream: false,
+            options: Some(OllamaOptions {
+                stop: Some(vec!["<|end|>".to_string(), "<|user|>".to_string()]),
+                temperature: Some(0.1), // Low temperature for consistent scoring
+            }),
         };
         let phase2_elapsed = phase2_start.elapsed().as_millis();
 
@@ -264,49 +324,101 @@ impl RerankerService {
     }
 
     fn build_prompt(&self, query: &str, candidate: &RerankerCandidate) -> String {
-        let mut prompt = format!(
-            "You are a retrieval relevance scorer. Given a search query and a document chunk, respond with a single number between 0 and 1 indicating how relevant the chunk is to the query.\n\nQuery: {query}\nDocument: {doc}\nPage: {page}\n",
-            query = query.trim(),
-            doc = candidate.document,
-            page = if candidate.page_number == 0 {
-                "unknown".to_string()
-            } else {
-                candidate.page_number.to_string()
-            }
-        );
+        let page = if candidate.page_number == 0 {
+            "unknown".to_string()
+        } else {
+            candidate.page_number.to_string()
+        };
 
-        if let Some(section) = &candidate.section
-            && !section.trim().is_empty() {
-                prompt.push_str(&format!("Section heading: {}\n", section.trim()));
-            }
+        let section = candidate
+            .section
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "N/A".to_string());
 
-        prompt.push_str("\nChunk:\n");
-        prompt.push_str(candidate.text.trim());
-        prompt.push_str(
-            "\n\nRespond with only the numeric relevance score between 0 and 1, using decimal format.",
-        );
-
-        prompt
+        self.prompt_template
+            .replace("{query}", query.trim())
+            .replace("{document}", &candidate.document)
+            .replace("{page}", &page)
+            .replace("{section}", &section)
+            .replace("{text}", candidate.text.trim())
     }
 
+    /// Parse score from LLM response, handling JSON format with pre-fill.
+    /// Reconstructs JSON from pre-filled prompt, extracts "score" field.
+    /// Falls back to finding first number if JSON parsing fails.
+    /// Normalizes all scores to 0.0-1.0 range.
     fn parse_score(&self, response: &str) -> Option<f32> {
-        let mut number = String::new();
-        let mut found_digit = false;
+        tracing::debug!(
+            response_preview = %response.chars().take(200).collect::<String>(),
+            "Parsing reranker response"
+        );
 
+        // Reconstruct full JSON by prepending the pre-fill from the prompt
+        // Prompt ends with: {"classification": "
+        // Model completes: DIRECT_ANSWER", "reasoning": "...", "score": 95}
+        let full_json = format!(r#"{{"classification": "{}"#, response);
+
+        // Try to parse as JSON and extract score
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&full_json) {
+            if let Some(score) = json.get("score").and_then(|v| v.as_f64()) {
+                let score = score as f32;
+                tracing::debug!(raw_score = score, "Extracted score from JSON");
+                // Normalize: if > 1.0, assume 0-100 scale
+                return Some(if score > 1.0 {
+                    (score / 100.0).clamp(0.0, 1.0)
+                } else {
+                    score.clamp(0.0, 1.0)
+                });
+            }
+        }
+
+        // Fallback: find "score" followed by a number in the response
+        tracing::debug!("JSON parse failed, trying text fallback");
+        let lower = response.to_lowercase();
+        if let Some(score_pos) = lower.find("score") {
+            let after_score = &response[score_pos..];
+            let mut num = String::new();
+            let mut found_digit = false;
+            for ch in after_score.chars() {
+                if ch.is_ascii_digit() || ch == '.' {
+                    num.push(ch);
+                    found_digit = true;
+                } else if found_digit {
+                    break;
+                }
+            }
+            if let Ok(score) = num.trim().parse::<f32>() {
+                tracing::debug!(raw_score = score, "Extracted score via text fallback");
+                return Some(if score > 1.0 {
+                    (score / 100.0).clamp(0.0, 1.0)
+                } else {
+                    score.clamp(0.0, 1.0)
+                });
+            }
+        }
+
+        // Last resort: first number in response
+        let mut num = String::new();
+        let mut found_digit = false;
         for ch in response.chars() {
             if ch.is_ascii_digit() || ch == '.' {
-                number.push(ch);
+                num.push(ch);
                 found_digit = true;
             } else if found_digit {
                 break;
             }
         }
 
-        number
-            .trim()
-            .parse::<f32>()
-            .ok()
-            .map(|score| score.clamp(0.0, 1.0))
+        num.trim().parse::<f32>().ok().map(|score| {
+            tracing::debug!(raw_score = score, "Extracted score via last resort");
+            if score > 1.0 {
+                (score / 100.0).clamp(0.0, 1.0)
+            } else {
+                score.clamp(0.0, 1.0)
+            }
+        })
     }
 
     /// Calibrate timeout by measuring actual LLM latencies

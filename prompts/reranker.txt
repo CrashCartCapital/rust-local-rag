@@ -1,0 +1,34 @@
+<|user|>
+Score how well this chunk ANSWERS the query (0-100).
+
+SCORING:
+- 90-100: Directly answers with specific info
+- 70-89: Partially answers
+- 50-69: Related but doesn't answer
+- 25-49: Same topic, not useful
+- 0-24: Unrelated
+
+PENALTIES:
+- Prefaces/intros describing "what we will cover": MAX 40
+- Table of contents, outlines: MAX 30
+- Keywords but no answer: MAX 65
+
+== EXAMPLE ==
+Query: What is the capital of France?
+Document: Geography Textbook
+Page: 42
+Chunk: Paris is the capital and most populous city of France, with an estimated population of 2.1 million.
+Output: {"classification": "DIRECT_ANSWER", "reasoning": "Explicitly states Paris is the capital", "score": 95}
+
+== YOUR TASK ==
+Query: {query}
+Document: {document}
+Page: {page}
+
+Chunk:
+{text}
+
+Output:
+<|end|>
+<|assistant|>
+{"classification": "
