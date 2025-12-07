@@ -40,8 +40,7 @@ async fn test_pdf_extraction_does_not_block_executor() {
         let res = tokio::time::timeout(Duration::from_millis(50), handle).await;
         assert!(
             res.is_ok(),
-            "Search task {} was blocked by extraction and timed out",
-            i
+            "Search task {i} was blocked by extraction and timed out"
         );
     }
 
@@ -72,8 +71,7 @@ async fn test_concurrent_pdf_extraction_no_temp_file_collision() {
                 // Each path should be unique
                 assert!(
                     guard.insert(temp_name.clone()),
-                    "Temp file collision detected: {}",
-                    temp_name
+                    "Temp file collision detected: {temp_name}"
                 );
             })
         })

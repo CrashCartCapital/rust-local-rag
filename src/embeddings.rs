@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::Result;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
@@ -20,6 +19,8 @@ struct OllamaEmbeddingResponse {
     embeddings: Option<Vec<Vec<f32>>>,
 }
 
+/// Embedding service using Ollama API with LRU query caching.
+/// Supports both single and batch embedding operations.
 pub struct EmbeddingService {
     client: reqwest::Client,
     ollama_url: String,

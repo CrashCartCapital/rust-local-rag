@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -42,6 +41,8 @@ pub struct ChunkMetadata {
     pub overlap_with_previous: usize,
 }
 
+/// A chunk of document text with its embedding vector and metadata.
+/// Chunks are the fundamental unit of storage and retrieval in the RAG system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentChunk {
     pub id: String,
@@ -66,6 +67,7 @@ struct SentenceInfo {
     index: usize,
 }
 
+/// Search result containing the matched chunk text, relevance score, and source metadata.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub text: String,
@@ -77,6 +79,8 @@ pub struct SearchResult {
     pub section: Option<String>,
 }
 
+/// Core RAG engine handling document chunking, embedding, and semantic search.
+/// Supports two-stage retrieval: embedding similarity + optional LLM reranking.
 pub struct RagEngine {
     chunks: HashMap<String, DocumentChunk>,
     embedding_service: EmbeddingService,
@@ -176,6 +180,8 @@ impl RagEngine {
         Ok(())
     }
 
+    /// Adds a document to the index by extracting text, chunking, and generating embeddings.
+    /// Returns the number of chunks created (0 if document unchanged via hash check).
     pub async fn add_document(
         &mut self,
         filename: &str,
@@ -239,7 +245,7 @@ impl RagEngine {
         let batch_size = get_batch_size();
         let cooldown_ms = get_batch_cooldown_ms();
         let total_chunks = chunk_texts.len();
-        let total_batches = (total_chunks + batch_size - 1) / batch_size;
+        let total_batches = total_chunks.div_ceil(batch_size);
 
         tracing::info!(
             "Processing {} chunks from {} in {} batches of up to {} chunks each (cooldown: {}ms between batches)",
@@ -409,6 +415,8 @@ impl RagEngine {
         Ok(candidates)
     }
 
+    /// Performs semantic search over indexed documents.
+    /// Uses two-stage retrieval: embedding similarity + optional LLM reranking.
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
         if self.chunks.is_empty() {
             return Ok(vec![]);
@@ -1031,11 +1039,19 @@ impl RagEngine {
         }
 
         // Refined: match lines starting with digit(s), dot, and whitespace (e.g., "1. Introduction")
-        if Regex::new(r"^\d+\.\s").unwrap().is_match(trimmed) {
+        if Self::heading_regex().is_match(trimmed) {
             return true;
         }
 
         false
+    }
+
+    /// Returns a cached regex for detecting numbered headings (e.g., "1. Introduction")
+    fn heading_regex() -> &'static Regex {
+        static HEADING_REGEX: OnceLock<Regex> = OnceLock::new();
+        HEADING_REGEX.get_or_init(|| {
+            Regex::new(r"^\d+\.\s").expect("valid heading regex pattern")
+        })
     }
 
     fn approximate_token_count(value: &str) -> usize {
@@ -1159,7 +1175,7 @@ impl RagEngine {
     /// Uses sanitized model name to ensure filesystem safety.
     pub fn get_index_path(data_dir: &str, model_name: &str) -> PathBuf {
         let sanitized = Self::sanitize_model_name(model_name);
-        PathBuf::from(data_dir).join(format!("chunks_{}.json", sanitized))
+        PathBuf::from(data_dir).join(format!("chunks_{sanitized}.json"))
     }
 
     /// Generates the legacy index file path (for migration support).
@@ -1220,6 +1236,7 @@ impl RagEngine {
         #[derive(Deserialize)]
         struct PersistedState {
             version: u32,
+            #[allow(dead_code)] // Deserialized for schema validation, not explicitly read
             model: String,
             chunks: HashMap<String, DocumentChunk>,
             #[serde(default)]
@@ -1418,7 +1435,6 @@ impl RagEngine {
 /// * `None` - If no suitable heading is found in the text
 // extract_section_heading has been replaced by sentence-aware chunking
 // which extracts headings via SentenceInfo in extract_sentences()
-
 fn default_page_number() -> usize {
     0
 }
@@ -1661,6 +1677,7 @@ impl LexicalIndex {
         Self::default()
     }
 
+    #[allow(dead_code)] // Reserved for future full reindex operations
     fn clear(&mut self) {
         self.term_postings.clear();
         self.doc_lengths.clear();
@@ -1802,9 +1819,12 @@ impl LexicalIndex {
     }
 }
 
+/// Tokenizes text into lowercase terms for lexical indexing.
+/// Filters out tokens shorter than 3 characters to reduce noise
+/// (stop words, numbers, abbreviations) and memory usage.
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
+        .filter(|token| token.len() >= 3)
         .map(|token| token.to_lowercase())
         .collect()
 }

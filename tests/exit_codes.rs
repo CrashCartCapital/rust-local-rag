@@ -54,12 +54,12 @@ fn test_exit_code_on_ollama_unreachable() {
                     // The main goal is that when it does exit on error, it uses non-zero
                 }
                 Err(e) => {
-                    panic!("Failed to check process status: {}", e);
+                    panic!("Failed to check process status: {e}");
                 }
             }
         }
         Err(e) => {
-            panic!("Failed to spawn process: {}", e);
+            panic!("Failed to spawn process: {e}");
         }
     }
 }
@@ -72,7 +72,6 @@ fn test_binary_exists_and_runs() {
     let bin_path = env!("CARGO_BIN_EXE_rust-local-rag");
     assert!(
         std::path::Path::new(bin_path).exists(),
-        "Binary should exist at {}",
-        bin_path
+        "Binary should exist at {bin_path}"
     );
 }

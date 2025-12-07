@@ -130,7 +130,7 @@ async fn start_log_cleanup_task(log_dir: String, max_mb: u64) {
                     &log_file,
                     format!("[LOG TRUNCATED - Size exceeded {max_mb}MB]\n"),
                 ) {
-                    eprintln!("Failed to truncate log file: {e}");
+                    tracing::warn!("Failed to truncate log file: {e}");
                 }
             }
         }

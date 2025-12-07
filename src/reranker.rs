@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -66,6 +65,8 @@ struct OllamaGenerateResponse {
     response: String,
 }
 
+/// LLM-based relevance reranking service using Ollama.
+/// Scores search candidates using structured JSON output with Phi chat template.
 pub struct RerankerService {
     client: reqwest::Client,
     ollama_url: String,
@@ -276,10 +277,12 @@ Score (0-100):"#.to_string()
         let phase2_elapsed = phase2_start.elapsed().as_millis();
 
         // Phase 3: Send request and get response
+        // Request-level timeout ensures clean socket cancellation
         let phase3_start = Instant::now();
         let response = self
             .client
             .post(format!("{}/api/generate", self.ollama_url))
+            .timeout(Duration::from_secs(60))
             .json(&request)
             .send()
             .await
@@ -358,7 +361,7 @@ Score (0-100):"#.to_string()
         // Reconstruct full JSON by prepending the pre-fill from the prompt
         // Prompt ends with: {"classification": "
         // Model completes: DIRECT_ANSWER", "reasoning": "...", "score": 95}
-        let full_json = format!(r#"{{"classification": "{}"#, response);
+        let full_json = format!(r#"{{"classification": "{response}"#);
 
         // Try to parse as JSON and extract score
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&full_json) {

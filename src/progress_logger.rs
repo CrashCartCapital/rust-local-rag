@@ -113,7 +113,7 @@ impl ProgressLogger {
     /// Create a new progress logger in the specified directory
     pub fn new(log_dir: &str) -> Result<Self> {
         std::fs::create_dir_all(log_dir)?;
-        let log_path = format!("{}/progress_tracking.log", log_dir);
+        let log_path = format!("{log_dir}/progress_tracking.log");
 
         let file = OpenOptions::new()
             .create(true)
@@ -152,7 +152,7 @@ impl ProgressLogger {
 
         // Include batch progress if available
         let batch_info = if let (Some(cur), Some(total)) = (state.current_batch, state.total_batches) {
-            format!(" current_batch={} total_batches={}", cur, total)
+            format!(" current_batch={cur} total_batches={total}")
         } else {
             String::new()
         };

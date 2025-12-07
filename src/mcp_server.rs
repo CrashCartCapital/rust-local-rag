@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::Result;
 use rmcp::{
     ErrorData as McpError, ServerHandler, model::*, schemars, tool, tool_router, tool_handler,

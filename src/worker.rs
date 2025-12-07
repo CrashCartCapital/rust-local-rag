@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::job_manager::{JobManager, JobStatus};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
@@ -112,6 +111,8 @@ pub enum JobRequest {
     StartReindex { job_id: String, documents_dir: String },
 }
 
+/// Background worker supervisor for processing async reindex jobs.
+/// Manages job lifecycle, progress tracking, and document processing.
 pub struct WorkerSupervisor {
     job_manager: Arc<JobManager>,
     rag_engine: Arc<RwLock<RagEngine>>,
@@ -284,7 +285,7 @@ impl WorkerSupervisor {
 
         // Log discovery stage completion
         if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger.emit(&progress_state, "stage", Some(&format!("discovered {} PDFs", total_docs))).await {
+            if let Err(e) = logger.emit(&progress_state, "stage", Some(&format!("discovered {total_docs} PDFs"))).await {
                 tracing::error!("Failed to log discovery stage: {}", e);
             }
         }
@@ -346,7 +347,7 @@ impl WorkerSupervisor {
                 // Use instrumented lock guard for timing visibility
                 let mut engine = TimedWriteLockGuard::acquire(
                     &rag_engine,
-                    format!("add_document:{}", filename),
+                    format!("add_document:{filename}"),
                 ).await;
 
                 // Define batch callback
@@ -388,7 +389,7 @@ impl WorkerSupervisor {
 
             // Capture progress note before consuming result
             let progress_note = match &result {
-                Ok(chunk_count) => format!("{} chunks", chunk_count),
+                Ok(chunk_count) => format!("{chunk_count} chunks"),
                 Err(_) => "failed".to_string(),
             };
 
@@ -463,9 +464,9 @@ impl WorkerSupervisor {
         // Log completion
         if let Some(ref logger) = progress_logger {
             let completion_note = if failed_documents.is_empty() {
-                format!("completed successfully - {} docs", total_docs)
+                format!("completed successfully - {total_docs} docs")
             } else {
-                format!("completed with {} failures out of {}", failed_documents.len(), total_docs)
+                format!("completed with {} failures out of {total_docs}", failed_documents.len())
             };
             if let Err(e) = logger.emit(&progress_state, "done", Some(&completion_note)).await {
                 tracing::error!("Failed to log completion: {}", e);
@@ -522,8 +523,8 @@ mod tests {
 
         // Verify metric was recorded (should be ~50ms)
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms >= 50, "Lock should have been held at least 50ms, got {}ms", max_ms);
-        assert!(max_ms < 200, "Lock should not have been held more than 200ms, got {}ms", max_ms);
+        assert!(max_ms >= 50, "Lock should have been held at least 50ms, got {max_ms}ms");
+        assert!(max_ms < 200, "Lock should not have been held more than 200ms, got {max_ms}ms");
     }
 
     /// Test that TimedWriteLockGuard Deref works correctly.
@@ -570,7 +571,7 @@ mod tests {
 
         // Should be well under 1 second
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms < WRITE_LOCK_MAX_MS, "Quick op should be under {}ms threshold, got {}ms", WRITE_LOCK_MAX_MS, max_ms);
+        assert!(max_ms < WRITE_LOCK_MAX_MS, "Quick op should be under {WRITE_LOCK_MAX_MS}ms threshold, got {max_ms}ms");
     }
 
     /// Test that metrics track maximum across multiple locks.
@@ -600,7 +601,7 @@ mod tests {
 
         // Max should be from second lock (~30ms)
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms >= 30, "Max should be at least 30ms from second lock, got {}ms", max_ms);
-        assert!(max_ms < 60, "Max should be less than 60ms, got {}ms", max_ms);
+        assert!(max_ms >= 30, "Max should be at least 30ms from second lock, got {max_ms}ms");
+        assert!(max_ms < 60, "Max should be less than 60ms, got {max_ms}ms");
     }
 }
