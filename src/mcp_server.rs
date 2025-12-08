@@ -71,7 +71,7 @@ impl RagMcpServer {
         &self,
         Parameters(params): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let top_k = params.top_k.unwrap_or(5);
+        let top_k = params.top_k.unwrap_or(5).min(MAX_TOP_K);
         let query = params.query;
         let engine = self.rag_state.read().await;
 
@@ -358,6 +358,9 @@ struct HttpSearchRequest {
 
 fn default_top_k() -> usize { 5 }
 
+/// Maximum allowed top_k to prevent DoS via memory exhaustion
+const MAX_TOP_K: usize = 100;
+
 #[derive(Debug, serde::Serialize)]
 struct HttpSearchResponse {
     results: Vec<crate::rag_engine::SearchResult>,
@@ -367,8 +370,9 @@ async fn http_search(
     axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
 ) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
+    let top_k = request.top_k.min(MAX_TOP_K);
     let engine = rag_state.read().await;
-    match engine.search(&request.query, request.top_k).await {
+    match engine.search(&request.query, top_k).await {
         Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
         Err(e) => {
             tracing::error!("Search error: {}", e);

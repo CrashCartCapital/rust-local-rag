@@ -35,3 +35,15 @@ mcp.db
 
 # Archives
 .archive/
+
+# Development artifacts (not for release)
+CODE_REVIEW_REPORT.md
+PRODUCTION_POLISHING_GUIDE.md
+analysis/
+scripts/
+docs/tracking/
+prompts/reranker_v2.txt
+start-server.sh
+test_*.sh
+test_*.py
+cleanup_*.py

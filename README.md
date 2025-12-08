@@ -1,33 +1,22 @@
 # Rust Local RAG
 
-This repository is a maintained fork of [ksaritek/rust-local-rag](https://github.com/ksaritek/rust-local-rag) that adds configurability for choosing which Ollama embedding model to use.
-It remains a high-performance, local RAG (Retrieval-Augmented Generation) system built in Rust that integrates with Claude Desktop via the Model Context Protocol (MCP).
-Search and analyze your PDF documents directly within Claude conversations without sending data to external services.
+A local RAG (Retrieval-Augmented Generation) system built in Rust that integrates with Claude Desktop via the Model Context Protocol (MCP). Search and analyze PDF documents within Claude conversations without sending data to external services.
 
-## 🎯 Purpose
+This is a maintained fork of [ksaritek/rust-local-rag](https://github.com/ksaritek/rust-local-rag) with additional features including configurable embedding models, background job processing, and model-partitioned storage.
 
-This project demonstrates how to build a production-ready MCP server using Rust that:
+## What It Does
 
-- **Processes PDF documents locally** using pure-Rust lopdf with poppler fallback for text extraction
-- **Generates embeddings** using your preferred local Ollama embedding model (no external API calls)
-- **Provides semantic search** through document collections
-- **Integrates seamlessly** with Claude Desktop via MCP protocol
-- **Maintains privacy** by keeping all data processing local
+- Processes PDF documents locally using pure-Rust lopdf (with poppler fallback)
+- Generates embeddings using local Ollama models
+- Provides semantic search through document collections
+- Integrates with Claude Desktop via MCP protocol
+- Keeps all data processing local
 
-## 🏗️ What is MCP?
+## What is MCP?
 
-The [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) is a standard that allows AI assistants like Claude to interact with external tools and data sources. Instead of Claude being limited to its training data, MCP enables it to:
+The [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) is a standard that allows AI assistants like Claude to interact with external tools and data sources.
 
-- Call external tools and functions
-- Access real-time data sources  
-- Integrate with local applications
-- Maintain context across interactions
-
-## 🦀 How This Project Uses Rust MCP SDK
-
-This implementation leverages the [`rmcp`](https://crates.io/crates/rmcp) crate - the official Rust SDK for MCP - to create a server that exposes RAG capabilities to Claude Desktop.
-
-### MCP Architecture in This Project
+## Architecture
 
 ```
 ┌─────────────────┐    MCP Protocol     ┌──────────────────┐
@@ -35,90 +24,50 @@ This implementation leverages the [`rmcp`](https://crates.io/crates/rmcp) crate 
 │  Claude Desktop │ ◄─────────────────► │   Rust RAG       │
 │                 │                     │   MCP Server     │
 └─────────────────┘                     └──────────────────┘
-                                                │
-                                                ▼
-                                        ┌──────────────────┐
-                                        │  Local RAG Stack │
-                                        │                  │
-                                        │  • PDF Parser    │
-                                        │  • Ollama        │
-                                        │  • Vector Store  │
-                                        │  • Search Engine │
-                                        └──────────────────┘
+                                               │
+                                               ▼
+                                       ┌──────────────────┐
+                                       │  Local RAG Stack │
+                                       │                  │
+                                       │  • PDF Parser    │
+                                       │  • Ollama        │
+                                       │  • Vector Store  │
+                                       │  • Search Engine │
+                                       └──────────────────┘
 ```
 
-### Key MCP Components Used
+## Features
 
-#### 1. **Server Handler Implementation**
-```rust
-#[tool(tool_box)]
-impl ServerHandler for RagMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        // Provides server metadata to Claude
-    }
-}
-```
-
-#### 2. **Tool Definitions**
-Uses `rmcp` macros to expose RAG functionality as MCP tools:
-
-```rust
-#[tool(description = "Search through uploaded documents using semantic similarity")]
-async fn search_documents(&self, query: String, top_k: Option<usize>) -> Result<CallToolResult, McpError>
-
-#[tool(description = "List all uploaded documents")]  
-async fn list_documents(&self) -> Result<CallToolResult, McpError>
-
-#[tool(description = "Get RAG system statistics")]
-async fn get_stats(&self) -> Result<CallToolResult, McpError>
-```
-
-#### 3. **Transport Layer**
-```rust
-// Uses stdin/stdout transport for Claude Desktop integration
-let service = server.serve(stdio()).await?;
-```
-
-## ✨ Features
-
-### 🔍 **Semantic Document Search**
+### Semantic Document Search
 - Vector-based similarity search using Ollama embeddings
-- Configurable result count (top-k)
+- Configurable result count (top-k, max 100)
 - Relevance scoring for search results
 
-### 🔧 **Customizable Embedding Pipeline**
-- Select any installed Ollama embedding model with the `OLLAMA_EMBEDDING_MODEL` environment variable
-- Defaults to `nomic-embed-text` for quick setup, but works with any compatible local model
-- Validates your selection against the models available in your Ollama installation at startup
+### Configurable Embedding Pipeline
+- Select any installed Ollama embedding model via `OLLAMA_EMBEDDING_MODEL`
+- Defaults to `nomic-embed-text`
+- Validates model availability at startup
 
-### 📁 **Document Management**
-- Automatic PDF text extraction via pure-Rust lopdf (no external dependencies) with poppler fallback
-- Document chunking for optimal embedding generation
-- Automatic reindexing when your Ollama embedding model changes
-- Real-time document list and statistics
+### Document Management
+- Automatic PDF text extraction (pure-Rust lopdf, poppler fallback)
+- Sentence-aware chunking with metadata
 - Background job system for non-blocking document processing
+- Automatic reindexing when embedding model changes
 
-### 🔄 **Model-Partitioned Storage**
+### Model-Partitioned Storage
 - Each embedding model gets its own index file (`chunks_{model}.json`)
-- Hot-swap between models without losing previously computed embeddings
-- Switch back to a previous model and instantly restore its index
-- Atomic file writes prevent data corruption during saves
+- Switch between models without losing previously computed embeddings
+- Atomic file writes prevent data corruption
 
-### 🔒 **Privacy-First Design**
+### Privacy
 - All processing happens locally
 - No external API calls for document content
-- Embeddings stored locally for fast retrieval
-- Background log maintenance with local rotation/truncation only
+- Embeddings stored locally
 
-### ⚡ **High Performance**
-- Rust's memory safety and performance
-- Async/await for non-blocking operations with `spawn_blocking` for CPU-bound work
-- Efficient vector storage and retrieval
-- Lock instrumentation for monitoring and debugging
+## Quick Start
 
-## 🚀 Quick Start
+### Prerequisites
 
-### 1. Prerequisites
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -127,33 +76,34 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 brew install ollama
 
 # (Optional) Install Poppler for fallback PDF parsing
-# The server uses pure-Rust lopdf by default, but falls back to pdftotext for complex PDFs
 brew install poppler
 
 # Start Ollama and install embedding model
 make setup-ollama
 ```
 
-### 2. Build and Install
+### Build and Install
+
 ```bash
-git clone <this-repository>
+git clone https://github.com/CrashCartCapital/rust-local-rag.git
 cd rust-local-rag
 make install
 ```
 
-### 3. Configure Claude Desktop
+### Configure Claude Desktop
+
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
 ```json
 {
     "mcpServers": {
         "rust-local-rag": {
-            "command": "/Users/yourusername/.cargo/bin/rust-local-rag",
+            "command": "/Users/YOUR_USERNAME/.cargo/bin/rust-local-rag",
             "env": {
-                "DATA_DIR": "/Users/yourusername/Documents/data",
-                "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
+                "DATA_DIR": "/Users/YOUR_USERNAME/Documents/data",
+                "DOCUMENTS_DIR": "/Users/YOUR_USERNAME/Documents/rag",
                 "LOG_DIR": "/tmp/rust-local-rag",
                 "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10",
                 "OLLAMA_EMBEDDING_MODEL": "nomic-embed-text"
             }
         }
@@ -161,125 +111,55 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-### Choose Your Ollama Embedding Model
+Replace `YOUR_USERNAME` with your actual username.
 
-Set the `OLLAMA_EMBEDDING_MODEL` environment variable to any embedding model you've pulled into your Ollama installation.
-For example:
-
-```bash
-ollama pull snowflake-arctic-embed
-export OLLAMA_EMBEDDING_MODEL=snowflake-arctic-embed
-rust-local-rag
-```
-
-If the model is not installed, the server will provide a helpful error listing the available models and how to pull the requested one.
-
-### Environment Configuration
-
-The binary reads configuration from environment variables (and optional `.env` files). Most installs can start with the defaults, but you can customise behaviour with the following values:
+### Environment Variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `DATA_DIR` | Where embeddings and index metadata are persisted | `./data` |
-| `DOCUMENTS_DIR` | Directory scanned for PDFs to index | `./documents` |
-| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise falls back to `./logs`. | Auto-detected |
-| `LOG_LEVEL` | Tracing level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
-| `LOG_MAX_MB` | Maximum log file size before automatic truncation | `5` |
-| `OLLAMA_URL` | Ollama base URL | `http://localhost:11434` |
-| `OLLAMA_EMBEDDING_MODEL` | Embedding model to request from Ollama | `nomic-embed-text` |
-| `DEVELOPMENT` / `DEV` | When set, forces pretty console logging (skips log file) | _unset_ |
-| `CONSOLE_LOGS` | Force console logging without enabling other dev toggles | _unset_ |
+| `DATA_DIR` | Embeddings and index storage | `./data` |
+| `DOCUMENTS_DIR` | PDF source directory | `./documents` |
+| `LOG_DIR` | Log output directory | Auto-detected |
+| `LOG_LEVEL` | Tracing level (error/warn/info/debug/trace) | `info` |
+| `LOG_MAX_MB` | Max log file size before truncation | `5` |
+| `OLLAMA_URL` | Ollama API endpoint | `http://localhost:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Embedding model | `nomic-embed-text` |
+| `DEV` or `DEVELOPMENT` | Enable console logging | unset |
 
-> ℹ️  Log files are automatically truncated when they exceed `LOG_MAX_MB`. Set `CONSOLE_LOGS=true` if you prefer to view logs directly in the terminal even outside development mode.
+### Add Documents
 
-### 4. Add Documents and Use
 ```bash
 # Add PDFs to documents directory
 cp your-files.pdf ~/Documents/rag/
 
 # Restart Claude Desktop
-# Now ask Claude: "Search my documents for information about X"
+# Ask Claude: "Search my documents for information about X"
 ```
 
-## 🏛️ Architecture
+## MCP Tools
 
-### Technology Stack
-- **🦀 Rust**: Core application language for performance and safety
-- **📡 rmcp**: Official Rust MCP SDK for Claude integration  
-- **🤖 Ollama**: Local embedding generation (nomic-embed-text)
-- **📄 Poppler**: PDF text extraction
-- **🗃️ Custom Vector Store**: In-memory vector database for fast search
+| Tool | Purpose |
+|------|---------|
+| `search_documents` | Semantic search with query and optional top_k (max 100) |
+| `list_documents` | List all indexed documents |
+| `get_stats` | System statistics (chunk count, memory usage) |
+| `start_reindex` | Trigger background reindexing, returns job ID |
+| `get_job_status` | Check job progress by ID |
+| `calibrate_reranker` | Measure reranker latency for timeout tuning |
 
-### Data Flow
-1. **Document Ingestion**: PDFs → Text extraction → Chunking
-2. **Embedding Generation**: Text chunks → Ollama → Vector embeddings  
-3. **Indexing**: Embeddings → Local vector store
-4. **Search**: Query → Embedding → Similarity search → Results
-5. **MCP Integration**: Results → Claude Desktop via MCP protocol
+## Health Endpoints
 
-## 🛠️ MCP Integration Details
+- `/healthz` - Liveness probe (200 if process running)
+- `/readyz` - Readiness probe (200 if engine lock acquirable within 100ms)
 
-### Why MCP Over HTTP API?
+## Development
 
-| Aspect | MCP Approach | HTTP API Approach |
-|--------|-------------|------------------|
-| **Integration** | Native Claude Desktop support | Requires custom client |
-| **Security** | Process isolation, no network | Network exposure required |
-| **Performance** | Direct stdin/stdout IPC | Network overhead |
-| **User Experience** | Seamless tool integration | Manual API management |
-
-### MCP Tools Exposed
-
-1. **`search_documents`**
-   - **Purpose**: Semantic search across document collection
-   - **Input**: Query string, optional result count
-   - **Output**: Ranked search results with similarity scores
-
-2. **`list_documents`**
-   - **Purpose**: Document inventory management
-   - **Input**: None
-   - **Output**: List of all indexed documents
-
-3. **`get_stats`**
-   - **Purpose**: System monitoring and debugging
-   - **Input**: None
-   - **Output**: Embedding counts, memory usage, performance metrics
-
-4. **`start_reindex`**
-   - **Purpose**: Trigger background document reindexing
-   - **Input**: None
-   - **Output**: Job ID for tracking progress
-
-5. **`get_job_status`**
-   - **Purpose**: Check status of background jobs
-   - **Input**: Job ID
-   - **Output**: Job progress and status details
-
-6. **`calibrate_reranker`**
-   - **Purpose**: Measure and calibrate reranker timeout settings
-   - **Input**: Sample query, optional sample size
-   - **Output**: Latency statistics and recommended timeout
-
-### Health Endpoints
-
-The server exposes HTTP health endpoints for monitoring:
-
-- **`/healthz`** - Liveness probe (always returns 200 if process is running)
-- **`/readyz`** - Readiness probe (returns 200 if engine lock can be acquired within 100ms)
-
-## 📚 Documentation
-
-- **[Setup Guide](setup.md)**: Complete installation and configuration
-- **[Usage Guide](how-to-use.md)**: Claude Desktop integration and usage examples
-
-## 🤝 Contributing
-
-Contributions are welcome! This project demonstrates practical MCP server implementation patterns that can be adapted for other use cases.
-
-### Development
 ```bash
 # Run in development mode
 make run
+
+# Run tests
+cargo test
 
 # Check formatting
 cargo fmt --check
@@ -288,17 +168,17 @@ cargo fmt --check
 cargo clippy
 ```
 
-## 📄 License
+## Documentation
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- [Setup Guide](setup.md) - Installation and configuration details
+- [Usage Guide](how-to-use.md) - Claude Desktop integration examples
 
-## 🙏 Acknowledgments
+## License
 
-- **[Model Context Protocol](https://modelcontextprotocol.io/)** for the specification
-- **[rmcp](https://crates.io/crates/rmcp)** for the excellent Rust MCP SDK
-- **[Ollama](https://ollama.ai/)** for local embedding generation
-- **Claude Desktop** for MCP integration support
+MIT License - see [LICENSE](LICENSE) file.
 
----
+## Acknowledgments
 
-**Built with ❤️ in Rust | Powered by MCP | Privacy-focused RAG** 
+- [Model Context Protocol](https://modelcontextprotocol.io/) - Protocol specification
+- [rmcp](https://crates.io/crates/rmcp) - Rust MCP SDK
+- [Ollama](https://ollama.ai/) - Local embedding generation
