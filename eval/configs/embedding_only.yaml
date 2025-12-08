@@ -1,0 +1,29 @@
+# Embedding-only evaluation configuration
+# No reranking - pure vector similarity baseline
+
+name: "embedding_only"
+description: "No reranking - pure vector similarity for speed comparison"
+
+# RAG Server Settings
+# Use HTTP mode for evaluation (JSON API on same port as MCP)
+rag_endpoint: "http://localhost:3046"
+connection_mode: "http"
+
+# Retrieval Settings
+top_k: 5
+retrieval_top_k: 5  # No expansion needed without reranking
+
+# Model Settings
+embedding_model: "embed-light"
+reranker_model: "none"
+reranker_enabled: false
+
+# Evaluation Settings
+ground_truth_path: "eval/ground_truth/queries.jsonl"
+metrics:
+  - "hit_rate@5"
+  - "mrr@5"
+  - "ndcg@5"
+  - "latency_p95"
+
+page_tolerance: 1

@@ -347,6 +347,44 @@ async fn readyz(
     }
 }
 
+/// HTTP search endpoint for evaluation framework
+/// Returns JSON array of search results
+#[derive(Debug, serde::Deserialize)]
+struct HttpSearchRequest {
+    query: String,
+    #[serde(default = "default_top_k")]
+    top_k: usize,
+}
+
+fn default_top_k() -> usize { 5 }
+
+#[derive(Debug, serde::Serialize)]
+struct HttpSearchResponse {
+    results: Vec<crate::rag_engine::SearchResult>,
+}
+
+async fn http_search(
+    axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
+    axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
+) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
+    let engine = rag_state.read().await;
+    match engine.search(&request.query, request.top_k).await {
+        Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
+        Err(e) => {
+            tracing::error!("Search error: {}", e);
+            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// HTTP stats endpoint for evaluation framework
+async fn http_stats(
+    axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
+) -> axum::Json<serde_json::Value> {
+    let engine = rag_state.read().await;
+    axum::Json(engine.get_stats())
+}
+
 pub async fn start_mcp_server(
     rag_state: Arc<RwLock<RagEngine>>,
     job_manager: Arc<JobManager>,
@@ -380,8 +418,12 @@ pub async fn start_mcp_server(
     let router = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/readyz", axum::routing::get(readyz))
+        .route("/search", axum::routing::post(http_search))
+        .route("/stats", axum::routing::get(http_stats))
         .route(&endpoint_path, axum::routing::any_service(service))
         .with_state(rag_state.clone());
+
+    tracing::info!("HTTP evaluation endpoints: POST /search, GET /stats");
 
     let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
 

@@ -4,6 +4,34 @@
 
 documents/*.pdf
 data/chunks.json
+data/chunks_*.json
+data/jobs.db
+data/*.bak.*
 
 !documents/.keep
 !data/.keep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local config
+.mcp.json
+mcpjungle-config.json
+mcp.db
+
+# Archives
+.archive/

@@ -68,7 +68,7 @@ struct SentenceInfo {
 }
 
 /// Search result containing the matched chunk text, relevance score, and source metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub text: String,
     pub score: f32,

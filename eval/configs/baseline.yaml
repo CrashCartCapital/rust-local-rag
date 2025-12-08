@@ -1,0 +1,35 @@
+# Baseline evaluation configuration
+# Current production setup: embed-light + phi4-mini
+
+name: "baseline"
+description: "Current production configuration - embed-light embeddings with phi4-mini reranker"
+
+# RAG Server Settings
+# Use HTTP mode for evaluation (JSON API on same port as MCP)
+# HTTP endpoints: POST /search, GET /stats, GET /readyz
+rag_endpoint: "http://localhost:3046"
+connection_mode: "http"
+
+# Retrieval Settings
+top_k: 5                  # Final results to evaluate
+retrieval_top_k: 15       # Initial candidates before reranking
+
+# Model Settings (for documentation - actual config is in RAG server)
+embedding_model: "embed-light"  # Quantized qwen3-embed
+reranker_model: "phi4-mini"
+reranker_enabled: true
+
+# Hybrid Search Weights (for documentation)
+dense_weight: 0.7   # Vector similarity weight
+sparse_weight: 0.3  # Lexical/BM25 weight
+
+# Evaluation Settings
+ground_truth_path: "eval/ground_truth/queries.jsonl"
+metrics:
+  - "hit_rate@5"
+  - "mrr@5"
+  - "ndcg@5"
+  - "latency_p95"
+
+# Matching Settings
+page_tolerance: 15  # Allow ±15 pages - gold references have estimated page numbers

@@ -629,6 +629,30 @@ make test                   # Run tests
 cargo test                  # Alternative
 ```
 
+### Evaluation Framework
+
+The `eval/` directory contains a Python-based evaluation harness for measuring retrieval quality:
+
+```bash
+# Ensure RAG server is running first
+make run
+
+# Run baseline evaluation
+python -m eval.run evaluate --config baseline -v
+```
+
+**Key Files:**
+- `eval/configs/baseline.yaml` - Production config (embed-light + phi4-mini)
+- `eval/ground_truth/queries.jsonl` - 50 labeled queries
+- `eval/reports/BASELINE_EVALUATION_SUMMARY.md` - Latest results
+
+**Latest Results (2025-12-08):**
+- Document-Level Hit Rate@5: 77.8% (35/45)
+- Latency p95: ~42s (reranking adds significant latency)
+- True miss rate: ~2% (most "misses" are valid alternative sources)
+
+See `docs/RAG_EVALUATION_FRAMEWORK_SPEC.md` for full specification.
+
 ### Installation
 
 ```bash
