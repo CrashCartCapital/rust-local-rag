@@ -14,7 +14,14 @@ categories = ["command-line-utilities"]
 name = "rust-local-rag"
 path = "src/main.rs"
 
+[[bin]]
+name = "rag-tui"
+path = "src/bin/rag_tui/main.rs"
+
 [dependencies]
+# TUI dependencies
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 rmcp = { version = "0.8", features = ["transport-io", "transport-streamable-http-server"] }
 rmcp-macros = "0.8"
 schemars = "0.9"
