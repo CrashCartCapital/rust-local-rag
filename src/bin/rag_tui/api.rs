@@ -41,6 +41,24 @@ pub struct SearchResult {
     pub chunk_id: String,
     #[serde(default)]
     pub section: Option<String>,
+    /// Raw embedding cosine similarity score
+    #[serde(default)]
+    pub embedding_score: Option<f32>,
+    /// Raw lexical/BM25 score (normalized 0-1)
+    #[serde(default)]
+    pub lexical_score: Option<f32>,
+    /// Combined initial score before reranking
+    #[serde(default)]
+    pub initial_score: Option<f32>,
+    /// Raw reranker score from logprobs softmax (0-1)
+    #[serde(default)]
+    pub reranker_score: Option<f32>,
+    /// Log probability of "yes" token from reranker
+    #[serde(default)]
+    pub yes_logprob: Option<f64>,
+    /// Log probability of "no" token from reranker
+    #[serde(default)]
+    pub no_logprob: Option<f64>,
 }
 
 /// Response from starting a reindex

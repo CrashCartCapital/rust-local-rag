@@ -1,57 +1,3 @@
-<|user|>
-Score how well this chunk ANSWERS the query (0-100).
-
-CRITICAL: Judge how much the chunk ANSWERS the query, NOT just topic similarity.
-
-STEP 1 - Identify query needs:
-What specific information is the user asking for?
-
-STEP 2 - Check coverage:
-Does this chunk actually provide that information, or just mention related keywords?
-
-STEP 3 - Assign score:
-
-SCORING GUIDANCE (continuous scale, use the FULL 0-100 range):
-Think of the score as "what percentage of the user's information need does this chunk satisfy?"
-
-High scores (75-100): Chunk directly provides the requested information
-- 95-100: Complete, authoritative answer. User needs nothing else.
-- 85-94: Strong direct answer, covers most aspects.
-- 75-84: Clearly answers the core question, may miss secondary details.
-
-Medium scores (35-74): Partial relevance or indirect help
-- 60-74: Answers part of the query OR provides useful context.
-- 45-59: Same topic but doesn't answer the specific question.
-- 35-44: Tangentially related, minimal direct utility.
-
-Low scores (0-34): Little to no relevance
-- 15-34: Weak connection, user would not find helpful.
-- 0-14: Unrelated or irrelevant content.
-
-IMPORTANT - Score granularity:
-- Use the FULL continuous range. Scores like 67, 73, 81, 88 are valid.
-- Differentiate similar chunks: if two chunks are close, still assign different scores.
-- Avoid clustering at round numbers (50, 70, 80). If you estimate "about 70", consider whether 68 or 72 is more accurate.
-
-PENALTIES (reduce score accordingly):
-- Prefaces/intros ("in this chapter we will..."): typically 30-45
-- Table of contents, outlines, indexes: typically 20-35
-- Keywords present but no substantive answer: typically 40-55
-- Multi-part query but only addresses one small aspect: cap at 65-70
-
-== EXAMPLE ==
-Query: What causes ocean tides?
-Document: Earth Science Textbook
-Page: 156
-Chunk: Ocean tides are caused primarily by the gravitational pull of the Moon, and to a lesser extent the Sun. The Moon's gravity creates a bulge in the ocean on the side of Earth closest to the Moon, and another bulge on the opposite side due to inertia.
-Output: {"score": 92, "reason": "Directly explains tidal causes with mechanism"}
-
-== CONTRASTING EXAMPLE ==
-Query: What causes ocean tides?
-Chunk: "The ocean covers 71% of Earth's surface and contains 97% of Earth's water. Marine ecosystems are diverse..."
-Output: {"score": 18, "reason": "About oceans generally, not tides"}
-
-== YOUR TASK ==
 Query: {query}
 Document: {document}
 Page: {page}
@@ -59,7 +5,10 @@ Page: {page}
 Chunk:
 {text}
 
-Output JSON only:
-<|end|>
-<|assistant|>
-{"score":
+Consider semantic meaning, not just keyword matches. A chunk is relevant if it:
+- Directly answers the query
+- Provides essential context or definitions
+- Contains logically related information that helps address the query
+
+Does this chunk contain relevant information for the query?
+Answer:

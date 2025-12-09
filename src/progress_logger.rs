@@ -43,8 +43,8 @@ pub struct ProgressState {
     pub done_docs: i64,
     pub success_docs: i64,
     pub failed_docs: i64,
-    pub skipped_docs: i64,    // Documents skipped (hash match)
-    pub embedded_docs: i64,   // Documents actually embedded
+    pub skipped_docs: i64,  // Documents skipped (hash match)
+    pub embedded_docs: i64, // Documents actually embedded
     pub last_doc: Option<String>,
     pub started: Instant,
     // Current batch progress (if embedding)
@@ -129,15 +129,8 @@ impl ProgressLogger {
 
     /// Emit a progress event
     /// Event types: progress | stage | done | error | batch
-    pub async fn emit(
-        &self,
-        state: &ProgressState,
-        event: &str,
-        note: Option<&str>,
-    ) -> Result<()> {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis();
+    pub async fn emit(&self, state: &ProgressState, event: &str, note: Option<&str>) -> Result<()> {
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 
         let dps = state.docs_per_sec();
         let eta = state.eta_seconds();
@@ -151,11 +144,12 @@ impl ProgressLogger {
         let note_encoded = urlencoding::encode(note_str);
 
         // Include batch progress if available
-        let batch_info = if let (Some(cur), Some(total)) = (state.current_batch, state.total_batches) {
-            format!(" current_batch={cur} total_batches={total}")
-        } else {
-            String::new()
-        };
+        let batch_info =
+            if let (Some(cur), Some(total)) = (state.current_batch, state.total_batches) {
+                format!(" current_batch={cur} total_batches={total}")
+            } else {
+                String::new()
+            };
 
         let line = format!(
             "ts={} job={} event={} stage={} done={} total={} success={} failed={} skipped={} embedded={} pct={} dps={:.2} eta_s={} last_doc={} note={}{}\n",
@@ -190,9 +184,7 @@ impl ProgressLogger {
         state: &ProgressState,
         batch_progress: &BatchProgress,
     ) -> Result<()> {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis();
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 
         let doc_encoded = urlencoding::encode(&batch_progress.document_name);
         let batch_pct = if batch_progress.batch_count > 0 {

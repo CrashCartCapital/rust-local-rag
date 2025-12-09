@@ -1,9 +1,9 @@
 use anyhow::Result;
-use rmcp::{
-    ErrorData as McpError, ServerHandler, model::*, schemars, tool, tool_router, tool_handler,
-};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{
+    ErrorData as McpError, ServerHandler, model::*, schemars, tool, tool_handler, tool_router,
+};
 use std::net::SocketAddr;
 
 use std::sync::Arc;
@@ -20,6 +20,10 @@ pub struct SearchRequest {
     pub query: String,
     #[schemars(description = "Number of results to return (default: 5)")]
     pub top_k: Option<usize>,
+    #[schemars(
+        description = "Diversity factor for MMR reranking (0.0-1.0, default: 0.3). Higher values increase result diversity."
+    )]
+    pub diversity_factor: Option<f32>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -66,16 +70,22 @@ impl RagMcpServer {
         }
     }
 
-    #[tool(description = "Search through uploaded documents using semantic similarity")]
+    #[tool(
+        description = "Search through uploaded documents using semantic similarity with optional MMR diversification"
+    )]
     async fn search_documents(
         &self,
         Parameters(params): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, McpError> {
         let top_k = params.top_k.unwrap_or(5).min(MAX_TOP_K);
+        let diversity_factor = params.diversity_factor.unwrap_or(0.3).clamp(0.0, 1.0);
         let query = params.query;
         let engine = self.rag_state.read().await;
 
-        match engine.search(&query, top_k).await {
+        match engine
+            .search_with_diversity(&query, top_k, diversity_factor)
+            .await
+        {
             Ok(results) => {
                 let formatted_results = if results.is_empty() {
                     "No results found.".to_string()
@@ -116,7 +126,9 @@ impl RagMcpServer {
                     formatted_results
                 ))]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Search error: {e}"))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Search error: {e}"
+            ))])),
         }
     }
 
@@ -231,7 +243,9 @@ impl RagMcpServer {
         ))]))
     }
 
-    #[tool(description = "Calibrate reranker timeout by measuring actual LLM latencies and computing p99 statistics")]
+    #[tool(
+        description = "Calibrate reranker timeout by measuring actual LLM latencies and computing p99 statistics"
+    )]
     async fn calibrate_reranker(
         &self,
         Parameters(params): Parameters<CalibrateRerankerRequest>,
@@ -249,7 +263,9 @@ impl RagMcpServer {
         }
 
         // Get candidates for calibration (use more than sample_size to have enough)
-        let candidates_result = engine.get_embedding_candidates(&query, sample_size * 2).await;
+        let candidates_result = engine
+            .get_embedding_candidates(&query, sample_size * 2)
+            .await;
 
         match candidates_result {
             Ok(candidates) if candidates.is_empty() => {
@@ -340,8 +356,10 @@ async fn readyz(
     // This confirms the engine is initialized and not stuck
     match tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        app_state.rag_state.read()
-    ).await {
+        app_state.rag_state.read(),
+    )
+    .await
+    {
         Ok(_guard) => axum::http::StatusCode::OK,
         Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
     }
@@ -354,9 +372,16 @@ struct HttpSearchRequest {
     query: String,
     #[serde(default = "default_top_k")]
     top_k: usize,
+    #[serde(default = "default_diversity_factor")]
+    diversity_factor: f32,
 }
 
-fn default_top_k() -> usize { 5 }
+fn default_top_k() -> usize {
+    5
+}
+fn default_diversity_factor() -> f32 {
+    0.3
+}
 
 /// Maximum allowed top_k to prevent DoS via memory exhaustion
 const MAX_TOP_K: usize = 100;
@@ -371,8 +396,12 @@ async fn http_search(
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
 ) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
     let top_k = request.top_k.min(MAX_TOP_K);
+    let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
     let engine = app_state.rag_state.read().await;
-    match engine.search(&request.query, top_k).await {
+    match engine
+        .search_with_diversity(&request.query, top_k, diversity_factor)
+        .await
+    {
         Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
         Err(e) => {
             tracing::error!("Search error: {}", e);
@@ -433,23 +462,27 @@ async fn http_start_reindex(
             ));
         }
         Err(e) => {
-            tracing::error!("Failed to create reindex job: {}", e);
+            tracing::error!("Failed to create reindex job: {e}");
             return Err((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create job: {}", e),
+                format!("Failed to create job: {e}"),
             ));
         }
     };
 
     // Send job request to worker supervisor
-    if let Err(e) = app_state.job_tx.send(JobRequest::StartReindex {
-        job_id: job.job_id.clone(),
-        documents_dir: app_state.documents_dir.clone(),
-    }).await {
-        tracing::error!("Failed to send job request: {}", e);
+    if let Err(e) = app_state
+        .job_tx
+        .send(JobRequest::StartReindex {
+            job_id: job.job_id.clone(),
+            documents_dir: app_state.documents_dir.clone(),
+        })
+        .await
+    {
+        tracing::error!("Failed to send job request: {e}");
         return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to start job: {}", e),
+            format!("Failed to start job: {e}"),
         ));
     }
 
@@ -474,13 +507,13 @@ async fn http_get_job_status(
         })),
         Ok(None) => Err((
             axum::http::StatusCode::NOT_FOUND,
-            format!("Job {} not found", job_id),
+            format!("Job {job_id} not found"),
         )),
         Err(e) => {
-            tracing::error!("Failed to get job status: {}", e);
+            tracing::error!("Failed to get job status: {e}");
             Err((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to get job: {}", e),
+                format!("Failed to get job: {e}"),
             ))
         }
     }
@@ -500,10 +533,10 @@ async fn http_get_active_job(
         }))),
         Ok(None) => Ok(axum::Json(None)),
         Err(e) => {
-            tracing::error!("Failed to get active job: {}", e);
+            tracing::error!("Failed to get active job: {e}");
             Err((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to get active job: {}", e),
+                format!("Failed to get active job: {e}"),
             ))
         }
     }
@@ -515,16 +548,21 @@ pub async fn start_mcp_server(
     job_tx: mpsc::Sender<JobRequest>,
     documents_dir: String,
 ) -> Result<()> {
-    use rmcp::transport::streamable_http_server::{StreamableHttpService, session::local::LocalSessionManager};
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpService, session::local::LocalSessionManager,
+    };
 
     let bind: SocketAddr = std::env::var("MCP_HTTP_BIND")
         .unwrap_or_else(|_| "127.0.0.1:3046".to_string())
         .parse()?;
 
-    let endpoint_path = std::env::var("MCP_HTTP_ENDPOINT")
-        .unwrap_or_else(|_| "/mcp".to_string());
+    let endpoint_path = std::env::var("MCP_HTTP_ENDPOINT").unwrap_or_else(|_| "/mcp".to_string());
 
-    tracing::info!("Starting MCP Streamable HTTP server on http://{}{}", bind, endpoint_path);
+    tracing::info!(
+        "Starting MCP Streamable HTTP server on http://{}{}",
+        bind,
+        endpoint_path
+    );
     tracing::info!("Health endpoints: /healthz (liveness), /readyz (readiness)");
 
     let service = StreamableHttpService::new(
@@ -533,7 +571,14 @@ pub async fn start_mcp_server(
             let job_manager = job_manager.clone();
             let job_tx = job_tx.clone();
             let documents_dir = documents_dir.clone();
-            move || Ok(RagMcpServer::new(rag_state.clone(), job_manager.clone(), job_tx.clone(), documents_dir.clone()))
+            move || {
+                Ok(RagMcpServer::new(
+                    rag_state.clone(),
+                    job_manager.clone(),
+                    job_tx.clone(),
+                    documents_dir.clone(),
+                ))
+            }
         },
         LocalSessionManager::default().into(),
         Default::default(), // StreamableHttpServerConfig
@@ -558,7 +603,9 @@ pub async fn start_mcp_server(
         .route(&endpoint_path, axum::routing::any_service(service))
         .with_state(app_state);
 
-    tracing::info!("HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id");
+    tracing::info!(
+        "HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id"
+    );
 
     let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
 

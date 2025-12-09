@@ -1,8 +1,11 @@
 use std::time::{Duration, Instant};
 
+use tokio::sync::oneshot;
+
 use crate::api::{SearchResult, Stats};
 use crate::config::Config;
 use crate::constants::{DEFAULT_TOP_K, INPUT_DEBOUNCE_MS, MAX_TOP_K, MIN_TOP_K, TOP_K_STEP};
+use crate::ollama::OllamaModel;
 use crate::settings::Settings;
 use crate::theme::Theme;
 
@@ -55,9 +58,48 @@ impl std::fmt::Display for ServerStatus {
             Self::Connecting => write!(f, "connecting..."),
             Self::Ready => write!(f, "ready"),
             Self::Reindexing => write!(f, "reindexing"),
-            Self::Unknown(s) => write!(f, "{}", s),
+            Self::Unknown(s) => write!(f, "{s}"),
         }
     }
+}
+
+/// State of model fetching from Ollama
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ModelFetchState {
+    /// Not yet fetched
+    #[default]
+    Idle,
+    /// Currently fetching models
+    Loading,
+    /// Successfully loaded models
+    Loaded,
+    /// Failed to fetch models
+    Failed(String),
+}
+
+/// Which dropdown is currently active
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ActiveDropdown {
+    /// Embedding model selection
+    EmbeddingModel,
+    /// Reranker model selection
+    RerankerModel,
+    /// Theme selection (uses static options, not Ollama models)
+    Theme,
+}
+
+/// State for dropdown overlay when selecting from a list
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct DropdownState {
+    /// Index of the setting being edited
+    pub setting_index: usize,
+    /// Currently selected item index in dropdown list
+    pub selected: usize,
+    /// Scroll offset for long lists
+    pub scroll_offset: usize,
 }
 
 /// Message enum for Elm-style update pattern
@@ -88,7 +130,10 @@ pub enum Msg {
 
     // Search
     StartSearch,
-    SearchCompleted { search_id: u64, results: Vec<SearchResult> },
+    SearchCompleted {
+        search_id: u64,
+        results: Vec<SearchResult>,
+    },
     SearchFailed(String),
     CancelSearch,
 
@@ -98,8 +143,13 @@ pub enum Msg {
     UpdateStats(Stats),
 
     // Reindex / Jobs
-    ReindexStarted { job_id: String },
-    JobProgress { progress: i64, total: i64 },
+    ReindexStarted {
+        job_id: String,
+    },
+    JobProgress {
+        progress: i64,
+        total: i64,
+    },
     JobCompleted,
     JobFailed(Option<String>),
 
@@ -161,6 +211,22 @@ pub struct App {
     /// Message to show after settings save
     pub settings_message: Option<(String, bool)>, // (message, is_error)
 
+    // Ollama model discovery (for Settings dropdown)
+    /// HTTP client for Ollama API (created once, cloned for async tasks)
+    pub http_client: reqwest::Client,
+    /// Current state of model fetching
+    pub model_fetch_state: ModelFetchState,
+    /// Available models from Ollama (populated on settings mode entry)
+    pub available_models: Vec<OllamaModel>,
+    /// Receiver for async model fetch result (taken during select!)
+    pub model_fetch_rx: Option<oneshot::Receiver<Result<Vec<OllamaModel>, String>>>,
+
+    // Dropdown state (for model/theme selection in Settings)
+    /// Currently active dropdown (None = no dropdown open)
+    pub active_dropdown: Option<ActiveDropdown>,
+    /// Dropdown UI state
+    pub dropdown_state: DropdownState,
+
     // Control
     pub should_quit: bool,
 }
@@ -197,6 +263,14 @@ impl App {
             theme: Theme::from_name(&config.theme),
             settings: Settings::new(),
             settings_message: None,
+            // Ollama model discovery
+            http_client: reqwest::Client::new(),
+            model_fetch_state: ModelFetchState::Idle,
+            available_models: Vec::new(),
+            model_fetch_rx: None,
+            // Dropdown state
+            active_dropdown: None,
+            dropdown_state: DropdownState::default(),
             should_quit: false,
         }
     }
@@ -207,11 +281,11 @@ impl App {
         // Build config summary from environment
         let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
         let docs_dir = std::env::var("DOCUMENTS_DIR").unwrap_or_else(|_| "./documents".to_string());
-        let ollama_url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "localhost:11434".to_string());
+        let ollama_url =
+            std::env::var("OLLAMA_URL").unwrap_or_else(|_| "localhost:11434".to_string());
 
-        let config_summary = format!(
-            "DATA_DIR={data_dir}  DOCS_DIR={docs_dir}  OLLAMA={ollama_url}"
-        );
+        let config_summary =
+            format!("DATA_DIR={data_dir}  DOCS_DIR={docs_dir}  OLLAMA={ollama_url}");
 
         // Get top_k from env or default
         let top_k = std::env::var("RAG_TUI_TOP_K")
@@ -248,6 +322,14 @@ impl App {
             theme: Theme::default(),
             settings: Settings::new(),
             settings_message: None,
+            // Ollama model discovery
+            http_client: reqwest::Client::new(),
+            model_fetch_state: ModelFetchState::Idle,
+            available_models: Vec::new(),
+            model_fetch_rx: None,
+            // Dropdown state
+            active_dropdown: None,
+            dropdown_state: DropdownState::default(),
             should_quit: false,
         }
     }
@@ -448,6 +530,232 @@ impl App {
     pub fn enter_settings_mode(&mut self) {
         self.mode = AppMode::Settings;
         self.settings_message = None;
+
+        // Start async model fetch if not already loading/loaded
+        if matches!(
+            self.model_fetch_state,
+            ModelFetchState::Idle | ModelFetchState::Failed(_)
+        ) {
+            self.start_model_fetch();
+        }
+    }
+
+    /// Start async model fetch from Ollama
+    fn start_model_fetch(&mut self) {
+        // Get Ollama URL from settings
+        let ollama_url = self
+            .settings
+            .items
+            .iter()
+            .find(|s| s.env_var == "OLLAMA_URL")
+            .map(|s| s.value.clone())
+            .unwrap_or_else(|| "localhost:11434".to_string());
+
+        // Clone client (cheap) and create channel
+        let client = self.http_client.clone();
+        let (tx, rx) = oneshot::channel();
+
+        // Update state and store receiver
+        self.model_fetch_state = ModelFetchState::Loading;
+        self.model_fetch_rx = Some(rx);
+
+        // Spawn async task
+        tokio::spawn(async move {
+            let result = crate::ollama::fetch_models(&client, &ollama_url).await;
+            // Send result, ignore error if receiver dropped
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Handle model fetch result from async task
+    #[allow(dead_code)]
+    pub fn handle_model_fetch_result(&mut self, result: Result<Vec<OllamaModel>, String>) {
+        // Close dropdown if open to prevent stale selection indices
+        // User can re-open to see fresh model list
+        if self.is_dropdown_open() {
+            self.close_dropdown();
+        }
+
+        match result {
+            Ok(models) => {
+                self.available_models = models;
+                self.model_fetch_state = ModelFetchState::Loaded;
+            }
+            Err(e) => {
+                self.model_fetch_state = ModelFetchState::Failed(e);
+            }
+        }
+    }
+
+    /// Check if there's a pending model fetch receiver
+    #[allow(dead_code)]
+    pub fn has_pending_model_fetch(&self) -> bool {
+        self.model_fetch_rx.is_some()
+    }
+
+    /// Take the model fetch receiver for use in select!
+    /// Returns None if no receiver or already taken
+    #[allow(dead_code)]
+    pub fn take_model_fetch_rx(
+        &mut self,
+    ) -> Option<oneshot::Receiver<Result<Vec<OllamaModel>, String>>> {
+        self.model_fetch_rx.take()
+    }
+
+    /// Put the model fetch receiver back (if event branch won in select!)
+    #[allow(dead_code)]
+    pub fn restore_model_fetch_rx(
+        &mut self,
+        rx: oneshot::Receiver<Result<Vec<OllamaModel>, String>>,
+    ) {
+        self.model_fetch_rx = Some(rx);
+    }
+
+    // ========== Dropdown State Management ==========
+
+    /// Open dropdown for the current setting (if it supports dropdown)
+    /// Returns true if dropdown was opened, false if setting doesn't support dropdown
+    #[allow(dead_code)]
+    pub fn open_dropdown(&mut self) -> bool {
+        let setting_index = self.settings.selected;
+        let setting = match self.settings.items.get(setting_index) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        // Determine which dropdown to open based on env_var
+        let dropdown_type = match setting.env_var.as_str() {
+            "OLLAMA_EMBEDDING_MODEL" => ActiveDropdown::EmbeddingModel,
+            "OLLAMA_RERANK_MODEL" => ActiveDropdown::RerankerModel,
+            "RAG_TUI_THEME" => ActiveDropdown::Theme,
+            _ => return false, // Setting doesn't support dropdown
+        };
+
+        // Find current value's index in the available options
+        let selected_index = match dropdown_type {
+            ActiveDropdown::EmbeddingModel | ActiveDropdown::RerankerModel => self
+                .available_models
+                .iter()
+                .position(|m| m.name == setting.value)
+                .unwrap_or(0),
+            ActiveDropdown::Theme => setting
+                .options
+                .as_ref()
+                .and_then(|opts| opts.iter().position(|o| o == &setting.value))
+                .unwrap_or(0),
+        };
+
+        self.active_dropdown = Some(dropdown_type);
+        self.dropdown_state = DropdownState {
+            setting_index,
+            selected: selected_index,
+            scroll_offset: 0,
+        };
+        true
+    }
+
+    /// Close dropdown without applying selection
+    #[allow(dead_code)]
+    pub fn close_dropdown(&mut self) {
+        self.active_dropdown = None;
+        self.dropdown_state = DropdownState::default();
+    }
+
+    /// Check if dropdown is currently open
+    #[allow(dead_code)]
+    pub fn is_dropdown_open(&self) -> bool {
+        self.active_dropdown.is_some()
+    }
+
+    /// Get the number of items in the current dropdown
+    #[allow(dead_code)]
+    pub fn dropdown_item_count(&self) -> usize {
+        match self.active_dropdown {
+            Some(ActiveDropdown::EmbeddingModel | ActiveDropdown::RerankerModel) => {
+                self.available_models.len()
+            }
+            Some(ActiveDropdown::Theme) => self
+                .settings
+                .items
+                .get(self.dropdown_state.setting_index)
+                .and_then(|s| s.options.as_ref())
+                .map(|o| o.len())
+                .unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    /// Move dropdown selection up
+    #[allow(dead_code)]
+    pub fn dropdown_up(&mut self) {
+        if self.dropdown_state.selected > 0 {
+            self.dropdown_state.selected -= 1;
+            // Adjust scroll if needed
+            if self.dropdown_state.selected < self.dropdown_state.scroll_offset {
+                self.dropdown_state.scroll_offset = self.dropdown_state.selected;
+            }
+        }
+    }
+
+    /// Move dropdown selection down
+    #[allow(dead_code)]
+    pub fn dropdown_down(&mut self) {
+        let count = self.dropdown_item_count();
+        if count > 0 && self.dropdown_state.selected < count - 1 {
+            self.dropdown_state.selected += 1;
+            // Adjust scroll if needed (matches DROPDOWN_VISIBLE_ITEMS in ui.rs)
+            let visible = 8;
+            if self.dropdown_state.selected >= self.dropdown_state.scroll_offset + visible {
+                self.dropdown_state.scroll_offset = self.dropdown_state.selected - visible + 1;
+            }
+        }
+    }
+
+    /// Confirm dropdown selection - applies the selected value to the setting
+    #[allow(dead_code)]
+    pub fn dropdown_confirm(&mut self) {
+        let selected = self.dropdown_state.selected;
+        let setting_index = self.dropdown_state.setting_index;
+
+        let new_value = match self.active_dropdown {
+            Some(ActiveDropdown::EmbeddingModel | ActiveDropdown::RerankerModel) => {
+                self.available_models.get(selected).map(|m| m.name.clone())
+            }
+            Some(ActiveDropdown::Theme) => self
+                .settings
+                .items
+                .get(setting_index)
+                .and_then(|s| s.options.as_ref())
+                .and_then(|opts| opts.get(selected))
+                .cloned(),
+            None => None,
+        };
+
+        // Update the setting value
+        if let Some(value) = new_value {
+            if let Some(setting) = self.settings.items.get_mut(setting_index) {
+                setting.value = value;
+                setting.validate();
+            }
+        }
+
+        // Close dropdown
+        self.close_dropdown();
+    }
+
+    /// Check if the current setting supports dropdown selection
+    #[allow(dead_code)]
+    pub fn current_setting_has_dropdown(&self) -> bool {
+        self.settings
+            .items
+            .get(self.settings.selected)
+            .map(|s| {
+                matches!(
+                    s.env_var.as_str(),
+                    "OLLAMA_EMBEDDING_MODEL" | "OLLAMA_RERANK_MODEL" | "RAG_TUI_THEME"
+                )
+            })
+            .unwrap_or(false)
     }
 
     pub fn exit_settings_mode(&mut self) {
@@ -472,7 +780,10 @@ impl App {
                 self.settings_message = Some((msg.to_string(), false));
 
                 // Apply TUI-only settings immediately
-                if let Some(theme_setting) = self.settings.items.iter()
+                if let Some(theme_setting) = self
+                    .settings
+                    .items
+                    .iter()
                     .find(|s| s.env_var == "RAG_TUI_THEME")
                 {
                     self.theme = Theme::from_name(&theme_setting.value);
@@ -628,6 +939,12 @@ mod tests {
             page_number: 1,
             chunk_id: "test-chunk".to_string(),
             section: None,
+            embedding_score: None,
+            lexical_score: None,
+            initial_score: None,
+            reranker_score: None,
+            yes_logprob: None,
+            no_logprob: None,
         }
     }
 
@@ -880,7 +1197,10 @@ mod tests {
 
         // Complete search
         let results = vec![make_test_result("result.pdf", 0.85)];
-        app.update(Msg::SearchCompleted { search_id: app.search_id, results });
+        app.update(Msg::SearchCompleted {
+            search_id: app.search_id,
+            results,
+        });
         assert!(!app.search_in_progress);
         assert_eq!(app.results.len(), 1);
     }
@@ -909,11 +1229,16 @@ mod tests {
         let mut app = App::new("http://localhost:3046".to_string());
         assert!(!app.reindex_in_progress);
 
-        app.update(Msg::ReindexStarted { job_id: "job-123".to_string() });
+        app.update(Msg::ReindexStarted {
+            job_id: "job-123".to_string(),
+        });
         assert!(app.reindex_in_progress);
         assert_eq!(app.active_job_id, Some("job-123".to_string()));
 
-        app.update(Msg::JobProgress { progress: 5, total: 10 });
+        app.update(Msg::JobProgress {
+            progress: 5,
+            total: 10,
+        });
         assert_eq!(app.job_progress, Some((5, 10)));
 
         app.update(Msg::JobCompleted);
@@ -928,11 +1253,23 @@ mod tests {
         assert_eq!(ServerStatus::from_str("Ready"), ServerStatus::Ready);
         assert_eq!(ServerStatus::from_str("READY"), ServerStatus::Ready);
 
-        assert_eq!(ServerStatus::from_str("reindexing"), ServerStatus::Reindexing);
-        assert_eq!(ServerStatus::from_str("Reindexing"), ServerStatus::Reindexing);
+        assert_eq!(
+            ServerStatus::from_str("reindexing"),
+            ServerStatus::Reindexing
+        );
+        assert_eq!(
+            ServerStatus::from_str("Reindexing"),
+            ServerStatus::Reindexing
+        );
 
-        assert_eq!(ServerStatus::from_str("connecting..."), ServerStatus::Connecting);
-        assert_eq!(ServerStatus::from_str("connecting"), ServerStatus::Connecting);
+        assert_eq!(
+            ServerStatus::from_str("connecting..."),
+            ServerStatus::Connecting
+        );
+        assert_eq!(
+            ServerStatus::from_str("connecting"),
+            ServerStatus::Connecting
+        );
 
         assert_eq!(
             ServerStatus::from_str("custom"),

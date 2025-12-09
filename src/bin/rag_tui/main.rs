@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod constants;
+mod ollama;
 mod settings;
 mod theme;
 mod ui;
@@ -10,24 +11,25 @@ use std::io;
 use std::time::Duration;
 
 use constants::{
-    API_TIMEOUT, DETAIL_MAX_SCROLL_ESTIMATE, EVENT_POLL_INTERVAL,
-    HEALTH_CHECK_INTERVAL_SECS, JOB_POLL_INTERVAL_SECS, SEARCH_CHANNEL_CAPACITY,
+    API_TIMEOUT, DETAIL_MAX_SCROLL_ESTIMATE, HEALTH_CHECK_INTERVAL_SECS, JOB_POLL_INTERVAL_SECS,
+    SEARCH_CHANNEL_CAPACITY,
 };
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use futures::StreamExt;
+use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 use tokio::time::{interval, timeout};
 
 use api::{ApiClient, SearchResult};
-use app::{App, AppMode};
 #[allow(unused_imports)]
-use app::Msg;  // Msg enum for future message-based architecture
+use app::Msg;
+use app::{App, AppMode}; // Msg enum for future message-based architecture
 
 /// RAII guard for terminal cleanup - ensures terminal is restored even on panic
 struct TuiGuard {
@@ -49,10 +51,7 @@ impl TuiGuard {
 impl Drop for TuiGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            LeaveAlternateScreen
-        );
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
 }
@@ -111,27 +110,31 @@ async fn run_app(
         }
     }
 
+    // Create async event stream for terminal input (no more spawn_blocking!)
+    let mut events = EventStream::new();
+
     loop {
         // Draw UI
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Handle events with timeout to allow polling
+        // biased; ensures input events are checked first to prevent dropped keystrokes
         tokio::select! {
-            // Terminal input events
-            result = tokio::task::spawn_blocking(|| {
-                if event::poll(EVENT_POLL_INTERVAL).unwrap_or(false) {
-                    event::read().ok()
-                } else {
-                    None
-                }
-            }) => {
+            biased;
+
+            // Terminal input events (async stream - no dropped events!)
+            Some(event_result) = events.next() => {
                 // Handle resize events
-                if let Ok(Some(Event::Resize(width, height))) = result {
+                if let Ok(Event::Resize(width, height)) = event_result {
                     app.set_terminal_size(width, height);
+                    // Close dropdown on resize (prevents UI glitches)
+                    if app.is_dropdown_open() {
+                        app.close_dropdown();
+                    }
                     // UI will redraw on next loop iteration
                 }
                 // Handle key events
-                else if let Ok(Some(Event::Key(key))) = result {
+                else if let Ok(Event::Key(key)) = event_result {
                     // Mode-specific keybindings
                     match app.mode {
                         AppMode::Normal => {
@@ -158,10 +161,10 @@ async fn run_app(
                                     }
                                 }
 
-                                // === SPECIAL KEYS (always work) ===
+                                // === SPECIAL KEYS ===
 
-                                // Help toggle
-                                (KeyCode::Char('?'), _) => {
+                                // Help toggle (only when query is empty, so ? can be typed in queries)
+                                (KeyCode::Char('?'), _) if app.query_input.is_empty() => {
                                     app.toggle_help();
                                 }
 
@@ -390,8 +393,28 @@ async fn run_app(
                         }
 
                         AppMode::Settings => {
+                            // Check if dropdown is open (highest priority)
+                            if app.is_dropdown_open() {
+                                match (key.code, key.modifiers) {
+                                    // Navigate dropdown
+                                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                                        app.dropdown_up();
+                                    }
+                                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                                        app.dropdown_down();
+                                    }
+                                    // Confirm selection
+                                    (KeyCode::Enter, _) => {
+                                        app.dropdown_confirm();
+                                    }
+                                    // Cancel dropdown
+                                    (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                                        app.close_dropdown();
+                                    }
+                                    _ => {}
+                                }
                             // Check if we're in edit mode for a setting
-                            if app.settings.editing {
+                            } else if app.settings.editing {
                                 match (key.code, key.modifiers) {
                                     // Confirm edit
                                     (KeyCode::Enter, _) => {
@@ -448,12 +471,12 @@ async fn run_app(
 
                                     // Edit current setting
                                     (KeyCode::Enter, _) => {
-                                        // Check if this setting has dropdown options
-                                        if app.settings.current().map(|s| s.options.is_some()).unwrap_or(false) {
-                                            // Cycle through options
-                                            app.settings.cycle_option(true);
+                                        // Check if this setting has dropdown capability
+                                        if app.current_setting_has_dropdown() {
+                                            // Open dropdown overlay
+                                            app.open_dropdown();
                                         } else {
-                                            // Open text edit
+                                            // Open text edit for other settings
                                             app.settings.start_edit();
                                         }
                                     }
@@ -475,10 +498,19 @@ async fn run_app(
                                         app.save_settings();
                                     }
 
-                                    // Reset all to original values: r
+                                    // Reset current field to original value: r
                                     (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                                        if let Some(setting) = app.settings.current() {
+                                            let name = setting.display_name.clone();
+                                            app.settings.reset_current();
+                                            app.settings_message = Some((format!("{name} reset to default"), false));
+                                        }
+                                    }
+
+                                    // Reset all to original values: R (Shift+r)
+                                    (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
                                         app.settings.reset_all();
-                                        app.settings_message = Some(("Settings reset to original values".to_string(), false));
+                                        app.settings_message = Some(("All settings reset to original values".to_string(), false));
                                     }
 
                                     _ => {}
@@ -499,6 +531,24 @@ async fn run_app(
                     Err(e) => {
                         app.cancel_search();
                         app.set_error(Some(format!("Search failed: {e}")));
+                    }
+                }
+            }
+
+            // Receive model fetch results (for settings dropdowns)
+            // Uses if-guard pattern: branch only active when receiver exists
+            result = async {
+                app.model_fetch_rx.as_mut().unwrap().await
+            }, if app.model_fetch_rx.is_some() => {
+                // Clear the receiver since it's consumed
+                app.model_fetch_rx = None;
+                match result {
+                    Ok(models_result) => {
+                        app.handle_model_fetch_result(models_result);
+                    }
+                    Err(_) => {
+                        // Sender dropped (shouldn't happen normally)
+                        app.handle_model_fetch_result(Err("Model fetch cancelled".to_string()));
                     }
                 }
             }
@@ -531,7 +581,7 @@ async fn run_app(
             // Job progress polling (only when reindex is in progress)
             _ = job_timer.tick(), if app.reindex_in_progress => {
                 if let Some(ref job_id) = app.active_job_id.clone() {
-                    match timeout(API_TIMEOUT, api.get_job_status(&job_id)).await {
+                    match timeout(API_TIMEOUT, api.get_job_status(job_id)).await {
                         Ok(Ok(job)) => {
                             app.update_job_progress(job.progress, job.total);
                             // Check if job completed
@@ -578,18 +628,33 @@ mod tests {
         }
 
         // NONE should match
-        assert!(matches_none_or_shift(KeyModifiers::NONE), "NONE should match");
-        
+        assert!(
+            matches_none_or_shift(KeyModifiers::NONE),
+            "NONE should match"
+        );
+
         // SHIFT should match
-        assert!(matches_none_or_shift(KeyModifiers::SHIFT), "SHIFT should match");
-        
+        assert!(
+            matches_none_or_shift(KeyModifiers::SHIFT),
+            "SHIFT should match"
+        );
+
         // CONTROL should NOT match
-        assert!(!matches_none_or_shift(KeyModifiers::CONTROL), "CONTROL should not match");
-        
+        assert!(
+            !matches_none_or_shift(KeyModifiers::CONTROL),
+            "CONTROL should not match"
+        );
+
         // ALT should NOT match
-        assert!(!matches_none_or_shift(KeyModifiers::ALT), "ALT should not match");
-        
+        assert!(
+            !matches_none_or_shift(KeyModifiers::ALT),
+            "ALT should not match"
+        );
+
         // SHIFT+CONTROL should NOT match (combination)
-        assert!(!matches_none_or_shift(KeyModifiers::SHIFT | KeyModifiers::CONTROL), "SHIFT+CONTROL should not match");
+        assert!(
+            !matches_none_or_shift(KeyModifiers::SHIFT | KeyModifiers::CONTROL),
+            "SHIFT+CONTROL should not match"
+        );
     }
 }

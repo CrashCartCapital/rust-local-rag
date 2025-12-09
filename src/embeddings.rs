@@ -79,7 +79,9 @@ impl EmbeddingService {
         if let Some(embedding) = embedding_response.embedding {
             Ok(embedding)
         } else if let Some(embeddings) = embedding_response.embeddings {
-            embeddings.into_iter().next()
+            embeddings
+                .into_iter()
+                .next()
                 .ok_or_else(|| anyhow::anyhow!("Empty embeddings array from Ollama"))
         } else {
             Err(anyhow::anyhow!("No embedding returned from Ollama"))
@@ -133,7 +135,7 @@ impl EmbeddingService {
                         "Batch embedding request timed out after {} seconds for {} texts. The Ollama server may be overloaded.",
                         BATCH_TIMEOUT_SECS,
                         texts.len()
-                    ))
+                    ));
                 }
             };
 

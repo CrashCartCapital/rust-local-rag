@@ -35,8 +35,7 @@ impl Config {
         Self {
             server_url: std::env::var("RAG_TUI_SERVER_URL")
                 .unwrap_or_else(|_| "http://localhost:3046".to_string()),
-            data_dir: std::env::var("DATA_DIR")
-                .unwrap_or_else(|_| "./data".to_string()),
+            data_dir: std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             documents_dir: std::env::var("DOCUMENTS_DIR")
                 .unwrap_or_else(|_| "./documents".to_string()),
             ollama_url: std::env::var("OLLAMA_URL")
@@ -49,8 +48,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_TOP_K),
-            theme: std::env::var("RAG_TUI_THEME")
-                .unwrap_or_else(|_| "dark".to_string()),
+            theme: std::env::var("RAG_TUI_THEME").unwrap_or_else(|_| "dark".to_string()),
         }
     }
 

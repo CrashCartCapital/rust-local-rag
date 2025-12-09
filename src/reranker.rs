@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 
 #[derive(Clone)]
 /// Represents a candidate chunk for reranking, containing metadata and initial retrieval score.
@@ -30,6 +30,19 @@ pub struct RerankedResult {
     /// The LLM-based relevance score (0.0 to 1.0) assigned during reranking.
     /// This is distinct from the embedding similarity score.
     pub relevance: f32,
+    /// Log probability of "yes" token (for softmax scoring transparency)
+    #[allow(dead_code)] // Will be used by TUI display
+    pub yes_logprob: Option<f64>,
+    /// Log probability of "no" token (for softmax scoring transparency)
+    #[allow(dead_code)] // Will be used by TUI display
+    pub no_logprob: Option<f64>,
+}
+
+/// Detailed score result including logprobs for transparency
+struct DetailedScore {
+    score: f32,
+    yes_logprob: Option<f64>,
+    no_logprob: Option<f64>,
 }
 
 /// Calibration statistics for determining optimal timeout
@@ -48,6 +61,12 @@ struct OllamaGenerateRequest {
     prompt: String,
     #[serde(default)]
     stream: bool,
+    /// Request log probabilities for output tokens (requires Ollama v0.12.11+)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logprobs: Option<bool>,
+    /// Number of top logprobs to return per token position (0-20)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_logprobs: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
 }
@@ -58,15 +77,39 @@ struct OllamaOptions {
     stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct OllamaGenerateResponse {
     response: String,
+    /// Log probability information for generated tokens (Ollama v0.12.11+)
+    #[serde(default)]
+    logprobs: Option<Vec<TokenLogprob>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TokenLogprob {
+    /// The generated token
+    token: String,
+    /// Log probability of this token
+    logprob: f64,
+    /// Top alternative tokens with their logprobs
+    #[serde(default)]
+    top_logprobs: Option<Vec<TopLogprob>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct TopLogprob {
+    /// Alternative token
+    token: String,
+    /// Log probability of this alternative
+    logprob: f64,
 }
 
 /// LLM-based relevance reranking service using Ollama.
-/// Scores search candidates using structured JSON output with Phi chat template.
+/// Scores search candidates using Yes/No classification for binary relevance.
 pub struct RerankerService {
     client: reqwest::Client,
     ollama_url: String,
@@ -76,16 +119,16 @@ pub struct RerankerService {
 
 impl RerankerService {
     /// Creates a new reranker service backed by Ollama.
-    /// 
+    ///
     /// This method initializes the service, validates the connection to Ollama,
     /// and verifies that the specified model is available.
-    /// 
+    ///
     /// # Configuration
-    /// 
+    ///
     /// The service is configured via environment variables:
     /// * `OLLAMA_URL` - The Ollama API endpoint (default: `http://localhost:11434`)
     /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `llama3.1`)
-    /// 
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -102,10 +145,10 @@ impl RerankerService {
         // Configure client with optimized connection pooling settings
         // to avoid connection overhead on each request
         let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(10)  // Keep up to 10 idle connections per host
-            .pool_idle_timeout(Some(Duration::from_secs(300)))  // Keep connections alive for 5 minutes
-            .tcp_keepalive(Some(Duration::from_secs(30)))  // TCP keepalive every 30s
-            .timeout(Duration::from_secs(120))  // 2-minute timeout for reranking requests
+            .pool_max_idle_per_host(10) // Keep up to 10 idle connections per host
+            .pool_idle_timeout(Some(Duration::from_secs(300))) // Keep connections alive for 5 minutes
+            .tcp_keepalive(Some(Duration::from_secs(30))) // TCP keepalive every 30s
+            .timeout(Duration::from_secs(120)) // 2-minute timeout for reranking requests
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -138,34 +181,34 @@ impl RerankerService {
                 template
             }
             Err(_) => {
-                tracing::info!("Using default reranker prompt (no external file found at {})", prompt_path.display());
+                tracing::info!(
+                    "Using default reranker prompt (no external file found at {})",
+                    prompt_path.display()
+                );
                 Self::default_prompt_template()
             }
         }
     }
 
     /// Default prompt template (compiled in as fallback)
+    /// Uses Yes/No format for logprobs-based scoring with Qwen3-Reranker
+    /// Enhanced for semantic nuance capture beyond keyword matching
     fn default_prompt_template() -> String {
-        r#"You are a semantic relevance judge for a RAG system. Your job is to score how well a document chunk ANSWERS the user's underlying question - not just whether it contains matching keywords.
-
-Scoring guidelines (0-100):
-- 90-100: Directly answers the question with actionable information
-- 70-89: Highly relevant context that helps answer the question
-- 50-69: Related topic but doesn't directly address the question
-- 30-49: Tangentially related, mostly background information
-- 0-29: Not relevant to what the user is actually asking
-
-IMPORTANT: A chunk mentioning the same words as the query is NOT automatically relevant. Judge whether the chunk would actually help someone who asked this question.
-
-Query: {query}
+        r#"Query: {query}
 Document: {document}
 Page: {page}
-Section: {section}
 
 Chunk:
 {text}
 
-Score (0-100):"#.to_string()
+Consider semantic meaning, not just keyword matches. A chunk is relevant if it:
+- Directly answers the query
+- Provides essential context or definitions
+- Contains logically related information that helps address the query
+
+Does this chunk contain relevant information for the query?
+Answer:"#
+            .to_string()
     }
 
     /// Performs second-stage reranking of search candidates using an LLM.
@@ -233,34 +276,48 @@ Score (0-100):"#.to_string()
         let chunk_id = candidate.chunk_id.clone();
         let initial_score = candidate.initial_score;
 
-        let score_result = timeout(
-            timeout_duration,
-            self.score_candidate(query, candidate),
-        ).await;
+        let score_result = timeout(timeout_duration, self.score_candidate(query, candidate)).await;
 
-        let score = match score_result {
-            Ok(Ok(score)) => score,
+        match score_result {
+            Ok(Ok(detailed)) => RerankedResult {
+                chunk_id,
+                relevance: detailed.score,
+                yes_logprob: detailed.yes_logprob,
+                no_logprob: detailed.no_logprob,
+            },
             Ok(Err(err)) => {
                 tracing::warn!(
                     "Reranking failed for chunk {}, falling back to embedding score: {}",
                     chunk_id,
                     err
                 );
-                initial_score
+                RerankedResult {
+                    chunk_id,
+                    relevance: initial_score,
+                    yes_logprob: None,
+                    no_logprob: None,
+                }
             }
             Err(_) => {
                 tracing::warn!(
                     "Reranking timeout for chunk {}, falling back to embedding score",
                     chunk_id
                 );
-                initial_score
+                RerankedResult {
+                    chunk_id,
+                    relevance: initial_score,
+                    yes_logprob: None,
+                    no_logprob: None,
+                }
             }
-        };
-
-        RerankedResult { chunk_id, relevance: score }
+        }
     }
 
-    async fn score_candidate(&self, query: &str, candidate: &RerankerCandidate) -> Result<f32> {
+    async fn score_candidate(
+        &self,
+        query: &str,
+        candidate: &RerankerCandidate,
+    ) -> Result<DetailedScore> {
         let overall_start = Instant::now();
 
         // Phase 1: Build prompt
@@ -268,15 +325,28 @@ Score (0-100):"#.to_string()
         let prompt = self.build_prompt(query, candidate);
         let phase1_elapsed = phase1_start.elapsed().as_millis();
 
-        // Phase 2: Create request with stop sequences for Phi template
+        // DEBUG: Log the full prompt being sent
+        tracing::info!(
+            "\n=== RERANKER DEBUG [{}] ===\nQuery: {}\nDocument: {}\nPage: {}\n--- FULL PROMPT ---\n{}\n--- END PROMPT ---",
+            &candidate.chunk_id[..8],
+            query,
+            candidate.document,
+            candidate.page_number,
+            prompt
+        );
+
+        // Phase 2: Create request for Yes/No classification with logprobs
         let phase2_start = Instant::now();
         let request = OllamaGenerateRequest {
             model: self.model.clone(),
             prompt,
             stream: false,
+            logprobs: Some(true),  // Enable logprobs for softmax scoring
+            top_logprobs: Some(5), // Get top 5 alternatives to find yes/no
             options: Some(OllamaOptions {
-                stop: Some(vec!["<|end|>".to_string(), "<|user|>".to_string()]),
-                temperature: Some(0.0), // Zero temperature for deterministic scoring
+                stop: Some(vec!["\n".to_string()]), // Stop at newline after Yes/No
+                temperature: Some(0.0),             // Zero temperature for deterministic scoring
+                num_predict: Some(3),               // Only need 1-3 tokens for Yes/No
             }),
         };
         let phase2_elapsed = phase2_start.elapsed().as_millis();
@@ -308,11 +378,53 @@ Score (0-100):"#.to_string()
             .context("Failed to parse reranker response")?;
         let phase4_elapsed = phase4_start.elapsed().as_millis();
 
-        // Phase 5: Extract score
+        // DEBUG: Log the raw response and logprobs from Ollama
+        tracing::info!(
+            "\n=== RERANKER RESPONSE [{}] ===\nRaw response: '{}'\nLogprobs: {:?}\n--- END RESPONSE ---",
+            &candidate.chunk_id[..8],
+            payload.response,
+            payload.logprobs
+        );
+
+        // Phase 5: Extract score from logprobs (preferred) or fall back to text parsing
         let phase5_start = Instant::now();
-        let score = self.parse_score(&payload.response)
-            .ok_or_else(|| anyhow::anyhow!("No numeric score in reranker response"))?;
+        let detailed = if let Some(ref logprobs) = payload.logprobs {
+            self.compute_score_from_logprobs(logprobs, &candidate.chunk_id)
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "Logprobs parsing failed for chunk {}, falling back to text",
+                        &candidate.chunk_id[..8]
+                    );
+                    DetailedScore {
+                        score: self.parse_score(&payload.response).unwrap_or(0.5),
+                        yes_logprob: None,
+                        no_logprob: None,
+                    }
+                })
+        } else {
+            tracing::warn!(
+                "No logprobs in response for chunk {}, using text parsing",
+                &candidate.chunk_id[..8]
+            );
+            let score = self
+                .parse_score(&payload.response)
+                .ok_or_else(|| anyhow::anyhow!("No score in reranker response"))?;
+            DetailedScore {
+                score,
+                yes_logprob: None,
+                no_logprob: None,
+            }
+        };
         let phase5_elapsed = phase5_start.elapsed().as_millis();
+
+        // DEBUG: Log the parsed score
+        tracing::info!(
+            "=== RERANKER SCORE [{}] === Parsed score: {:.4} (yes_lp: {:?}, no_lp: {:?}) ===",
+            &candidate.chunk_id[..8],
+            detailed.score,
+            detailed.yes_logprob,
+            detailed.no_logprob
+        );
 
         let total_elapsed = overall_start.elapsed().as_millis();
 
@@ -328,7 +440,7 @@ Score (0-100):"#.to_string()
             phase5_elapsed
         );
 
-        Ok(score)
+        Ok(detailed)
     }
 
     fn build_prompt(&self, query: &str, candidate: &RerankerCandidate) -> String {
@@ -353,79 +465,125 @@ Score (0-100):"#.to_string()
             .replace("{text}", candidate.text.trim())
     }
 
-    /// Parse score from LLM response, handling JSON format with pre-fill.
-    /// Reconstructs JSON from pre-filled prompt, extracts "score" field.
-    /// Falls back to finding first number if JSON parsing fails.
-    /// Normalizes all scores to 0.0-1.0 range.
+    /// Parse score from LLM response by detecting Yes/No answer.
+    /// Returns 1.0 for "Yes" responses, 0.0 for "No" responses.
+    /// Falls back to 0.5 if neither is detected.
     fn parse_score(&self, response: &str) -> Option<f32> {
+        let response_lower = response.to_lowercase();
+        let response_trimmed = response_lower.trim();
+
         tracing::debug!(
-            response_preview = %response.chars().take(200).collect::<String>(),
-            "Parsing reranker response"
+            response = %response_trimmed,
+            "Parsing Yes/No reranker response"
         );
 
-        // Reconstruct full JSON by prepending the pre-fill from the prompt
-        // Prompt ends with: {"score":
-        // Model completes: 45, "reason": "..."}
-        let full_json = format!(r#"{{"score":{response}"#);
-
-        // Try to parse as JSON and extract score
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&full_json) {
-            if let Some(score) = json.get("score").and_then(|v| v.as_f64()) {
-                let score = score as f32;
-                tracing::debug!(raw_score = score, "Extracted score from JSON");
-                // Normalize: if > 1.0, assume 0-100 scale
-                return Some(if score > 1.0 {
-                    (score / 100.0).clamp(0.0, 1.0)
-                } else {
-                    score.clamp(0.0, 1.0)
-                });
-            }
+        // Check for Yes/No at the start of the response
+        if response_trimmed.starts_with("yes") {
+            tracing::debug!("Detected YES - score 1.0");
+            return Some(1.0);
         }
 
-        // Fallback: find "score" followed by a number in the response
-        tracing::debug!("JSON parse failed, trying text fallback");
-        let lower = response.to_lowercase();
-        if let Some(score_pos) = lower.find("score") {
-            let after_score = &response[score_pos..];
-            let mut num = String::new();
-            let mut found_digit = false;
-            for ch in after_score.chars() {
-                if ch.is_ascii_digit() || ch == '.' {
-                    num.push(ch);
-                    found_digit = true;
-                } else if found_digit {
-                    break;
+        if response_trimmed.starts_with("no") {
+            tracing::debug!("Detected NO - score 0.0");
+            return Some(0.0);
+        }
+
+        // Fallback: check if yes/no appears anywhere
+        if response_trimmed.contains("yes") && !response_trimmed.contains("no") {
+            tracing::debug!("Found 'yes' in response - score 1.0");
+            return Some(1.0);
+        }
+
+        if response_trimmed.contains("no") && !response_trimmed.contains("yes") {
+            tracing::debug!("Found 'no' in response - score 0.0");
+            return Some(0.0);
+        }
+
+        // Ambiguous response - return middle score
+        tracing::warn!(
+            response = %response,
+            "Ambiguous reranker response, defaulting to 0.5"
+        );
+        Some(0.5)
+    }
+
+    /// Compute relevance score from logprobs using softmax over yes/no probabilities.
+    ///
+    /// This implements the official Qwen3-Reranker scoring formula:
+    /// score = exp(yes_logprob) / (exp(yes_logprob) + exp(no_logprob))
+    ///
+    /// The function aggregates all yes-like tokens ("yes", "Yes", "YES") and
+    /// no-like tokens ("no", "No", "NO") from the top_logprobs to get robust estimates.
+    ///
+    /// Returns a DetailedScore with the softmax score and the raw logprobs for transparency.
+    fn compute_score_from_logprobs(
+        &self,
+        logprobs: &[TokenLogprob],
+        chunk_id: &str,
+    ) -> Option<DetailedScore> {
+        // We only need the first token's logprobs (the yes/no decision)
+        let first_token = logprobs.first()?;
+        let top_probs = first_token.top_logprobs.as_ref()?;
+
+        // Find the best yes-like and no-like logprobs
+        let mut yes_logprob: Option<f64> = None;
+        let mut no_logprob: Option<f64> = None;
+
+        for prob in top_probs {
+            let token_lower = prob.token.to_lowercase();
+            let token_trimmed = token_lower.trim();
+            // Strip punctuation to handle "yes." or "no," variants
+            let clean_token = token_trimmed.trim_matches(|c: char| !c.is_alphabetic());
+
+            if clean_token == "yes" {
+                // Take the highest (least negative) yes logprob
+                if yes_logprob.is_none() || prob.logprob > yes_logprob.unwrap() {
+                    yes_logprob = Some(prob.logprob);
+                }
+            } else if clean_token == "no" {
+                // Take the highest (least negative) no logprob
+                if no_logprob.is_none() || prob.logprob > no_logprob.unwrap() {
+                    no_logprob = Some(prob.logprob);
                 }
             }
-            if let Ok(score) = num.trim().parse::<f32>() {
-                tracing::debug!(raw_score = score, "Extracted score via text fallback");
-                return Some(if score > 1.0 {
-                    (score / 100.0).clamp(0.0, 1.0)
-                } else {
-                    score.clamp(0.0, 1.0)
-                });
-            }
         }
 
-        // Last resort: first number in response
-        let mut num = String::new();
-        let mut found_digit = false;
-        for ch in response.chars() {
-            if ch.is_ascii_digit() || ch == '.' {
-                num.push(ch);
-                found_digit = true;
-            } else if found_digit {
-                break;
-            }
+        // Also check the actual generated token
+        let generated_lower = first_token.token.to_lowercase();
+        let generated_trimmed = generated_lower.trim();
+        let clean_generated = generated_trimmed.trim_matches(|c: char| !c.is_alphabetic());
+
+        if clean_generated == "yes"
+            && (yes_logprob.is_none() || first_token.logprob > yes_logprob.unwrap())
+        {
+            yes_logprob = Some(first_token.logprob);
+        } else if clean_generated == "no"
+            && (no_logprob.is_none() || first_token.logprob > no_logprob.unwrap())
+        {
+            no_logprob = Some(first_token.logprob);
         }
 
-        num.trim().parse::<f32>().ok().map(|score| {
-            tracing::debug!(raw_score = score, "Extracted score via last resort");
-            if score > 1.0 {
-                (score / 100.0).clamp(0.0, 1.0)
-            } else {
-                score.clamp(0.0, 1.0)
-            }
+        // Need both yes and no logprobs to compute softmax
+        let yes_lp = yes_logprob.unwrap_or(-10.0); // Default to very unlikely if not found
+        let no_lp = no_logprob.unwrap_or(-10.0); // Default to very unlikely if not found
+
+        // Compute softmax: score = exp(yes) / (exp(yes) + exp(no))
+        let yes_exp = yes_lp.exp();
+        let no_exp = no_lp.exp();
+        let score = yes_exp / (yes_exp + no_exp);
+
+        tracing::info!(
+            "Logprobs scoring for chunk {}: yes_logprob={:.4}, no_logprob={:.4}, softmax_score={:.4}",
+            &chunk_id[..8.min(chunk_id.len())],
+            yes_lp,
+            no_lp,
+            score
+        );
+
+        Some(DetailedScore {
+            score: score as f32,
+            yes_logprob: Some(yes_lp),
+            no_logprob: Some(no_lp),
         })
     }
 
@@ -490,7 +648,11 @@ Score (0-100):"#.to_string()
             if result.is_ok() {
                 tracing::debug!("Calibration sample completed in {:.0}ms", duration_ms);
             } else {
-                tracing::warn!("Calibration sample failed in {:.0}ms: {:?}", duration_ms, result.unwrap_err());
+                tracing::warn!(
+                    "Calibration sample failed in {:.0}ms: {:?}",
+                    duration_ms,
+                    result.unwrap_err()
+                );
             }
 
             // Add next candidate if available
@@ -542,7 +704,10 @@ Score (0-100):"#.to_string()
         candidate: &RerankerCandidate,
     ) -> (std::time::Duration, Result<f32>) {
         let start = Instant::now();
-        let result = self.score_candidate(query, candidate).await;
+        let result = self
+            .score_candidate(query, candidate)
+            .await
+            .map(|d| d.score);
         let duration = start.elapsed();
         (duration, result)
     }

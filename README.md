@@ -40,8 +40,9 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) is a standa
 
 ### Semantic Document Search
 - Vector-based similarity search using Ollama embeddings
-- Configurable result count (top-k, max 100)
-- Relevance scoring for search results
+- Two-stage retrieval: embedding similarity + LLM reranking
+- **MMR Diversification**: Maximal Marginal Relevance algorithm balances relevance with result diversity
+- Configurable result count (top-k, max 100) and diversity factor (0.0-1.0)
 
 ### Configurable Embedding Pipeline
 - Select any installed Ollama embedding model via `OLLAMA_EMBEDDING_MODEL`
@@ -124,6 +125,7 @@ Replace `YOUR_USERNAME` with your actual username.
 | `LOG_MAX_MB` | Max log file size before truncation | `5` |
 | `OLLAMA_URL` | Ollama API endpoint | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model | `nomic-embed-text` |
+| `OLLAMA_RERANK_MODEL` | LLM model for reranking (optional) | None (falls back to embedding-only) |
 | `DEV` or `DEVELOPMENT` | Enable console logging | unset |
 
 ### Add Documents
@@ -140,12 +142,20 @@ cp your-files.pdf ~/Documents/rag/
 
 | Tool | Purpose |
 |------|---------|
-| `search_documents` | Semantic search with query and optional top_k (max 100) |
+| `search_documents` | Semantic search with query, top_k (max 100), and diversity_factor (0.0-1.0) |
 | `list_documents` | List all indexed documents |
-| `get_stats` | System statistics (chunk count, memory usage) |
+| `get_stats` | System statistics (chunk count, embedding/reranker models) |
 | `start_reindex` | Trigger background reindexing, returns job ID |
 | `get_job_status` | Check job progress by ID |
-| `calibrate_reranker` | Measure reranker latency for timeout tuning |
+
+### Search Parameters
+
+- **query**: Search query string
+- **top_k**: Number of results (default: 5, max: 100)
+- **diversity_factor**: MMR diversity control (default: 0.3)
+  - `0.0` = Pure relevance ranking (no diversity)
+  - `0.3` = Balanced (recommended default)
+  - `0.7+` = High diversity (reduces similar/duplicate results)
 
 ## Health Endpoints
 
@@ -170,8 +180,10 @@ cargo clippy
 
 ## Documentation
 
-- [Setup Guide](setup.md) - Installation and configuration details
-- [Usage Guide](how-to-use.md) - Claude Desktop integration examples
+- [Setup Guide](docs/setup.md) - Installation and configuration details
+- [Usage Guide](docs/how-to-use.md) - Claude Desktop integration examples
+- [Evaluation Framework](docs/RAG_EVALUATION_FRAMEWORK_SPEC.md) - RAG quality measurement
+- [Reranker Guide](docs/RERANKER_DEBUGGING_POSTMORTEM.md) - LLM reranker implementation notes
 
 ## License
 

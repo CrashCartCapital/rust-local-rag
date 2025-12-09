@@ -13,8 +13,8 @@ mod worker;
 
 use job_manager::JobManager;
 use rag_engine::RagEngine;
-use worker::{JobRequest, WorkerSupervisor};
 use tokio::sync::mpsc;
+use worker::{JobRequest, WorkerSupervisor};
 
 fn get_data_dir() -> String {
     std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string())
@@ -175,11 +175,7 @@ async fn main() -> Result<()> {
     let (job_tx, job_rx) = mpsc::channel::<JobRequest>(100);
 
     // Spawn worker supervisor and monitor it
-    let supervisor = WorkerSupervisor::new(
-        job_manager.clone(),
-        rag_state.clone(),
-        job_rx,
-    );
+    let supervisor = WorkerSupervisor::new(job_manager.clone(), rag_state.clone(), job_rx);
     let supervisor_handle = tokio::spawn(supervisor.run());
     tracing::info!("Worker supervisor started");
 
@@ -223,17 +219,13 @@ async fn main() -> Result<()> {
 
     // Acquire lock with 10s timeout
     tracing::info!("Acquiring lock for flush (10s timeout)...");
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        rag_state.write()
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), rag_state.write()).await {
         Ok(engine) => {
             // Flush to disk with 5s timeout
             tracing::info!("Lock acquired. Flushing state to disk (5s timeout)...");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                engine.save_to_disk()
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), engine.save_to_disk())
+                .await
+            {
                 Ok(Ok(())) => tracing::info!("✅ RAG state successfully saved to disk"),
                 Ok(Err(e)) => tracing::error!("❌ Failed to save state: {}", e),
                 Err(_) => tracing::error!("⚠️ Save operation timed out after 5s"),

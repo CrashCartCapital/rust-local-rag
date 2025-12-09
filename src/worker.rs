@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, RwLock, RwLockWriteGuard, Semaphore};
+use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
 
 /// Maximum allowed write lock duration in milliseconds.
 /// This is an enforced design contract - locks held longer indicate
@@ -46,10 +46,7 @@ pub struct TimedWriteLockGuard<'a, T> {
 
 impl<'a, T> TimedWriteLockGuard<'a, T> {
     /// Acquire an instrumented write lock.
-    pub async fn acquire(
-        lock: &'a RwLock<T>,
-        context: impl Into<String>,
-    ) -> Self {
+    pub async fn acquire(lock: &'a RwLock<T>, context: impl Into<String>) -> Self {
         let wait_start = Instant::now();
         let guard = lock.write().await;
         let wait_ms = wait_start.elapsed().as_millis() as u64;
@@ -108,7 +105,10 @@ impl<'a, T> Drop for TimedWriteLockGuard<'a, T> {
 
 #[derive(Debug)]
 pub enum JobRequest {
-    StartReindex { job_id: String, documents_dir: String },
+    StartReindex {
+        job_id: String,
+        documents_dir: String,
+    },
 }
 
 /// Background worker supervisor for processing async reindex jobs.
@@ -142,7 +142,11 @@ impl WorkerSupervisor {
         // Resume any in-progress or pending jobs from DB
         if let Ok(jobs) = self.job_manager.find_resumable_jobs().await {
             for job in jobs {
-                tracing::info!("Resuming job {} (status: {:?}) from restart", job.job_id, job.status);
+                tracing::info!(
+                    "Resuming job {} (status: {:?}) from restart",
+                    job.job_id,
+                    job.status
+                );
                 if let Some(payload) = job.payload {
                     self.spawn_reindex_worker(job.job_id, payload).await;
                 }
@@ -152,7 +156,10 @@ impl WorkerSupervisor {
         // Listen for new job requests
         while let Some(request) = self.job_rx.recv().await {
             match request {
-                JobRequest::StartReindex { job_id, documents_dir } => {
+                JobRequest::StartReindex {
+                    job_id,
+                    documents_dir,
+                } => {
                     self.spawn_reindex_worker(job_id, documents_dir).await;
                 }
             }
@@ -188,13 +195,24 @@ impl WorkerSupervisor {
             Ok(permit) => permit,
             Err(_) => {
                 // Semaphore closed (should only happen during shutdown)
-                tracing::warn!("Worker semaphore closed, job {} will not be processed", job_id);
+                tracing::warn!(
+                    "Worker semaphore closed, job {} will not be processed",
+                    job_id
+                );
                 // Mark job as failed so it's visible in status
                 if let Err(e) = job_manager
-                    .update_status(&job_id, JobStatus::Failed, Some("Server shutdown".to_string()))
+                    .update_status(
+                        &job_id,
+                        JobStatus::Failed,
+                        Some("Server shutdown".to_string()),
+                    )
                     .await
                 {
-                    tracing::error!("Failed to mark job {} as failed during shutdown: {}", job_id, e);
+                    tracing::error!(
+                        "Failed to mark job {} as failed during shutdown: {}",
+                        job_id,
+                        e
+                    );
                 }
                 return;
             }
@@ -207,7 +225,10 @@ impl WorkerSupervisor {
             tracing::info!("Starting reindex job {} (acquired worker permit)", job_id);
 
             // Mark as in progress
-            if let Err(e) = job_manager.update_status(&job_id, JobStatus::InProgress, None).await {
+            if let Err(e) = job_manager
+                .update_status(&job_id, JobStatus::InProgress, None)
+                .await
+            {
                 tracing::error!("Failed to mark job {} as in progress: {}", job_id, e);
                 return;
             }
@@ -220,14 +241,21 @@ impl WorkerSupervisor {
                 job_manager.clone(),
                 &job_id,
                 progress_logger,
-            ).await;
+            )
+            .await;
 
             match result {
                 Ok(_) => {
-                    if let Err(e) = job_manager.update_status(&job_id, JobStatus::Completed, None).await {
+                    if let Err(e) = job_manager
+                        .update_status(&job_id, JobStatus::Completed, None)
+                        .await
+                    {
                         tracing::error!("Failed to mark job {} as completed: {}", job_id, e);
                     } else {
-                        tracing::info!("Job {} completed successfully (releasing worker permit)", job_id);
+                        tracing::info!(
+                            "Job {} completed successfully (releasing worker permit)",
+                            job_id
+                        );
                     }
                 }
                 Err(e) => {
@@ -238,7 +266,11 @@ impl WorkerSupervisor {
                     {
                         tracing::error!("Failed to mark job {} as failed: {}", job_id, update_err);
                     }
-                    tracing::error!("Job {} failed: {} (releasing worker permit)", job_id, error_msg);
+                    tracing::error!(
+                        "Job {} failed: {} (releasing worker permit)",
+                        job_id,
+                        error_msg
+                    );
                 }
             }
         });
@@ -260,9 +292,7 @@ impl WorkerSupervisor {
                 WalkDir::new(&dir)
                     .into_iter()
                     .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.path().extension().and_then(|s| s.to_str()) == Some("pdf")
-                    })
+                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("pdf"))
                     .map(|e| e.path().to_path_buf())
                     .collect::<Vec<_>>()
             }
@@ -285,7 +315,14 @@ impl WorkerSupervisor {
 
         // Log discovery stage completion
         if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger.emit(&progress_state, "stage", Some(&format!("discovered {total_docs} PDFs"))).await {
+            if let Err(e) = logger
+                .emit(
+                    &progress_state,
+                    "stage",
+                    Some(&format!("discovered {total_docs} PDFs")),
+                )
+                .await
+            {
                 tracing::error!("Failed to log discovery stage: {}", e);
             }
         }
@@ -309,7 +346,14 @@ impl WorkerSupervisor {
         // Change to embedding stage
         progress_state.stage = Stage::Embedding;
         if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger.emit(&progress_state, "stage", Some("starting document embedding")).await {
+            if let Err(e) = logger
+                .emit(
+                    &progress_state,
+                    "stage",
+                    Some("starting document embedding"),
+                )
+                .await
+            {
                 tracing::error!("Failed to log embedding stage: {}", e);
             }
         }
@@ -334,7 +378,12 @@ impl WorkerSupervisor {
                 }
             };
 
-            tracing::info!("Processing document {} ({}/{})", filename, idx + 1, total_docs);
+            tracing::info!(
+                "Processing document {} ({}/{})",
+                filename,
+                idx + 1,
+                total_docs
+            );
 
             // Add document with brief write lock (minutes per document, not hours total)
             // Create batch progress callback
@@ -345,41 +394,46 @@ impl WorkerSupervisor {
 
             let result = {
                 // Use instrumented lock guard for timing visibility
-                let mut engine = TimedWriteLockGuard::acquire(
-                    &rag_engine,
-                    format!("add_document:{filename}"),
-                ).await;
+                let mut engine =
+                    TimedWriteLockGuard::acquire(&rag_engine, format!("add_document:{filename}"))
+                        .await;
 
                 // Define batch callback
-                let mut batch_callback = |batch_idx: usize, batch_count: usize, total_chunks: usize, chunks_in_batch: usize| {
-                    // Update state with batch progress and current document position
-                    progress_state_clone.current_batch = Some(batch_idx);
-                    progress_state_clone.total_batches = Some(batch_count);
-                    progress_state_clone.current_chunks = Some(total_chunks);
-                    progress_state_clone.last_doc = Some(filename_clone.clone());
-                    // Update done_docs to show monotonic progress during batch embedding
-                    progress_state_clone.done_docs = (current_idx + 1) as i64;
+                let mut batch_callback =
+                    |batch_idx: usize,
+                     batch_count: usize,
+                     total_chunks: usize,
+                     chunks_in_batch: usize| {
+                        // Update state with batch progress and current document position
+                        progress_state_clone.current_batch = Some(batch_idx);
+                        progress_state_clone.total_batches = Some(batch_count);
+                        progress_state_clone.current_chunks = Some(total_chunks);
+                        progress_state_clone.last_doc = Some(filename_clone.clone());
+                        // Update done_docs to show monotonic progress during batch embedding
+                        progress_state_clone.done_docs = (current_idx + 1) as i64;
 
-                    // Emit batch progress asynchronously (spawn to avoid blocking)
-                    if let Some(ref logger) = logger_clone {
-                        let batch_progress = crate::progress_logger::BatchProgress {
-                            document_name: filename_clone.clone(),
-                            batch_index: batch_idx,
-                            batch_count,
-                            chunks_in_batch,
-                            total_chunks,
-                        };
-                        let logger = logger.clone();
-                        let state = progress_state_clone.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
-                                tracing::error!("Failed to log batch progress: {}", e);
-                            }
-                        });
-                    }
-                };
+                        // Emit batch progress asynchronously (spawn to avoid blocking)
+                        if let Some(ref logger) = logger_clone {
+                            let batch_progress = crate::progress_logger::BatchProgress {
+                                document_name: filename_clone.clone(),
+                                batch_index: batch_idx,
+                                batch_count,
+                                chunks_in_batch,
+                                total_chunks,
+                            };
+                            let logger = logger.clone();
+                            let state = progress_state_clone.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
+                                    tracing::error!("Failed to log batch progress: {}", e);
+                                }
+                            });
+                        }
+                    };
 
-                engine.add_document(filename, &data, Some(&mut batch_callback)).await
+                engine
+                    .add_document(filename, &data, Some(&mut batch_callback))
+                    .await
             };
 
             // Clear batch progress after document completes
@@ -422,8 +476,13 @@ impl WorkerSupervisor {
                     let error_msg = format!("{filename}: {e}");
                     failed_documents.push(error_msg.clone());
                     progress_state.failed_docs += 1;
-                    tracing::warn!("Failed to process {} ({}/{}): {}. Continuing with remaining documents.",
-                        filename, idx + 1, total_docs, e);
+                    tracing::warn!(
+                        "Failed to process {} ({}/{}): {}. Continuing with remaining documents.",
+                        filename,
+                        idx + 1,
+                        total_docs,
+                        e
+                    );
                 }
             }
 
@@ -438,7 +497,10 @@ impl WorkerSupervisor {
 
             // Log progress
             if let Some(ref logger) = progress_logger {
-                if let Err(e) = logger.emit(&progress_state, "progress", Some(&progress_note)).await {
+                if let Err(e) = logger
+                    .emit(&progress_state, "progress", Some(&progress_note))
+                    .await
+                {
                     tracing::error!("Failed to log progress: {}", e);
                 }
             }
@@ -447,17 +509,17 @@ impl WorkerSupervisor {
         // Finalize reindex
         progress_state.stage = Stage::Finalize;
         if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger.emit(&progress_state, "stage", Some("finalizing reindex")).await {
+            if let Err(e) = logger
+                .emit(&progress_state, "stage", Some("finalizing reindex"))
+                .await
+            {
                 tracing::error!("Failed to log finalize stage: {}", e);
             }
         }
 
         {
             // Use instrumented lock guard for timing visibility
-            let mut engine = TimedWriteLockGuard::acquire(
-                &rag_engine,
-                "finalize_reindex",
-            ).await;
+            let mut engine = TimedWriteLockGuard::acquire(&rag_engine, "finalize_reindex").await;
             engine.finalize_reindex().await?;
         }
 
@@ -466,9 +528,15 @@ impl WorkerSupervisor {
             let completion_note = if failed_documents.is_empty() {
                 format!("completed successfully - {total_docs} docs")
             } else {
-                format!("completed with {} failures out of {total_docs}", failed_documents.len())
+                format!(
+                    "completed with {} failures out of {total_docs}",
+                    failed_documents.len()
+                )
             };
-            if let Err(e) = logger.emit(&progress_state, "done", Some(&completion_note)).await {
+            if let Err(e) = logger
+                .emit(&progress_state, "done", Some(&completion_note))
+                .await
+            {
                 tracing::error!("Failed to log completion: {}", e);
             }
         }
@@ -484,15 +552,18 @@ impl WorkerSupervisor {
             tracing::warn!("{}", failure_summary);
 
             // Update job with partial failure status
-            if let Err(e) = job_manager.update_status(
-                job_id,
-                JobStatus::Completed,
-                Some(failure_summary)
-            ).await {
+            if let Err(e) = job_manager
+                .update_status(job_id, JobStatus::Completed, Some(failure_summary))
+                .await
+            {
                 tracing::error!("Failed to update job with failure summary: {}", e);
             }
 
-            tracing::info!("Successfully processed {}/{} documents", successful_count, total_docs);
+            tracing::info!(
+                "Successfully processed {}/{} documents",
+                successful_count,
+                total_docs
+            );
         } else {
             tracing::info!("All {} documents processed successfully", total_docs);
         }
@@ -523,8 +594,14 @@ mod tests {
 
         // Verify metric was recorded (should be ~50ms)
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms >= 50, "Lock should have been held at least 50ms, got {max_ms}ms");
-        assert!(max_ms < 200, "Lock should not have been held more than 200ms, got {max_ms}ms");
+        assert!(
+            max_ms >= 50,
+            "Lock should have been held at least 50ms, got {max_ms}ms"
+        );
+        assert!(
+            max_ms < 200,
+            "Lock should not have been held more than 200ms, got {max_ms}ms"
+        );
     }
 
     /// Test that TimedWriteLockGuard Deref works correctly.
@@ -571,7 +648,10 @@ mod tests {
 
         // Should be well under 1 second
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms < WRITE_LOCK_MAX_MS, "Quick op should be under {WRITE_LOCK_MAX_MS}ms threshold, got {max_ms}ms");
+        assert!(
+            max_ms < WRITE_LOCK_MAX_MS,
+            "Quick op should be under {WRITE_LOCK_MAX_MS}ms threshold, got {max_ms}ms"
+        );
     }
 
     /// Test that metrics track maximum across multiple locks.
@@ -601,7 +681,10 @@ mod tests {
 
         // Max should be from second lock (~30ms)
         let max_ms = lock_metrics::max_held_ms();
-        assert!(max_ms >= 30, "Max should be at least 30ms from second lock, got {max_ms}ms");
+        assert!(
+            max_ms >= 30,
+            "Max should be at least 30ms from second lock, got {max_ms}ms"
+        );
         assert!(max_ms < 60, "Max should be less than 60ms, got {max_ms}ms");
     }
 }

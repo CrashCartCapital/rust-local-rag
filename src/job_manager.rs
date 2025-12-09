@@ -267,10 +267,7 @@ mod tests {
     async fn test_update_status() {
         let manager = JobManager::new("sqlite::memory:").await.unwrap();
 
-        let job = manager
-            .create_job(JobType::Reindex, None, 0)
-            .await
-            .unwrap();
+        let job = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
 
         manager
             .update_status(&job.job_id, JobStatus::InProgress, None)
@@ -281,7 +278,11 @@ mod tests {
         assert!(matches!(updated.status, JobStatus::InProgress));
 
         manager
-            .update_status(&job.job_id, JobStatus::Failed, Some("Test error".to_string()))
+            .update_status(
+                &job.job_id,
+                JobStatus::Failed,
+                Some("Test error".to_string()),
+            )
             .await
             .unwrap();
 
@@ -315,10 +316,7 @@ mod tests {
         assert!(active.is_none());
 
         // Create pending job
-        let job1 = manager
-            .create_job(JobType::Reindex, None, 0)
-            .await
-            .unwrap();
+        let job1 = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
 
         let active = manager.find_active_reindex_job().await.unwrap();
         assert!(active.is_some());
@@ -335,10 +333,7 @@ mod tests {
         assert!(active.is_none());
 
         // Create in-progress job
-        let job2 = manager
-            .create_job(JobType::Reindex, None, 0)
-            .await
-            .unwrap();
+        let job2 = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
 
         manager
             .update_status(&job2.job_id, JobStatus::InProgress, None)
@@ -354,15 +349,9 @@ mod tests {
     async fn test_find_resumable_jobs() {
         let manager = JobManager::new("sqlite::memory:").await.unwrap();
 
-        let job1 = manager
-            .create_job(JobType::Reindex, None, 0)
-            .await
-            .unwrap();
+        let job1 = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
 
-        let job2 = manager
-            .create_job(JobType::Reindex, None, 0)
-            .await
-            .unwrap();
+        let job2 = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
 
         manager
             .update_status(&job2.job_id, JobStatus::InProgress, None)
@@ -455,7 +444,7 @@ mod tests {
         for result in results {
             match result {
                 Ok(Some(job)) => successful_jobs.push(job),
-                Ok(None) => {}, // Job already exists - this is expected
+                Ok(None) => {} // Job already exists - this is expected
                 Err(e) => {
                     // SQLITE_BUSY errors are acceptable - they mean the transaction couldn't acquire lock
                     eprintln!("Task failed with error: {e}");

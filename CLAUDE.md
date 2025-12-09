@@ -584,6 +584,7 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 14. **Lock Instrumentation**: `TimedWriteLockGuard<T>` wrapper measures lock hold duration and logs warnings when exceeding threshold (1000ms), with AtomicU64 metrics for testing
 15. **Pure-Rust PDF Fallback**: Primary PDF extraction via `lopdf` crate (no external dependencies), with automatic fallback to `pdftotext` command if lopdf fails
 16. **Health Probes**: Axum endpoints `/healthz` (liveness - always 200) and `/readyz` (readiness - 200 if engine lock can be acquired within 100ms)
+17. **MMR Diversification**: Maximal Marginal Relevance algorithm (O(1) swap_remove, NaN/Inf guards) balances relevance with result diversity via configurable `diversity_factor` parameter
 
 ### Data Flow
 
@@ -597,9 +598,10 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 7. Job status/progress updates persisted to SQLite → MCP client polls via `get_job_status`
 
 #### Search Query Flow:
-1. Query → LRU-cached embedding → cosine similarity search → top-k candidates
+1. Query → LRU-cached embedding → cosine similarity search → 3x top-k candidates
 2. Candidates → concurrent LLM reranking (if available) → relevance-scored results
-3. Results → MCP response → Claude Desktop
+3. If diversity_factor > 0: MMR diversification selects final top-k balancing relevance vs similarity
+4. Results → MCP response → Claude Desktop
 
 ## Common Development Tasks
 

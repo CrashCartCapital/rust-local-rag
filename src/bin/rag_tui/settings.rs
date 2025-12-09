@@ -2,8 +2,39 @@
 //!
 //! Handles editable configuration that can be saved to .env file.
 
+use reqwest::Url;
 use std::fs;
 use std::path::PathBuf;
+
+/// Expand tilde (~) to home directory in path strings
+/// Supports both Unix (HOME) and Windows (USERPROFILE) environments
+fn expand_tilde(path: &str) -> String {
+    // Get home directory from HOME (Unix) or USERPROFILE (Windows)
+    let home_dir = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+
+    if let Some(home) = home_dir {
+        if path.starts_with("~/") {
+            return format!("{}{}", home.to_string_lossy(), &path[1..]);
+        } else if path == "~" {
+            return home.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Validation state for a setting
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ValidationState {
+    /// Not validated or validation not applicable
+    #[default]
+    None,
+    /// Value is valid
+    Valid,
+    /// Value is invalid with reason
+    Invalid(String),
+    /// Value might be valid but couldn't be confirmed (e.g., path doesn't exist yet)
+    Warning(String),
+}
 
 /// A single editable setting
 #[derive(Debug, Clone)]
@@ -22,6 +53,8 @@ pub struct Setting {
     pub requires_restart: bool,
     /// Optional list of valid values (for dropdowns)
     pub options: Option<Vec<String>>,
+    /// Validation state
+    pub validation_state: ValidationState,
 }
 
 impl Setting {
@@ -32,7 +65,7 @@ impl Setting {
         description: &str,
         requires_restart: bool,
     ) -> Self {
-        Self {
+        let mut setting = Self {
             env_var: env_var.to_string(),
             display_name: display_name.to_string(),
             value: value.to_string(),
@@ -40,7 +73,10 @@ impl Setting {
             description: description.to_string(),
             requires_restart,
             options: None,
-        }
+            validation_state: ValidationState::None,
+        };
+        setting.validate();
+        setting
     }
 
     pub fn with_options(mut self, options: Vec<&str>) -> Self {
@@ -56,11 +92,89 @@ impl Setting {
     /// Reset to original value
     pub fn reset(&mut self) {
         self.value = self.original_value.clone();
+        self.validate();
     }
 
     /// Mark current value as saved (update original)
     pub fn mark_saved(&mut self) {
         self.original_value = self.value.clone();
+    }
+
+    /// Validate the current value based on setting type
+    pub fn validate(&mut self) {
+        self.validation_state = match self.env_var.as_str() {
+            // URL validation for Ollama URL
+            "OLLAMA_URL" => {
+                let value = self.value.trim();
+                if value.is_empty() {
+                    ValidationState::Invalid("URL cannot be empty".to_string())
+                } else if !value.starts_with("http://") && !value.starts_with("https://") {
+                    ValidationState::Invalid("URL must start with http:// or https://".to_string())
+                } else if Url::parse(value).is_err() {
+                    ValidationState::Invalid("Invalid URL format".to_string())
+                } else {
+                    ValidationState::Valid
+                }
+            }
+
+            // Path validation for directory fields
+            "DATA_DIR" | "DOCUMENTS_DIR" => {
+                let value = self.value.trim();
+                if value.is_empty() {
+                    ValidationState::Invalid("Path cannot be empty".to_string())
+                } else {
+                    // Expand tilde to home directory
+                    let expanded = expand_tilde(value);
+                    let path = PathBuf::from(&expanded);
+
+                    if path.exists() {
+                        if path.is_dir() {
+                            ValidationState::Valid
+                        } else {
+                            ValidationState::Invalid(
+                                "Path exists but is not a directory".to_string(),
+                            )
+                        }
+                    } else {
+                        // Check if tilde was used but expansion failed
+                        if value.starts_with('~') && expanded == value {
+                            ValidationState::Warning(
+                                "Tilde (~) may not expand correctly; use absolute path".to_string(),
+                            )
+                        } else {
+                            ValidationState::Warning(
+                                "Directory does not exist (will be created)".to_string(),
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Weight validation for score weight settings (0.0 to 1.0, must be finite)
+            "RAG_EMBEDDING_WEIGHT"
+            | "RAG_LEXICAL_WEIGHT"
+            | "RAG_RERANKER_WEIGHT"
+            | "RAG_INITIAL_SCORE_WEIGHT" => {
+                let value = self.value.trim();
+                if value.is_empty() {
+                    ValidationState::Invalid("Weight cannot be empty".to_string())
+                } else {
+                    match value.parse::<f32>() {
+                        Ok(w) if !w.is_finite() => ValidationState::Invalid(
+                            "Weight must be a finite number (not NaN or Inf)".to_string(),
+                        ),
+                        Ok(w) if (0.0..=1.0).contains(&w) => ValidationState::Valid,
+                        Ok(_) => ValidationState::Invalid(
+                            "Weight must be between 0.0 and 1.0".to_string(),
+                        ),
+                        Err(_) => ValidationState::Invalid("Invalid number format".to_string()),
+                    }
+                }
+            }
+
+            // No validation for other settings
+            _ => ValidationState::None,
+        };
     }
 }
 
@@ -100,7 +214,8 @@ impl Settings {
             Setting::new(
                 "OLLAMA_EMBEDDING_MODEL",
                 "Embedding Model",
-                &std::env::var("OLLAMA_EMBEDDING_MODEL").unwrap_or_else(|_| "nomic-embed-text".to_string()),
+                &std::env::var("OLLAMA_EMBEDDING_MODEL")
+                    .unwrap_or_else(|_| "nomic-embed-text".to_string()),
                 "Model used for generating embeddings (requires reindex)",
                 true,
             ),
@@ -128,7 +243,8 @@ impl Settings {
             Setting::new(
                 "OLLAMA_URL",
                 "Ollama URL",
-                &std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string()),
+                &std::env::var("OLLAMA_URL")
+                    .unwrap_or_else(|_| "http://localhost:11434".to_string()),
                 "URL of the Ollama server",
                 true,
             ),
@@ -138,7 +254,8 @@ impl Settings {
                 &std::env::var("RAG_TUI_THEME").unwrap_or_else(|_| "dark".to_string()),
                 "UI color theme",
                 false, // TUI-only, doesn't require server restart
-            ).with_options(vec!["dark", "light", "high-contrast"]),
+            )
+            .with_options(vec!["dark", "light", "high-contrast"]),
             Setting::new(
                 "RAG_TUI_TOP_K",
                 "Default Top-K",
@@ -152,6 +269,35 @@ impl Settings {
                 &std::env::var("RAG_TUI_POLL_INTERVAL_S").unwrap_or_else(|_| "2".to_string()),
                 "How often to poll server for stats updates",
                 false,
+            ),
+            // Score weight settings (server-side, affects search scoring)
+            Setting::new(
+                "RAG_EMBEDDING_WEIGHT",
+                "Embedding Weight",
+                &std::env::var("RAG_EMBEDDING_WEIGHT").unwrap_or_else(|_| "0.7".to_string()),
+                "Weight for embedding similarity in initial score (0.0-1.0)",
+                true,
+            ),
+            Setting::new(
+                "RAG_LEXICAL_WEIGHT",
+                "Lexical Weight",
+                &std::env::var("RAG_LEXICAL_WEIGHT").unwrap_or_else(|_| "0.3".to_string()),
+                "Weight for lexical/BM25 score in initial score (0.0-1.0)",
+                true,
+            ),
+            Setting::new(
+                "RAG_RERANKER_WEIGHT",
+                "Reranker Weight",
+                &std::env::var("RAG_RERANKER_WEIGHT").unwrap_or_else(|_| "0.7".to_string()),
+                "Weight for reranker score in final score (0.0-1.0)",
+                true,
+            ),
+            Setting::new(
+                "RAG_INITIAL_SCORE_WEIGHT",
+                "Initial Score Weight",
+                &std::env::var("RAG_INITIAL_SCORE_WEIGHT").unwrap_or_else(|_| "0.3".to_string()),
+                "Weight for initial combined score in final score (0.0-1.0)",
+                true,
             ),
         ];
 
@@ -200,6 +346,7 @@ impl Settings {
         if self.editing {
             if let Some(setting) = self.items.get_mut(self.selected) {
                 setting.value = self.edit_buffer.iter().collect();
+                setting.validate();
             }
             self.editing = false;
             self.edit_buffer.clear();
@@ -214,14 +361,17 @@ impl Settings {
                 if let Some(current_idx) = options.iter().position(|o| o == &setting.value) {
                     let new_idx = if forward {
                         (current_idx + 1) % options.len()
+                    } else if current_idx == 0 {
+                        options.len() - 1
                     } else {
-                        if current_idx == 0 { options.len() - 1 } else { current_idx - 1 }
+                        current_idx - 1
                     };
                     setting.value = options[new_idx].clone();
                 } else {
                     // Current value not in options, set to first option
                     setting.value = options[0].clone();
                 }
+                setting.validate();
             }
         }
     }
@@ -278,7 +428,9 @@ impl Settings {
 
     /// Check if any modified settings require restart
     pub fn has_restart_required(&self) -> bool {
-        self.items.iter().any(|s| s.is_modified() && s.requires_restart)
+        self.items
+            .iter()
+            .any(|s| s.is_modified() && s.requires_restart)
     }
 
     /// Get current setting
@@ -289,6 +441,13 @@ impl Settings {
     /// Reset all settings to original values
     pub fn reset_all(&mut self) {
         for setting in &mut self.items {
+            setting.reset();
+        }
+    }
+
+    /// Reset current setting to original value
+    pub fn reset_current(&mut self) {
+        if let Some(setting) = self.items.get_mut(self.selected) {
             setting.reset();
         }
     }
@@ -339,8 +498,7 @@ impl Settings {
         // Write back with trailing newline
         let output = lines_to_write.join("\n") + "\n";
 
-        fs::write(&self.env_path, output)
-            .map_err(|e| format!("Failed to write .env: {e}"))?;
+        fs::write(&self.env_path, output).map_err(|e| format!("Failed to write .env: {e}"))?;
 
         // Mark all as saved
         for setting in &mut self.items {
@@ -411,7 +569,11 @@ mod tests {
     fn test_option_cycling() {
         let mut settings = Settings::new();
         // Find theme setting (has options)
-        let theme_idx = settings.items.iter().position(|s| s.env_var == "RAG_TUI_THEME").unwrap();
+        let theme_idx = settings
+            .items
+            .iter()
+            .position(|s| s.env_var == "RAG_TUI_THEME")
+            .unwrap();
         settings.selected = theme_idx;
 
         let original = settings.items[theme_idx].value.clone();

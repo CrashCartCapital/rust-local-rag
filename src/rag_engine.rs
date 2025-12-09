@@ -68,15 +68,35 @@ struct SentenceInfo {
 }
 
 /// Search result containing the matched chunk text, relevance score, and source metadata.
+/// Includes detailed score breakdown for transparency when reranking is used.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub text: String,
+    /// Final blended score (reranker + initial if reranked, or initial if not)
     pub score: f32,
     pub document: String,
     pub chunk_id: String,
     pub chunk_index: usize,
     pub page_number: usize,
     pub section: Option<String>,
+    /// Raw embedding cosine similarity score (first-stage retrieval)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_score: Option<f32>,
+    /// Raw lexical/BM25 score (normalized 0-1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lexical_score: Option<f32>,
+    /// Combined initial score before reranking (embedding + lexical blend)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_score: Option<f32>,
+    /// Raw reranker score from logprobs softmax (0-1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker_score: Option<f32>,
+    /// Log probability of "yes" token from reranker
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yes_logprob: Option<f64>,
+    /// Log probability of "no" token from reranker
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_logprob: Option<f64>,
 }
 
 /// Core RAG engine handling document chunking, embedding, and semantic search.
@@ -119,13 +139,27 @@ struct SearchCandidate {
     page_number: usize,
     section: Option<String>,
     chunk_index: usize,
+    /// Combined initial score (embedding + lexical blend)
     initial_score: f32,
+    /// Raw embedding cosine similarity
+    embedding_score: f32,
+    /// Raw lexical/BM25 score (normalized)
+    lexical_score: f32,
+    #[allow(dead_code)] // Used when MMR diversification is refactored to use this
+    embedding: Vec<f32>,
+}
+
+/// Internal struct for MMR diversification that includes embedding
+#[derive(Debug, Clone)]
+struct SearchResultWithEmbedding {
+    result: SearchResult,
+    embedding: Vec<f32>,
 }
 
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
-        
+
         // Try to initialize reranker, but don't fail if it's unavailable
         let reranker = match RerankerService::new().await {
             Ok(service) => {
@@ -286,7 +320,12 @@ impl RagEngine {
 
             // Invoke callback for batch progress
             if let Some(ref mut callback) = batch_callback {
-                callback(batch_idx + 1, total_batches, total_chunks, batch_texts.len());
+                callback(
+                    batch_idx + 1,
+                    total_batches,
+                    total_chunks,
+                    batch_texts.len(),
+                );
             }
 
             // Add cooldown between batches to prevent thermal throttling and allow power recovery
@@ -384,7 +423,11 @@ impl RagEngine {
         let query_embedding = self.embedding_service.get_query_embedding(query).await?;
 
         let ann_candidate_iter = match &self.ann_index {
-            Some(index) => Box::new(index.search(&query_embedding, count.saturating_mul(2)).into_iter()) as Box<dyn Iterator<Item = String>>,
+            Some(index) => Box::new(
+                index
+                    .search(&query_embedding, count.saturating_mul(2))
+                    .into_iter(),
+            ) as Box<dyn Iterator<Item = String>>,
             None => Box::new(self.chunks.keys().cloned()) as Box<dyn Iterator<Item = String>>,
         };
 
@@ -428,7 +471,11 @@ impl RagEngine {
         let query_embedding = self.embedding_service.get_query_embedding(query).await?;
 
         let ann_candidate_iter = match &self.ann_index {
-            Some(index) => Box::new(index.search(&query_embedding, top_k.saturating_mul(5)).into_iter()) as Box<dyn Iterator<Item = String>>,
+            Some(index) => Box::new(
+                index
+                    .search(&query_embedding, top_k.saturating_mul(5))
+                    .into_iter(),
+            ) as Box<dyn Iterator<Item = String>>,
             None => Box::new(self.chunks.keys().cloned()) as Box<dyn Iterator<Item = String>>,
         };
 
@@ -448,7 +495,8 @@ impl RagEngine {
             .fold(0.0_f32, f32::max)
             .max(f32::EPSILON);
 
-        let mut scores: Vec<(f32, DocumentChunk)> = Vec::new();
+        // Track individual scores: (combined, embedding, lexical, chunk)
+        let mut scores: Vec<(f32, f32, f32, DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
@@ -458,9 +506,14 @@ impl RagEngine {
                     .map(|score| score / max_lexical)
                     .unwrap_or(0.0);
                 let combined_score =
-                    EMBEDDING_WEIGHT * embedding_score + LEXICAL_WEIGHT * lexical_score;
+                    get_embedding_weight() * embedding_score + get_lexical_weight() * lexical_score;
 
-                scores.push((combined_score, chunk.clone()));
+                scores.push((
+                    combined_score,
+                    embedding_score,
+                    lexical_score,
+                    chunk.clone(),
+                ));
             }
         }
 
@@ -470,14 +523,17 @@ impl RagEngine {
         let candidates: Vec<SearchCandidate> = scores
             .into_iter()
             .take(initial_k)
-            .map(|(score, chunk)| SearchCandidate {
+            .map(|(combined, embed, lex, chunk)| SearchCandidate {
                 chunk_id: chunk.id.clone(),
                 document: chunk.document_name.clone(),
                 text: chunk.text.clone(),
                 page_number: chunk.page_number,
                 section: chunk.section.clone(),
                 chunk_index: chunk.chunk_index,
-                initial_score: score,
+                initial_score: combined,
+                embedding_score: embed,
+                lexical_score: lex,
+                embedding: chunk.embedding.clone(),
             })
             .collect();
 
@@ -542,9 +598,10 @@ impl RagEngine {
                     let reranker_norm = result.relevance / max_reranker;
                     let initial_norm = candidate.initial_score / max_initial;
 
-                    // Blend: reranker dominates (70%) but initial score provides discrimination (30%)
-                    let blended_score =
-                        RERANKER_WEIGHT * reranker_norm + INITIAL_SCORE_WEIGHT * initial_norm;
+                    // Blend: reranker dominates but initial score provides discrimination
+                    // Weights configurable via RAG_RERANKER_WEIGHT and RAG_INITIAL_SCORE_WEIGHT env vars
+                    let blended_score = get_reranker_weight() * reranker_norm
+                        + get_initial_score_weight() * initial_norm;
 
                     tracing::debug!(
                         chunk_id = %candidate.chunk_id,
@@ -562,6 +619,13 @@ impl RagEngine {
                         chunk_index: candidate.chunk_index,
                         page_number: candidate.page_number,
                         section: candidate.section.clone(),
+                        // Detailed score breakdown for TUI display
+                        embedding_score: Some(candidate.embedding_score),
+                        lexical_score: Some(candidate.lexical_score),
+                        initial_score: Some(candidate.initial_score),
+                        reranker_score: Some(result.relevance),
+                        yes_logprob: result.yes_logprob,
+                        no_logprob: result.no_logprob,
                     });
                 }
             }
@@ -598,12 +662,181 @@ impl RagEngine {
                         chunk_index: candidate.chunk_index,
                         page_number: candidate.page_number,
                         section: candidate.section.clone(),
+                        // No reranking for fallback results
+                        embedding_score: Some(candidate.embedding_score),
+                        lexical_score: Some(candidate.lexical_score),
+                        initial_score: Some(candidate.initial_score),
+                        reranker_score: None,
+                        yes_logprob: None,
+                        no_logprob: None,
                     });
                 }
             }
         }
 
         Ok(ordered_results)
+    }
+
+    /// Search with MMR (Maximal Marginal Relevance) diversification.
+    ///
+    /// This method performs the standard search and then applies MMR to diversify results.
+    /// MMR balances relevance with diversity by penalizing results that are too similar
+    /// to already-selected results.
+    ///
+    /// # Arguments
+    /// * `query` - The search query
+    /// * `top_k` - Number of results to return
+    /// * `diversity_factor` - λ parameter for MMR (0.0-1.0).
+    ///   - 0.0 = pure relevance (no diversity penalty)
+    ///   - 1.0 = maximum diversity (heavily penalizes similar results)
+    ///   - Recommended: 0.2-0.4 for most use cases
+    pub async fn search_with_diversity(
+        &self,
+        query: &str,
+        top_k: usize,
+        diversity_factor: f32,
+    ) -> Result<Vec<SearchResult>> {
+        // Clamp diversity factor to valid range
+        let diversity_factor = diversity_factor.clamp(0.0, 1.0);
+
+        // If no diversity requested, just do normal search
+        if diversity_factor == 0.0 {
+            return self.search(query, top_k).await;
+        }
+
+        // Fetch more candidates than needed for MMR selection
+        // We need extra candidates because MMR may skip similar ones
+        let candidate_pool_size = (top_k * 3).max(top_k + 10);
+        let candidates = self.search(query, candidate_pool_size).await?;
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build candidates with embeddings for MMR
+        let candidates_with_embeddings: Vec<SearchResultWithEmbedding> = candidates
+            .into_iter()
+            .filter_map(|result| {
+                // Look up the embedding from our chunks
+                self.chunks
+                    .get(&result.chunk_id)
+                    .map(|chunk| SearchResultWithEmbedding {
+                        result,
+                        embedding: chunk.embedding.clone(),
+                    })
+            })
+            .collect();
+
+        // Apply MMR diversification
+        let diversified = self.mmr_diversify(candidates_with_embeddings, top_k, diversity_factor);
+
+        Ok(diversified)
+    }
+
+    /// Apply Maximal Marginal Relevance (MMR) diversification to search results.
+    ///
+    /// MMR formula: MMR(i) = (1 - λ) × relevance_score - λ × max_similarity_to_selected
+    ///
+    /// This iteratively selects results that balance high relevance with low similarity
+    /// to already-selected results.
+    fn mmr_diversify(
+        &self,
+        candidates: Vec<SearchResultWithEmbedding>,
+        top_k: usize,
+        diversity_factor: f32, // λ in the MMR formula
+    ) -> Vec<SearchResult> {
+        if candidates.is_empty() {
+            return vec![];
+        }
+
+        let mut selected: Vec<SearchResultWithEmbedding> = Vec::with_capacity(top_k);
+        let mut remaining: Vec<SearchResultWithEmbedding> = candidates;
+
+        // First result is always the highest-scoring (most relevant)
+        // Use swap_remove for O(1) removal instead of O(n) shift
+        if !remaining.is_empty() {
+            let first = remaining.swap_remove(0);
+            selected.push(first);
+        }
+
+        // Iteratively select results using MMR
+        while selected.len() < top_k && !remaining.is_empty() {
+            let mut best_mmr_score = f32::NEG_INFINITY;
+            let mut best_idx = 0;
+
+            for (idx, candidate) in remaining.iter().enumerate() {
+                // Skip candidates with non-finite scores (NaN/Inf protection)
+                let relevance = candidate.result.score;
+                if !relevance.is_finite() {
+                    continue;
+                }
+
+                // Calculate max similarity to any already-selected result
+                let max_similarity = selected
+                    .iter()
+                    .map(|s| Self::cosine_similarity(&candidate.embedding, &s.embedding))
+                    .filter(|sim| sim.is_finite()) // Filter out NaN/Inf similarities
+                    .fold(0.0_f32, |a, b| a.max(b));
+
+                // MMR score: balance relevance vs diversity
+                // Higher diversity_factor = more penalty for similarity
+                let mmr_score =
+                    (1.0 - diversity_factor) * relevance - diversity_factor * max_similarity;
+
+                // Only update if mmr_score is finite and better
+                if mmr_score.is_finite() && mmr_score > best_mmr_score {
+                    best_mmr_score = mmr_score;
+                    best_idx = idx;
+                }
+            }
+
+            // If no valid candidate found (all NaN/Inf), break
+            if best_mmr_score == f32::NEG_INFINITY {
+                tracing::warn!("MMR: No valid candidates remaining (all scores non-finite)");
+                break;
+            }
+
+            // Move best candidate from remaining to selected using O(1) swap_remove
+            let best = remaining.swap_remove(best_idx);
+
+            tracing::debug!(
+                chunk_id = %best.result.chunk_id,
+                relevance = %best.result.score,
+                mmr_score = %best_mmr_score,
+                "MMR selected result"
+            );
+
+            selected.push(best);
+        }
+
+        // Extract just the SearchResult from our selected candidates
+        selected.into_iter().map(|s| s.result).collect()
+    }
+
+    /// Calculate cosine similarity between two embeddings.
+    /// Returns a value in [-1, 1] where 1 means identical direction.
+    /// Returns 0.0 for edge cases (empty, mismatched length, near-zero norm).
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        // Epsilon for near-zero norm detection (prevents division instability)
+        const EPSILON: f32 = 1e-10;
+
+        if a.len() != b.len() || a.is_empty() {
+            return 0.0;
+        }
+
+        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // Use epsilon threshold instead of exact zero check for numerical stability
+        if norm_a < EPSILON || norm_b < EPSILON {
+            return 0.0;
+        }
+
+        let similarity = dot_product / (norm_a * norm_b);
+
+        // Clamp to valid range to handle floating point errors
+        similarity.clamp(-1.0, 1.0)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
@@ -716,7 +949,10 @@ impl RagEngine {
 
         match lopdf_result {
             Ok(text) => {
-                tracing::info!("✅ PDF extracted using pure-Rust backend (lopdf): {} chars", text.chars().count());
+                tracing::info!(
+                    "✅ PDF extracted using pure-Rust backend (lopdf): {} chars",
+                    text.chars().count()
+                );
                 Ok(text)
             }
             Err(lopdf_err) => {
@@ -734,7 +970,10 @@ impl RagEngine {
 
                 match pdftotext_result {
                     Ok(text) => {
-                        tracing::info!("✅ PDF extracted using pdftotext fallback: {} chars", text.chars().count());
+                        tracing::info!(
+                            "✅ PDF extracted using pdftotext fallback: {} chars",
+                            text.chars().count()
+                        );
                         Ok(text)
                     }
                     Err(pdftotext_err) => {
@@ -745,7 +984,8 @@ impl RagEngine {
                         );
                         Err(anyhow::anyhow!(
                             "PDF extraction failed: lopdf error: {}, pdftotext error: {}",
-                            lopdf_err, pdftotext_err
+                            lopdf_err,
+                            pdftotext_err
                         ))
                     }
                 }
@@ -773,7 +1013,11 @@ impl RagEngine {
                     all_text.push_str(&page_text);
                 }
                 Err(e) => {
-                    tracing::debug!("lopdf: failed to extract text from page {}: {}", page_num, e);
+                    tracing::debug!(
+                        "lopdf: failed to extract text from page {}: {}",
+                        page_num,
+                        e
+                    );
                     // Continue with other pages
                 }
             }
@@ -865,7 +1109,9 @@ impl RagEngine {
 
             // When token budget is exceeded, finalize current chunk
             if token_sum >= chunk_tokens {
-                if let Some((text, metadata)) = Self::finalize_chunk(&window, &sentences, sentence_overlap) {
+                if let Some((text, metadata)) =
+                    Self::finalize_chunk(&window, &sentences, sentence_overlap)
+                {
                     fragments.push(ChunkFragment::from_metadata(text, metadata));
                 }
 
@@ -1046,10 +1292,7 @@ impl RagEngine {
     }
 
     fn normalize_whitespace(value: &str) -> String {
-        value
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
+        value.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     fn is_heading(line: &str) -> bool {
@@ -1089,9 +1332,7 @@ impl RagEngine {
     /// Returns a cached regex for detecting numbered headings (e.g., "1. Introduction")
     fn heading_regex() -> &'static Regex {
         static HEADING_REGEX: OnceLock<Regex> = OnceLock::new();
-        HEADING_REGEX.get_or_init(|| {
-            Regex::new(r"^\d+\.\s").expect("valid heading regex pattern")
-        })
+        HEADING_REGEX.get_or_init(|| Regex::new(r"^\d+\.\s").expect("valid heading regex pattern"))
     }
 
     fn approximate_token_count(value: &str) -> usize {
@@ -1112,8 +1353,8 @@ impl RagEngine {
         SPLITTER.get_or_init(|| {
             // Load SRX rules from embedded segment.srx file
             const SRX_XML: &str = include_str!("../data/segment.srx");
-            let srx = srx::SRX::from_str(SRX_XML)
-                .expect("valid SRX rules from embedded segment.srx");
+            let srx =
+                srx::SRX::from_str(SRX_XML).expect("valid SRX rules from embedded segment.srx");
 
             // Use English language rules for sentence splitting
             // This handles abbreviations like "Dr.", "Mr.", "etc." correctly
@@ -1307,14 +1548,16 @@ impl RagEngine {
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(state) => {
-                    return self.apply_loaded_state(
-                        state.version,
-                        state.chunks,
-                        state.needs_reindex,
-                        state.document_hashes,
-                        &model_specific_path,
-                        false,
-                    ).await;
+                    return self
+                        .apply_loaded_state(
+                            state.version,
+                            state.chunks,
+                            state.needs_reindex,
+                            state.document_hashes,
+                            &model_specific_path,
+                            false,
+                        )
+                        .await;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1334,7 +1577,9 @@ impl RagEngine {
 
         // Step 2: Check legacy chunks.json for migration
         if tokio::fs::try_exists(&legacy_path).await? {
-            tracing::info!("No model-specific index found. Checking legacy chunks.json for migration...");
+            tracing::info!(
+                "No model-specific index found. Checking legacy chunks.json for migration..."
+            );
             let data = tokio::fs::read_to_string(&legacy_path).await?;
 
             // Peek at model name first
@@ -1347,14 +1592,16 @@ impl RagEngine {
 
                     match serde_json::from_str::<PersistedState>(&data) {
                         Ok(state) => {
-                            return self.apply_loaded_state(
-                                state.version,
-                                state.chunks,
-                                state.needs_reindex,
-                                state.document_hashes,
-                                &legacy_path,
-                                true,
-                            ).await;
+                            return self
+                                .apply_loaded_state(
+                                    state.version,
+                                    state.chunks,
+                                    state.needs_reindex,
+                                    state.document_hashes,
+                                    &legacy_path,
+                                    true,
+                                )
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!("Failed to parse legacy index: {}. Starting fresh.", e);
@@ -1374,7 +1621,9 @@ impl RagEngine {
                 tracing::warn!(
                     "Legacy index has unknown format. Checking if it can be migrated..."
                 );
-                if let Ok(legacy_chunks) = serde_json::from_str::<HashMap<String, DocumentChunk>>(&data) {
+                if let Ok(legacy_chunks) =
+                    serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
+                {
                     if !legacy_chunks.is_empty() {
                         tracing::warn!(
                             "Found {} legacy chunks without model info. Reindexing required for model '{}'.",
@@ -1427,11 +1676,7 @@ impl RagEngine {
             self.needs_reindex = true;
         }
 
-        tracing::info!(
-            "Loaded {} chunks from {:?}",
-            self.chunks.len(),
-            source_path
-        );
+        tracing::info!("Loaded {} chunks from {:?}", self.chunks.len(), source_path);
 
         // Validate and repair index synchronization
         self.validate_index_sync()?;
@@ -1505,10 +1750,7 @@ impl SimpleRng {
     }
 
     fn next(&mut self) -> f32 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
         let bits = (self.state >> 32) as u32;
         let value = bits as f32 / u32::MAX as f32;
         value * 2.0 - 1.0
@@ -1516,13 +1758,49 @@ impl SimpleRng {
 }
 
 const NUM_HYPERPLANES: usize = 32;
-const EMBEDDING_WEIGHT: f32 = 0.7;
-const LEXICAL_WEIGHT: f32 = 0.3;
 
-// Score blending weights for combining reranker with initial retrieval scores
-// Reranker provides semantic relevance, initial score provides discrimination
-const RERANKER_WEIGHT: f32 = 0.7;
-const INITIAL_SCORE_WEIGHT: f32 = 0.3;
+// Default score blending weights (can be overridden via environment variables)
+const DEFAULT_EMBEDDING_WEIGHT: f32 = 0.7;
+const DEFAULT_LEXICAL_WEIGHT: f32 = 0.3;
+const DEFAULT_RERANKER_WEIGHT: f32 = 0.7;
+const DEFAULT_INITIAL_SCORE_WEIGHT: f32 = 0.3;
+
+// Cached weight values using OnceLock for performance (avoids repeated env var reads)
+static EMBEDDING_WEIGHT: OnceLock<f32> = OnceLock::new();
+static LEXICAL_WEIGHT: OnceLock<f32> = OnceLock::new();
+static RERANKER_WEIGHT: OnceLock<f32> = OnceLock::new();
+static INITIAL_SCORE_WEIGHT: OnceLock<f32> = OnceLock::new();
+
+/// Parse a weight from environment variable with validation for finite values in [0.0, 1.0]
+fn parse_weight(env_var: &str, default: f32) -> f32 {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|w| w.is_finite() && (0.0..=1.0).contains(w))
+        .unwrap_or(default)
+}
+
+/// Get embedding weight from environment or default (cached after first access)
+fn get_embedding_weight() -> f32 {
+    *EMBEDDING_WEIGHT.get_or_init(|| parse_weight("RAG_EMBEDDING_WEIGHT", DEFAULT_EMBEDDING_WEIGHT))
+}
+
+/// Get lexical weight from environment or default (cached after first access)
+fn get_lexical_weight() -> f32 {
+    *LEXICAL_WEIGHT.get_or_init(|| parse_weight("RAG_LEXICAL_WEIGHT", DEFAULT_LEXICAL_WEIGHT))
+}
+
+/// Get reranker weight from environment or default (cached after first access)
+/// Reranker provides semantic relevance, initial score provides discrimination
+fn get_reranker_weight() -> f32 {
+    *RERANKER_WEIGHT.get_or_init(|| parse_weight("RAG_RERANKER_WEIGHT", DEFAULT_RERANKER_WEIGHT))
+}
+
+/// Get initial score weight from environment or default (cached after first access)
+fn get_initial_score_weight() -> f32 {
+    *INITIAL_SCORE_WEIGHT
+        .get_or_init(|| parse_weight("RAG_INITIAL_SCORE_WEIGHT", DEFAULT_INITIAL_SCORE_WEIGHT))
+}
 const MAX_SINGLE_BIT_NEIGHBORS: usize = 32;
 const MAX_TOTAL_NEIGHBORS: usize = 64;
 
@@ -1909,9 +2187,15 @@ mod tests {
 
         let (text, metadata) = result.unwrap();
         assert!(!text.is_empty(), "Chunk text should not be empty");
-        assert!(metadata.sentence_range.is_some(), "sentence_range should be populated");
+        assert!(
+            metadata.sentence_range.is_some(),
+            "sentence_range should be populated"
+        );
         assert!(metadata.token_count > 0, "token_count should be positive");
-        assert!(metadata.page_range.is_some(), "page_range should be populated");
+        assert!(
+            metadata.page_range.is_some(),
+            "page_range should be populated"
+        );
     }
 
     #[test]
@@ -1940,7 +2224,10 @@ mod tests {
         // Verify chunk3 was removed
         assert!(index.contains("chunk1"));
         assert!(index.contains("chunk2"));
-        assert!(!index.contains("chunk3"), "chunk3 should have been removed as stale");
+        assert!(
+            !index.contains("chunk3"),
+            "chunk3 should have been removed as stale"
+        );
     }
 
     #[test]
@@ -1984,8 +2271,14 @@ mod tests {
     #[test]
     fn test_sanitize_model_name_basic() {
         // Basic model names should pass through unchanged
-        assert_eq!(RagEngine::sanitize_model_name("nomic-embed-text"), "nomic-embed-text");
-        assert_eq!(RagEngine::sanitize_model_name("all-MiniLM-L6-v2"), "all-MiniLM-L6-v2");
+        assert_eq!(
+            RagEngine::sanitize_model_name("nomic-embed-text"),
+            "nomic-embed-text"
+        );
+        assert_eq!(
+            RagEngine::sanitize_model_name("all-MiniLM-L6-v2"),
+            "all-MiniLM-L6-v2"
+        );
     }
 
     #[test]
@@ -2004,8 +2297,14 @@ mod tests {
     #[test]
     fn test_sanitize_model_name_path_traversal() {
         // Path traversal attempts should be sanitized (security)
-        assert_eq!(RagEngine::sanitize_model_name("../etc/passwd"), ".._etc_passwd");
-        assert_eq!(RagEngine::sanitize_model_name("..\\windows\\system32"), ".._windows_system32");
+        assert_eq!(
+            RagEngine::sanitize_model_name("../etc/passwd"),
+            ".._etc_passwd"
+        );
+        assert_eq!(
+            RagEngine::sanitize_model_name("..\\windows\\system32"),
+            ".._windows_system32"
+        );
         assert_eq!(RagEngine::sanitize_model_name("foo/../bar"), "foo_.._bar");
     }
 
@@ -2038,7 +2337,10 @@ mod tests {
 
         // Model names with slashes should be sanitized in the filename
         let path = RagEngine::get_index_path("/data", "sentence-transformers/all-MiniLM");
-        assert_eq!(path, PathBuf::from("/data/chunks_sentence-transformers_all-MiniLM.json"));
+        assert_eq!(
+            path,
+            PathBuf::from("/data/chunks_sentence-transformers_all-MiniLM.json")
+        );
     }
 
     #[test]
@@ -2084,8 +2386,11 @@ mod tests {
             "document_hashes": {}
         });
 
-        std::fs::write(&index_path, serde_json::to_string_pretty(&mock_state).unwrap())
-            .expect("Failed to write mock index");
+        std::fs::write(
+            &index_path,
+            serde_json::to_string_pretty(&mock_state).unwrap(),
+        )
+        .expect("Failed to write mock index");
 
         // Verify file exists at model-specific path
         assert!(index_path.exists(), "Model-specific index should exist");
@@ -2132,12 +2437,10 @@ mod tests {
         assert!(path_b.exists(), "Model B index should exist");
 
         // Read and verify contents are independent
-        let read_a: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&path_a).unwrap()
-        ).unwrap();
-        let read_b: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&path_b).unwrap()
-        ).unwrap();
+        let read_a: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path_a).unwrap()).unwrap();
+        let read_b: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path_b).unwrap()).unwrap();
 
         assert_eq!(read_a["model"], "nomic-embed-text");
         assert_eq!(read_b["model"], "mxbai-embed-large");
@@ -2161,14 +2464,20 @@ mod tests {
 
         // Verify temp file exists before rename
         assert!(temp_path.exists(), "Temp file should exist before rename");
-        assert!(!final_path.exists(), "Final file should NOT exist before rename");
+        assert!(
+            !final_path.exists(),
+            "Final file should NOT exist before rename"
+        );
 
         // Perform rename (atomic operation)
         std::fs::rename(&temp_path, &final_path).unwrap();
 
         // Verify final file exists and temp is gone
         assert!(final_path.exists(), "Final file should exist after rename");
-        assert!(!temp_path.exists(), "Temp file should NOT exist after rename");
+        assert!(
+            !temp_path.exists(),
+            "Temp file should NOT exist after rename"
+        );
     }
 
     /// Test legacy file detection and preservation
@@ -2195,15 +2504,17 @@ mod tests {
         assert!(!new_model_path.exists());
 
         // Peek at legacy file's model (simulating load_from_disk behavior)
-        let legacy_data: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&legacy_path).unwrap()
-        ).unwrap();
+        let legacy_data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&legacy_path).unwrap()).unwrap();
 
         // Model mismatch - legacy belongs to "old-model", we want "new-model"
         assert_ne!(legacy_data["model"], new_model);
 
         // Key assertion: Legacy file is STILL preserved (not deleted)
-        assert!(legacy_path.exists(), "Legacy file must be preserved on model mismatch");
+        assert!(
+            legacy_path.exists(),
+            "Legacy file must be preserved on model mismatch"
+        );
 
         // New model creates its own file
         let new_state = serde_json::json!({
@@ -2236,7 +2547,11 @@ mod tests {
             "needs_reindex": false,
             "document_hashes": {"doc.pdf": "abc123"}
         });
-        std::fs::write(&legacy_path, serde_json::to_string_pretty(&legacy_state).unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_string_pretty(&legacy_state).unwrap(),
+        )
+        .unwrap();
 
         // Model-specific file doesn't exist yet
         let model_path = RagEngine::get_index_path(data_dir, current_model);
@@ -2251,10 +2566,355 @@ mod tests {
         assert!(model_path.exists(), "Model-specific file created");
 
         // Verify migrated content
-        let migrated: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&model_path).unwrap()
-        ).unwrap();
+        let migrated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&model_path).unwrap()).unwrap();
         assert_eq!(migrated["model"], current_model);
         assert!(migrated["chunks"]["migrated_chunk"].is_object());
+    }
+
+    // ============================================================
+    // MMR (Maximal Marginal Relevance) Unit Tests
+    // Tests for search diversification algorithm
+    // ============================================================
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let vec_a = vec![1.0, 0.0, 0.0];
+        let vec_b = vec![1.0, 0.0, 0.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert!(
+            (similarity - 1.0).abs() < 1e-6,
+            "Identical vectors should have similarity ~1.0"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let vec_a = vec![1.0, 0.0, 0.0];
+        let vec_b = vec![0.0, 1.0, 0.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert!(
+            similarity.abs() < 1e-6,
+            "Orthogonal vectors should have similarity ~0.0"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite_vectors() {
+        let vec_a = vec![1.0, 0.0, 0.0];
+        let vec_b = vec![-1.0, 0.0, 0.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert!(
+            (similarity - (-1.0)).abs() < 1e-6,
+            "Opposite vectors should have similarity ~-1.0"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vectors() {
+        let vec_a = vec![0.0, 0.0, 0.0];
+        let vec_b = vec![1.0, 2.0, 3.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert_eq!(similarity, 0.0, "Zero vectors should return 0.0");
+
+        let both_zero = RagEngine::cosine_similarity(&vec_a, &vec![0.0, 0.0, 0.0]);
+        assert_eq!(both_zero, 0.0, "Both zero vectors should return 0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_near_zero_vectors() {
+        // Near-zero norm vectors (below epsilon threshold)
+        let vec_a = vec![1e-12, 1e-12, 1e-12];
+        let vec_b = vec![1.0, 2.0, 3.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert_eq!(
+            similarity, 0.0,
+            "Near-zero vectors should return 0.0 (numerical stability)"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_length() {
+        let vec_a = vec![1.0, 2.0, 3.0];
+        let vec_b = vec![1.0, 2.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert_eq!(
+            similarity, 0.0,
+            "Mismatched length vectors should return 0.0"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty_vectors() {
+        let vec_a: Vec<f32> = vec![];
+        let vec_b: Vec<f32> = vec![];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert_eq!(similarity, 0.0, "Empty vectors should return 0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_clamping() {
+        // Test that result is clamped to [-1, 1] even with floating point errors
+        let vec_a = vec![1.0, 1.0, 1.0];
+        let vec_b = vec![1.0, 1.0, 1.0];
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+        assert!(
+            similarity >= -1.0 && similarity <= 1.0,
+            "Similarity should be clamped to [-1, 1]"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_realistic_embeddings() {
+        // Test with realistic high-dimensional embeddings
+        let dim = 384;
+        let vec_a: Vec<f32> = (0..dim).map(|i| (i as f32) / dim as f32).collect();
+        let vec_b: Vec<f32> = (0..dim).map(|i| ((i + 10) as f32) / dim as f32).collect();
+        let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
+
+        // Should be high but not 1.0 (similar but not identical)
+        assert!(
+            similarity > 0.9 && similarity < 1.0,
+            "Similar vectors should have high similarity"
+        );
+    }
+
+    // Helper function to create test SearchResultWithEmbedding
+    fn make_test_candidate(id: &str, score: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
+        SearchResultWithEmbedding {
+            result: SearchResult {
+                text: format!("Text for {id}"),
+                score,
+                document: "test.pdf".to_string(),
+                chunk_id: id.to_string(),
+                chunk_index: 0,
+                page_number: 1,
+                section: None,
+                embedding_score: None,
+                lexical_score: None,
+                initial_score: None,
+                reranker_score: None,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            embedding,
+        }
+    }
+
+    /// Standalone MMR diversify function for testing (doesn't need full RagEngine)
+    fn test_mmr_diversify(
+        candidates: Vec<SearchResultWithEmbedding>,
+        top_k: usize,
+        diversity_factor: f32,
+    ) -> Vec<SearchResult> {
+        if candidates.is_empty() {
+            return vec![];
+        }
+
+        let mut selected: Vec<SearchResultWithEmbedding> = Vec::with_capacity(top_k);
+        let mut remaining: Vec<SearchResultWithEmbedding> = candidates;
+
+        if !remaining.is_empty() {
+            let first = remaining.swap_remove(0);
+            selected.push(first);
+        }
+
+        while selected.len() < top_k && !remaining.is_empty() {
+            let mut best_mmr_score = f32::NEG_INFINITY;
+            let mut best_idx = 0;
+
+            for (idx, candidate) in remaining.iter().enumerate() {
+                let relevance = candidate.result.score;
+                if !relevance.is_finite() {
+                    continue;
+                }
+
+                let max_similarity = selected
+                    .iter()
+                    .map(|s| RagEngine::cosine_similarity(&candidate.embedding, &s.embedding))
+                    .filter(|sim| sim.is_finite())
+                    .fold(0.0_f32, |a, b| a.max(b));
+
+                let mmr_score =
+                    (1.0 - diversity_factor) * relevance - diversity_factor * max_similarity;
+
+                if mmr_score.is_finite() && mmr_score > best_mmr_score {
+                    best_mmr_score = mmr_score;
+                    best_idx = idx;
+                }
+            }
+
+            if best_mmr_score == f32::NEG_INFINITY {
+                break;
+            }
+
+            let best = remaining.swap_remove(best_idx);
+            selected.push(best);
+        }
+
+        selected.into_iter().map(|s| s.result).collect()
+    }
+
+    #[test]
+    fn test_mmr_diversify_empty_candidates() {
+        let result = test_mmr_diversify(vec![], 5, 0.3);
+        assert!(
+            result.is_empty(),
+            "Empty candidates should return empty results"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_single_candidate() {
+        let candidates = vec![make_test_candidate("chunk1", 0.9, vec![1.0, 0.0, 0.0])];
+
+        let result = test_mmr_diversify(candidates, 5, 0.3);
+        assert_eq!(
+            result.len(),
+            1,
+            "Single candidate should return single result"
+        );
+        assert_eq!(result[0].chunk_id, "chunk1");
+    }
+
+    #[test]
+    fn test_mmr_diversify_top_k_larger_than_candidates() {
+        let candidates = vec![
+            make_test_candidate("chunk1", 0.9, vec![1.0, 0.0, 0.0]),
+            make_test_candidate("chunk2", 0.8, vec![0.0, 1.0, 0.0]),
+        ];
+
+        // Request more than available
+        let result = test_mmr_diversify(candidates, 10, 0.3);
+        assert_eq!(
+            result.len(),
+            2,
+            "Should return all available candidates when top_k > candidates"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_zero_diversity_factor() {
+        // Three candidates with similar embeddings but different scores
+        let candidates = vec![
+            make_test_candidate("chunk1", 0.9, vec![1.0, 0.1, 0.0]),
+            make_test_candidate("chunk2", 0.8, vec![1.0, 0.2, 0.0]),
+            make_test_candidate("chunk3", 0.7, vec![1.0, 0.3, 0.0]),
+        ];
+
+        // With diversity_factor = 0, should select purely by relevance
+        let result = test_mmr_diversify(candidates, 3, 0.0);
+
+        assert_eq!(result.len(), 3);
+        // First should be highest relevance (but swap_remove changes order after first)
+        assert_eq!(
+            result[0].chunk_id, "chunk1",
+            "First should be most relevant"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_high_diversity_factor() {
+        // Two similar chunks (high cosine similarity) and one different
+        let candidates = vec![
+            make_test_candidate("chunk1", 0.9, vec![1.0, 0.0, 0.0]), // First selected (highest score)
+            make_test_candidate("chunk2", 0.85, vec![0.99, 0.1, 0.0]), // Very similar to chunk1
+            make_test_candidate("chunk3", 0.7, vec![0.0, 1.0, 0.0]), // Orthogonal, different
+        ];
+
+        // With high diversity_factor, should prefer diverse chunk3 over similar chunk2
+        let result = test_mmr_diversify(candidates, 2, 0.9);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0].chunk_id, "chunk1",
+            "First should be most relevant"
+        );
+        // Second should be chunk3 (diverse) not chunk2 (similar) despite lower score
+        assert_eq!(
+            result[1].chunk_id, "chunk3",
+            "High diversity should prefer orthogonal chunk"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_nan_score_handling() {
+        let candidates = vec![
+            make_test_candidate("chunk1", 0.9, vec![1.0, 0.0, 0.0]),
+            make_test_candidate("chunk_nan", f32::NAN, vec![0.0, 1.0, 0.0]),
+            make_test_candidate("chunk3", 0.7, vec![0.0, 0.0, 1.0]),
+        ];
+
+        let result = test_mmr_diversify(candidates, 3, 0.3);
+
+        // Should skip the NaN candidate
+        assert_eq!(result.len(), 2, "Should skip NaN candidates");
+        assert!(
+            result.iter().all(|r| r.chunk_id != "chunk_nan"),
+            "NaN chunk should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_inf_score_handling() {
+        let candidates = vec![
+            make_test_candidate("chunk1", 0.9, vec![1.0, 0.0, 0.0]),
+            make_test_candidate("chunk_inf", f32::INFINITY, vec![0.0, 1.0, 0.0]),
+            make_test_candidate("chunk3", 0.7, vec![0.0, 0.0, 1.0]),
+        ];
+
+        let result = test_mmr_diversify(candidates, 3, 0.3);
+
+        // Should skip the Inf candidate
+        assert_eq!(result.len(), 2, "Should skip Inf candidates");
+        assert!(
+            result.iter().all(|r| r.chunk_id != "chunk_inf"),
+            "Inf chunk should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_mmr_diversify_preserves_relevance_order_when_orthogonal() {
+        // All orthogonal vectors (no similarity penalty)
+        let candidates = vec![
+            make_test_candidate("a", 0.9, vec![1.0, 0.0, 0.0, 0.0]),
+            make_test_candidate("b", 0.8, vec![0.0, 1.0, 0.0, 0.0]),
+            make_test_candidate("c", 0.7, vec![0.0, 0.0, 1.0, 0.0]),
+            make_test_candidate("d", 0.6, vec![0.0, 0.0, 0.0, 1.0]),
+        ];
+
+        // Even with moderate diversity_factor, orthogonal vectors shouldn't change order
+        let result = test_mmr_diversify(candidates, 4, 0.3);
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].chunk_id, "a");
+        // Note: After first selection, swap_remove changes remaining order,
+        // but with orthogonal vectors (0 similarity), pure relevance should determine selection
+    }
+
+    #[test]
+    fn test_mmr_formula_correctness() {
+        // Verify MMR formula: MMR(i) = (1-λ)*relevance - λ*max_similarity
+        // With λ=0.5, relevance=0.8, max_sim=0.6: MMR = 0.5*0.8 - 0.5*0.6 = 0.4 - 0.3 = 0.1
+        // Candidate with relevance=0.6, max_sim=0.0: MMR = 0.5*0.6 - 0.5*0.0 = 0.3 - 0 = 0.3
+        // So the second candidate (lower relevance but more diverse) should win
+
+        let candidates = vec![
+            make_test_candidate("selected", 0.9, vec![1.0, 0.0, 0.0]), // Already selected
+            make_test_candidate("similar", 0.8, vec![1.0, 0.0, 0.0]), // Same direction, high similarity
+            make_test_candidate("diverse", 0.6, vec![0.0, 1.0, 0.0]), // Orthogonal, low similarity
+        ];
+
+        let result = test_mmr_diversify(candidates, 2, 0.5);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].chunk_id, "selected");
+        // At λ=0.5: similar MMR = 0.5*0.8 - 0.5*1.0 = -0.1
+        //           diverse MMR = 0.5*0.6 - 0.5*0.0 = 0.3
+        // Diverse wins!
+        assert_eq!(
+            result[1].chunk_id, "diverse",
+            "MMR should prefer diverse chunk when λ=0.5"
+        );
     }
 }
