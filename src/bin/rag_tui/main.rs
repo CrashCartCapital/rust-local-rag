@@ -1,13 +1,21 @@
 mod api;
 mod app;
+mod config;
+mod constants;
+mod theme;
 mod ui;
 
 use std::io;
 use std::time::Duration;
 
+use constants::{
+    API_TIMEOUT, DETAIL_MAX_SCROLL_ESTIMATE, EVENT_POLL_INTERVAL,
+    HEALTH_CHECK_INTERVAL_SECS, JOB_POLL_INTERVAL_SECS, SEARCH_CHANNEL_CAPACITY,
+};
+
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,6 +25,8 @@ use tokio::time::{interval, timeout};
 
 use api::{ApiClient, SearchResult};
 use app::{App, AppMode};
+#[allow(unused_imports)]
+use app::Msg;  // Msg enum for future message-based architecture
 
 /// RAII guard for terminal cleanup - ensures terminal is restored even on panic
 struct TuiGuard {
@@ -27,7 +37,8 @@ impl TuiGuard {
     fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        // Note: Mouse capture intentionally disabled to allow terminal text selection
+        execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self { terminal })
@@ -39,8 +50,7 @@ impl Drop for TuiGuard {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
+            LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
     }
@@ -54,19 +64,18 @@ async fn main() -> Result<()> {
     // Load .env file if present
     dotenv::dotenv().ok();
 
-    // Get server URL from environment
-    let server_url = std::env::var("RAG_TUI_SERVER_URL")
-        .unwrap_or_else(|_| "http://localhost:3046".to_string());
+    // Load configuration from environment
+    let config = config::Config::from_env();
 
     // Setup terminal with RAII guard (cleanup happens automatically on drop)
     let mut tui = TuiGuard::new()?;
 
     // Create app and API client
-    let app = App::new(server_url.clone());
-    let api = ApiClient::new(server_url);
+    let app = App::new_with_config(&config);
+    let api = ApiClient::new(config.server_url.clone());
 
     // Run the app (any panic will still trigger TuiGuard::drop)
-    let result = run_app(&mut tui.terminal, app, api).await;
+    let result = run_app(&mut tui.terminal, app, api, &config).await;
 
     if let Err(e) = &result {
         eprintln!("Error: {e}");
@@ -79,21 +88,14 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut app: App,
     api: ApiClient,
+    config: &config::Config,
 ) -> Result<()> {
-    // Polling interval from env or default 2s
-    let poll_interval_secs = std::env::var("RAG_TUI_POLL_INTERVAL_S")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
+    let mut poll_timer = interval(Duration::from_secs(config.poll_interval_secs));
+    let mut health_timer = interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
+    let mut job_timer = interval(Duration::from_secs(JOB_POLL_INTERVAL_SECS));
 
-    let mut poll_timer = interval(Duration::from_secs(poll_interval_secs));
-    let mut health_timer = interval(Duration::from_secs(5));
-
-    // Channel for async search results (non-blocking search)
-    let (search_tx, mut search_rx) = mpsc::unbounded_channel::<SearchOutcome>();
-
-    // Short timeout for health/stats calls to keep UI responsive (5 seconds)
-    const API_TIMEOUT: Duration = Duration::from_secs(5);
+    // Channel for async search results (bounded for backpressure)
+    let (search_tx, mut search_rx) = mpsc::channel::<SearchOutcome>(SEARCH_CHANNEL_CAPACITY);
 
     // Initial health check and stats fetch (with timeout)
     let health_result = timeout(API_TIMEOUT, api.health_check()).await;
@@ -101,6 +103,10 @@ async fn run_app(
     if app.connected {
         if let Ok(Ok(stats)) = timeout(API_TIMEOUT, api.get_stats()).await {
             app.update_stats(stats);
+        }
+        // Check for active reindex job
+        if let Ok(Ok(Some(job))) = timeout(API_TIMEOUT, api.get_active_job()).await {
+            app.set_active_job(job.job_id, job.progress, job.total);
         }
     }
 
@@ -112,29 +118,60 @@ async fn run_app(
         tokio::select! {
             // Terminal input events
             result = tokio::task::spawn_blocking(|| {
-                if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                if event::poll(EVENT_POLL_INTERVAL).unwrap_or(false) {
                     event::read().ok()
                 } else {
                     None
                 }
             }) => {
-                if let Ok(Some(Event::Key(key))) = result {
+                // Handle resize events
+                if let Ok(Some(Event::Resize(width, height))) = result {
+                    app.set_terminal_size(width, height);
+                    // UI will redraw on next loop iteration
+                }
+                // Handle key events
+                else if let Ok(Some(Event::Key(key))) = result {
                     // Mode-specific keybindings
                     match app.mode {
                         AppMode::Normal => {
                             match (key.code, key.modifiers) {
-                                // Quit
-                                (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                // === CONTROL KEY COMMANDS (always work) ===
+
+                                // Quit: Ctrl+C only (frees 'q' for typing)
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                     app.should_quit = true;
                                 }
 
-                                // Enter: open detail view OR submit search
+                                // Refresh stats: Ctrl+R (frees 'r' for typing)
+                                (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                    if let Ok(Ok(stats)) = timeout(API_TIMEOUT, api.get_stats()).await {
+                                        app.update_stats(stats);
+                                        app.set_error(None);
+                                    }
+                                }
+
+                                // Clear query: Ctrl+U
+                                (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                                    if !app.search_in_progress {
+                                        app.clear_query();
+                                    }
+                                }
+
+                                // === SPECIAL KEYS (always work) ===
+
+                                // Help toggle
+                                (KeyCode::Char('?'), _) => {
+                                    app.toggle_help();
+                                }
+
+                                // Enter: submit search (if query changed) OR open detail view
+                                // Priority: 1) New/modified query → search, 2) Results exist → detail
                                 (KeyCode::Enter, _) => {
-                                    if !app.results.is_empty() {
-                                        // Open detail view for selected result
-                                        app.enter_detail_mode();
-                                    } else if !app.search_in_progress && !app.query_input.is_empty() {
-                                        // Submit search
+                                    let should_search = !app.search_in_progress
+                                        && !app.query_input.is_empty()
+                                        && (app.results.is_empty() || app.query_changed_since_search());
+
+                                    if should_search {
                                         app.start_search();
                                         let search_id = app.search_id;
                                         let query = app.query_input.clone();
@@ -147,8 +184,10 @@ async fn run_app(
                                                 Ok(results) => Ok((search_id, results)),
                                                 Err(e) => Err(e.to_string()),
                                             };
-                                            let _ = tx.send(outcome);
+                                            let _ = tx.send(outcome).await;
                                         });
+                                    } else if !app.results.is_empty() {
+                                        app.enter_detail_mode();
                                     }
                                 }
 
@@ -156,27 +195,50 @@ async fn run_app(
                                 (KeyCode::Esc, _) => {
                                     if app.search_in_progress {
                                         app.cancel_search();
-                                    } else {
+                                    } else if !app.results.is_empty() {
                                         app.results.clear();
                                         app.selected_result = 0;
+                                    } else if !app.query_input.is_empty() {
+                                        app.clear_query();
                                     }
                                 }
 
-                                // vim-style navigation (j/k) - only when results exist
+                                // Backspace: always goes to query
+                                (KeyCode::Backspace, _) => {
+                                    if !app.search_in_progress {
+                                        app.input_backspace();
+                                    }
+                                }
+
+                                // === NAVIGATION (arrow keys) ===
+
                                 (KeyCode::Up, _) => {
                                     app.scroll_up();
                                 }
                                 (KeyCode::Down, _) => {
                                     app.scroll_down();
                                 }
+                                (KeyCode::PageUp, _) => {
+                                    app.scroll_page_up();
+                                }
+                                (KeyCode::PageDown, _) => {
+                                    app.scroll_page_down();
+                                }
+                                (KeyCode::Home, _) => {
+                                    app.jump_to_first();
+                                }
+                                (KeyCode::End, _) => {
+                                    app.jump_to_last();
+                                }
+
+                                // === VIM NAVIGATION (only when results exist) ===
+
                                 (KeyCode::Char('k'), KeyModifiers::NONE) if !app.results.is_empty() => {
                                     app.scroll_up();
                                 }
                                 (KeyCode::Char('j'), KeyModifiers::NONE) if !app.results.is_empty() => {
                                     app.scroll_down();
                                 }
-
-                                // Jump to first/last (g/G) - only when results exist
                                 (KeyCode::Char('g'), KeyModifiers::NONE) if !app.results.is_empty() => {
                                     app.jump_to_first();
                                 }
@@ -184,38 +246,40 @@ async fn run_app(
                                     app.jump_to_last();
                                 }
 
-                                // Adjust top_k with [ and ]
-                                (KeyCode::Char('['), _) => {
+                                // === TOP_K ADJUSTMENT (always available) ===
+
+                                (KeyCode::Char('['), KeyModifiers::NONE) => {
                                     app.decrease_top_k();
                                 }
-                                (KeyCode::Char(']'), _) => {
+                                (KeyCode::Char(']'), KeyModifiers::NONE) => {
                                     app.increase_top_k();
                                 }
 
-                                // Force refresh
-                                (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                                    if let Ok(Ok(stats)) = timeout(API_TIMEOUT, api.get_stats()).await {
-                                        app.update_stats(stats);
-                                        app.set_error(None);
+                                // === REINDEX (Shift+R - uppercase only) ===
+
+                                (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+                                    if !app.reindex_in_progress {
+                                        match timeout(API_TIMEOUT, api.start_reindex()).await {
+                                            Ok(Ok(resp)) => {
+                                                app.set_active_job(resp.job_id, 0, 0);
+                                                app.set_error(None);
+                                            }
+                                            Ok(Err(e)) => {
+                                                app.set_error(Some(format!("Reindex: {e}")));
+                                            }
+                                            Err(_) => {
+                                                app.set_error(Some("Reindex: request timed out".to_string()));
+                                            }
+                                        }
                                     }
                                 }
 
-                                // Clear query (Ctrl+U)
-                                (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                                    if !app.search_in_progress {
-                                        app.clear_query();
-                                    }
-                                }
+                                // === TEXT INPUT (all other characters) ===
+                                // j/k/g go to input when no results, all letters work
 
-                                // Text input - j/k/g allowed when no results, q/r always reserved
                                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                                    if !app.search_in_progress && !matches!(c, 'q' | 'r') {
-                                        app.input_char(c);
-                                    }
-                                }
-                                (KeyCode::Backspace, _) => {
                                     if !app.search_in_progress {
-                                        app.input_backspace();
+                                        app.input_char(c);
                                     }
                                 }
 
@@ -225,22 +289,38 @@ async fn run_app(
 
                         AppMode::Detail => {
                             match (key.code, key.modifiers) {
-                                // Quit
-                                (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                // Quit app: Ctrl+C only
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                     app.should_quit = true;
                                 }
 
-                                // Escape: back to normal mode
-                                (KeyCode::Esc, _) => {
+                                // Exit detail view: q or Escape
+                                (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => {
                                     app.exit_detail_mode();
                                 }
 
-                                // j/k: scroll detail text
+                                // j/k: scroll detail text (single line)
                                 (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                                    app.detail_scroll_down(100); // Approximate max lines
+                                    app.detail_scroll_down(DETAIL_MAX_SCROLL_ESTIMATE);
                                 }
                                 (KeyCode::Char('k'), KeyModifiers::NONE) => {
                                     app.detail_scroll_up();
+                                }
+
+                                // PageUp/PageDown: scroll detail text (page at a time)
+                                (KeyCode::PageUp, _) => {
+                                    app.detail_scroll_page_up();
+                                }
+                                (KeyCode::PageDown, _) => {
+                                    app.detail_scroll_page_down(DETAIL_MAX_SCROLL_ESTIMATE);
+                                }
+
+                                // Home/End: jump to top/bottom of detail
+                                (KeyCode::Home, _) => {
+                                    app.detail_scroll = 0;
+                                }
+                                (KeyCode::End, _) => {
+                                    app.detail_scroll = DETAIL_MAX_SCROLL_ESTIMATE.saturating_sub(1);
                                 }
 
                                 // Up/Down arrows: switch between results
@@ -253,11 +333,49 @@ async fn run_app(
                                     app.detail_scroll = 0;
                                 }
 
-                                // y: copy to clipboard (placeholder - needs clipboard crate)
+                                // y: copy to clipboard
                                 (KeyCode::Char('y'), KeyModifiers::NONE) => {
-                                    // TODO: Implement clipboard copy
-                                    // For now, just visual feedback
-                                    app.set_error(Some("Copy not yet implemented".to_string()));
+                                    if let Some(result) = app.selected_result_ref() {
+                                        let text = result.text.clone();
+                                        match arboard::Clipboard::new() {
+                                            Ok(mut clipboard) => {
+                                                match clipboard.set_text(&text) {
+                                                    Ok(()) => {
+                                                        app.set_error(Some("Copied to clipboard".to_string()));
+                                                    }
+                                                    Err(e) => {
+                                                        app.set_error(Some(format!("Copy failed: {e}")));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                app.set_error(Some(format!("Clipboard unavailable: {e}")));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Help
+                                (KeyCode::Char('?'), _) => {
+                                    app.toggle_help();
+                                }
+
+                                _ => {}
+                            }
+                        }
+
+                        AppMode::Help => {
+                            match (key.code, key.modifiers) {
+                                // Quit app: Ctrl+C only
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                    app.should_quit = true;
+                                }
+
+                                // Close help: q, Escape, or ?
+                                (KeyCode::Char('q'), KeyModifiers::NONE)
+                                    | (KeyCode::Esc, _)
+                                    | (KeyCode::Char('?'), _) => {
+                                    app.exit_help_mode();
                                 }
 
                                 _ => {}
@@ -304,6 +422,35 @@ async fn run_app(
                 let health_result = timeout(API_TIMEOUT, api.health_check()).await;
                 let connected = health_result.ok().and_then(|r| r.ok()).unwrap_or(false);
                 app.set_connected(connected);
+            }
+
+            // Job progress polling (only when reindex is in progress)
+            _ = job_timer.tick(), if app.reindex_in_progress => {
+                if let Some(ref job_id) = app.active_job_id.clone() {
+                    match timeout(API_TIMEOUT, api.get_job_status(&job_id)).await {
+                        Ok(Ok(job)) => {
+                            app.update_job_progress(job.progress, job.total);
+                            // Check if job completed
+                            if job.status == "completed" || job.status == "failed" {
+                                app.clear_active_job();
+                                if job.status == "failed" {
+                                    app.set_error(job.error.or(Some("Reindex failed".to_string())));
+                                } else {
+                                    // Refresh stats after successful reindex
+                                    if let Ok(Ok(stats)) = timeout(API_TIMEOUT, api.get_stats()).await {
+                                        app.update_stats(stats);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            app.set_error(Some(format!("Job status: {e}")));
+                        }
+                        Err(_) => {
+                            // Timeout, will retry next tick
+                        }
+                    }
+                }
             }
         }
 

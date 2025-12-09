@@ -43,6 +43,25 @@ pub struct SearchResult {
     pub section: Option<String>,
 }
 
+/// Response from starting a reindex
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct ReindexResponse {
+    pub job_id: String,
+    pub message: String,
+}
+
+/// Job status response
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct JobStatus {
+    pub job_id: String,
+    pub status: String,
+    pub progress: i64,
+    pub total: i64,
+    pub error: Option<String>,
+}
+
 impl ApiClient {
     pub fn new(base_url: String) -> Self {
         let client = reqwest::Client::builder()
@@ -78,5 +97,34 @@ impl ApiClient {
         let resp = self.client.post(&url).json(&request).send().await?;
         let search_resp = resp.json::<SearchResponse>().await?;
         Ok(search_resp.results)
+    }
+
+    /// Start reindexing documents
+    pub async fn start_reindex(&self) -> Result<ReindexResponse> {
+        let url = format!("{}/reindex", self.base_url);
+        let resp = self.client.post(&url).send().await?;
+
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            anyhow::bail!("Reindex already in progress");
+        }
+
+        let reindex_resp = resp.json::<ReindexResponse>().await?;
+        Ok(reindex_resp)
+    }
+
+    /// Get status of active reindex job
+    pub async fn get_active_job(&self) -> Result<Option<JobStatus>> {
+        let url = format!("{}/jobs/active", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        let job = resp.json::<Option<JobStatus>>().await?;
+        Ok(job)
+    }
+
+    /// Get status of a specific job
+    pub async fn get_job_status(&self, job_id: &str) -> Result<JobStatus> {
+        let url = format!("{}/jobs/{}", self.base_url, job_id);
+        let resp = self.client.get(&url).send().await?;
+        let job = resp.json::<JobStatus>().await?;
+        Ok(job)
     }
 }

@@ -334,13 +334,13 @@ async fn healthz() -> axum::http::StatusCode {
 
 /// Readiness probe handler - returns 200 when server is ready to serve requests
 async fn readyz(
-    axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
+    axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> axum::http::StatusCode {
     // Simple readiness check: can we acquire a read lock on the engine?
     // This confirms the engine is initialized and not stuck
     match tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        rag_state.read()
+        app_state.rag_state.read()
     ).await {
         Ok(_guard) => axum::http::StatusCode::OK,
         Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -367,11 +367,11 @@ struct HttpSearchResponse {
 }
 
 async fn http_search(
-    axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
+    axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
 ) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
     let top_k = request.top_k.min(MAX_TOP_K);
-    let engine = rag_state.read().await;
+    let engine = app_state.rag_state.read().await;
     match engine.search(&request.query, top_k).await {
         Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
         Err(e) => {
@@ -383,10 +383,130 @@ async fn http_search(
 
 /// HTTP stats endpoint for evaluation framework
 async fn http_stats(
-    axum::extract::State(rag_state): axum::extract::State<Arc<RwLock<RagEngine>>>,
+    axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
-    let engine = rag_state.read().await;
+    let engine = app_state.rag_state.read().await;
     axum::Json(engine.get_stats())
+}
+
+/// Shared application state for HTTP handlers
+#[derive(Clone)]
+struct AppState {
+    rag_state: Arc<RwLock<RagEngine>>,
+    job_manager: Arc<JobManager>,
+    job_tx: mpsc::Sender<JobRequest>,
+    documents_dir: String,
+}
+
+/// HTTP reindex response
+#[derive(Debug, serde::Serialize)]
+struct HttpReindexResponse {
+    job_id: String,
+    message: String,
+}
+
+/// HTTP job status response
+#[derive(Debug, serde::Serialize)]
+struct HttpJobStatusResponse {
+    job_id: String,
+    status: String,
+    progress: i64,
+    total: i64,
+    error: Option<String>,
+}
+
+/// HTTP endpoint to trigger reindex
+async fn http_start_reindex(
+    axum::extract::State(app_state): axum::extract::State<AppState>,
+) -> Result<axum::Json<HttpReindexResponse>, (axum::http::StatusCode, String)> {
+    // Atomically create job if no active job exists
+    let job = match app_state
+        .job_manager
+        .create_reindex_job_if_not_active(Some(app_state.documents_dir.clone()), 0)
+        .await
+    {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                "A reindex job is already in progress".to_string(),
+            ));
+        }
+        Err(e) => {
+            tracing::error!("Failed to create reindex job: {}", e);
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create job: {}", e),
+            ));
+        }
+    };
+
+    // Send job request to worker supervisor
+    if let Err(e) = app_state.job_tx.send(JobRequest::StartReindex {
+        job_id: job.job_id.clone(),
+        documents_dir: app_state.documents_dir.clone(),
+    }).await {
+        tracing::error!("Failed to send job request: {}", e);
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to start job: {}", e),
+        ));
+    }
+
+    Ok(axum::Json(HttpReindexResponse {
+        job_id: job.job_id,
+        message: "Reindexing started".to_string(),
+    }))
+}
+
+/// HTTP endpoint to get job status
+async fn http_get_job_status(
+    axum::extract::State(app_state): axum::extract::State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<axum::Json<HttpJobStatusResponse>, (axum::http::StatusCode, String)> {
+    match app_state.job_manager.get_job(&job_id).await {
+        Ok(Some(job)) => Ok(axum::Json(HttpJobStatusResponse {
+            job_id: job.job_id,
+            status: format!("{:?}", job.status).to_lowercase(),
+            progress: job.progress,
+            total: job.total,
+            error: job.error,
+        })),
+        Ok(None) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Job {} not found", job_id),
+        )),
+        Err(e) => {
+            tracing::error!("Failed to get job status: {}", e);
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get job: {}", e),
+            ))
+        }
+    }
+}
+
+/// HTTP endpoint to get active job (if any)
+async fn http_get_active_job(
+    axum::extract::State(app_state): axum::extract::State<AppState>,
+) -> Result<axum::Json<Option<HttpJobStatusResponse>>, (axum::http::StatusCode, String)> {
+    match app_state.job_manager.find_active_reindex_job().await {
+        Ok(Some(job)) => Ok(axum::Json(Some(HttpJobStatusResponse {
+            job_id: job.job_id,
+            status: format!("{:?}", job.status).to_lowercase(),
+            progress: job.progress,
+            total: job.total,
+            error: job.error,
+        }))),
+        Ok(None) => Ok(axum::Json(None)),
+        Err(e) => {
+            tracing::error!("Failed to get active job: {}", e);
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get active job: {}", e),
+            ))
+        }
+    }
 }
 
 pub async fn start_mcp_server(
@@ -419,15 +539,26 @@ pub async fn start_mcp_server(
         Default::default(), // StreamableHttpServerConfig
     );
 
+    // Create shared application state for HTTP handlers
+    let app_state = AppState {
+        rag_state: rag_state.clone(),
+        job_manager: job_manager.clone(),
+        job_tx: job_tx.clone(),
+        documents_dir: documents_dir.clone(),
+    };
+
     let router = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/readyz", axum::routing::get(readyz))
         .route("/search", axum::routing::post(http_search))
         .route("/stats", axum::routing::get(http_stats))
+        .route("/reindex", axum::routing::post(http_start_reindex))
+        .route("/jobs/active", axum::routing::get(http_get_active_job))
+        .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
         .route(&endpoint_path, axum::routing::any_service(service))
-        .with_state(rag_state.clone());
+        .with_state(app_state);
 
-    tracing::info!("HTTP evaluation endpoints: POST /search, GET /stats");
+    tracing::info!("HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id");
 
     let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
 

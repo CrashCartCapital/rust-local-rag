@@ -6,7 +6,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, AppMode};
+use crate::app::{App, AppMode, ServerStatus};
+use crate::constants::{
+    DOC_NAME_MAX_CHARS, ERROR_TRUNCATE_CHARS, MODEL_NAME_MAX_CHARS, PREVIEW_CHARS,
+    RERANKER_NAME_MAX_CHARS, SCORE_THRESHOLD_HIGH, SCORE_THRESHOLD_MEDIUM,
+};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
@@ -32,11 +36,95 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_split_pane(frame, app, chunks[2]);
             draw_keybindings_detail(frame, chunks[3]);
         }
+        AppMode::Help => {
+            draw_results(frame, app, chunks[2]);
+            draw_keybindings_normal(frame, app, chunks[3]);
+            // Overlay help on top
+            draw_help_overlay(frame);
+        }
     }
 }
 
-/// Compact status bar: connection indicator, docs, chunks, models, status, and error
+/// Centered help overlay showing all keybindings
+fn draw_help_overlay(frame: &mut Frame) {
+    let area = frame.area();
+
+    // Calculate centered area (60% width, 70% height)
+    let popup_width = (area.width * 60 / 100).min(70);
+    let popup_height = (area.height * 70 / 100).min(24);
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Clear the background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    frame.render_widget(clear, popup_area);
+
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("RAG-TUI Help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("── Search Mode ──", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from("  Enter        Execute search / Open detail view"),
+        Line::from("  Esc          Cancel search / Clear results"),
+        Line::from("  Ctrl+U       Clear query input"),
+        Line::from("  [ / ]        Decrease / Increase top_k"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("── Navigation ──", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from("  j/k, ↑/↓     Scroll up/down (one item)"),
+        Line::from("  PgUp/PgDn    Scroll up/down (page)"),
+        Line::from("  Home/End     Jump to first/last"),
+        Line::from("  g / G        Jump to first/last (vim)"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("── Detail View ──", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from("  Enter        Open detail view (from results)"),
+        Line::from("  Esc          Return to list view"),
+        Line::from("  j / k        Scroll detail text"),
+        Line::from("  y            Copy to clipboard"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("── General ──", Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from("  ?            Toggle this help"),
+        Line::from("  Ctrl+R       Refresh stats"),
+        Line::from("  Shift+R      Trigger reindex"),
+        Line::from("  Ctrl+C       Quit"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ? or Esc to close", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Help ")
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(help, popup_area);
+}
+
+/// Compact status bar: mode, connection indicator, docs, chunks, models, status, and error
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+    // Mode indicator with distinct styling
+    let (mode_str, mode_color) = match app.mode {
+        AppMode::Normal => ("NORMAL", Color::Blue),
+        AppMode::Detail => ("DETAIL", Color::Magenta),
+        AppMode::Help => ("HELP", Color::Yellow),
+    };
+
     let connection = if app.connected {
         Span::styled("● ", Style::default().fg(Color::Green))
     } else {
@@ -44,35 +132,59 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Truncate model names to fit (Unicode-safe)
-    let embed_short = truncate_str(&app.embedding_model, 15);
-    let rerank_short = app.reranker_model.as_ref()
-        .map(|m| truncate_str(m, 12))
+    let embed_short = truncate_str(&app.embedding_model, MODEL_NAME_MAX_CHARS);
+    let rerank_short = app
+        .reranker_model
+        .as_ref()
+        .map(|m| truncate_str(m, RERANKER_NAME_MAX_CHARS))
         .unwrap_or_else(|| "none".to_string());
 
     // Format counts compactly (e.g., "85k" instead of "85492")
     let chunks_str = format_count(app.chunk_count);
 
-    // Status indicator with color
-    let (status_str, status_color) = match app.status.as_str() {
-        "ready" => ("ready", Color::Green),
-        "reindexing" => ("reindexing...", Color::Yellow),
-        "connecting..." => ("connecting", Color::Yellow),
-        _ => (app.status.as_str(), Color::DarkGray),
+    // Status indicator with color (prioritize reindex_in_progress for accurate TUI state)
+    let (status_str, status_color): (String, Color) = if app.reindex_in_progress {
+        if let Some((progress, total)) = app.job_progress {
+            if total > 0 {
+                let pct = (progress * 100) / total;
+                (format!("reindexing {}%", pct), Color::Yellow)
+            } else {
+                ("reindexing...".to_string(), Color::Yellow)
+            }
+        } else {
+            ("reindexing...".to_string(), Color::Yellow)
+        }
+    } else {
+        match &app.status {
+            ServerStatus::Ready => ("ready".to_string(), Color::Green),
+            ServerStatus::Reindexing => ("reindexing...".to_string(), Color::Yellow),
+            ServerStatus::Connecting => ("connecting".to_string(), Color::Yellow),
+            ServerStatus::Unknown(s) => (s.clone(), Color::DarkGray),
+        }
     };
 
     let mut spans = vec![
+        Span::styled(
+            format!("[{mode_str}]"),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
         connection,
         Span::raw(format!("{}docs │ {} │ ", app.doc_count, chunks_str)),
         Span::styled(&embed_short, Style::default().fg(Color::Cyan)),
         Span::raw(" │ "),
         Span::styled(&rerank_short, Style::default().fg(Color::Cyan)),
         Span::raw(" │ "),
-        Span::styled(status_str, Style::default().fg(status_color)),
+        Span::styled(&status_str, Style::default().fg(status_color)),
     ];
 
     // Show error inline if present
     if let Some(ref err) = app.last_error {
-        let err_short = if err.len() > 30 { format!("{}...", &err[..27]) } else { err.clone() };
+        let err_short = if err.len() > ERROR_TRUNCATE_CHARS {
+            format!("{}...", &err[..ERROR_TRUNCATE_CHARS.saturating_sub(3)])
+        } else {
+            err.clone()
+        };
         spans.push(Span::raw(" │ "));
         spans.push(Span::styled(err_short, Style::default().fg(Color::Red)));
     }
@@ -164,7 +276,7 @@ fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
             .label(format!("{current}/{total} docs"));
 
         frame.render_widget(gauge, area);
-    } else if app.status == "reindexing" {
+    } else if app.status.is_reindexing() {
         // Show indeterminate progress
         let progress = Paragraph::new("Reindexing in progress...")
             .style(Style::default().fg(Color::Yellow))
@@ -229,16 +341,16 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             let text_preview: String = result
                 .text
                 .chars()
-                .take(60)
+                .take(PREVIEW_CHARS)
                 .collect::<String>()
                 .replace('\n', " ");
 
             // Format score with color coding and handle zero scores
             let (score_str, score_color) = if result.score <= 0.0 {
                 ("--".to_string(), Color::DarkGray)
-            } else if result.score >= 0.7 {
+            } else if result.score >= SCORE_THRESHOLD_HIGH {
                 (format!("{:.2}", result.score), Color::Green)
-            } else if result.score >= 0.4 {
+            } else if result.score >= SCORE_THRESHOLD_MEDIUM {
                 (format!("{:.2}", result.score), Color::Yellow)
             } else {
                 (format!("{:.2}", result.score), Color::DarkGray)
@@ -296,7 +408,7 @@ fn draw_error(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_keybindings_normal(frame: &mut Frame, app: &App, area: Rect) {
     let bindings = Paragraph::new(format!(
-        "Enter=Detail  j/k=Nav  [/]=top_k({})  Ctrl+U=Clear  r=Refresh  q=Quit",
+        "Enter=Search/Detail  j/k=Nav  [/]=top_k({})  C-U=Clear  C-R=Refresh  C-c=Quit  ?=Help",
         app.top_k
     ))
     .style(Style::default().fg(Color::DarkGray));
@@ -306,7 +418,7 @@ fn draw_keybindings_normal(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_keybindings_detail(frame: &mut Frame, area: Rect) {
     let bindings = Paragraph::new(
-        "Esc=Back  j/k=Scroll  ↑↓=Prev/Next result  y=Copy  q=Quit"
+        "Esc/q=Back  j/k=Scroll  ↑↓=Prev/Next result  y=Copy  C-c=Quit"
     )
     .style(Style::default().fg(Color::DarkGray));
 
@@ -337,16 +449,16 @@ fn draw_results_compact(frame: &mut Frame, app: &App, area: Rect) {
             // Very compact: just score and truncated doc name
             let (score_str, score_color) = if result.score <= 0.0 {
                 ("--".to_string(), Color::DarkGray)
-            } else if result.score >= 0.7 {
+            } else if result.score >= SCORE_THRESHOLD_HIGH {
                 (format!("{:.2}", result.score), Color::Green)
-            } else if result.score >= 0.4 {
+            } else if result.score >= SCORE_THRESHOLD_MEDIUM {
                 (format!("{:.2}", result.score), Color::Yellow)
             } else {
                 (format!("{:.2}", result.score), Color::DarkGray)
             };
 
             // Truncate document name (Unicode-safe)
-            let doc_name = truncate_str(&result.document, 20);
+            let doc_name = truncate_str(&result.document, DOC_NAME_MAX_CHARS);
 
             let is_selected = i == app.selected_result;
             let marker = if is_selected { "▶" } else { " " };
@@ -476,9 +588,9 @@ mod tests {
 
         // Should show disconnected indicator (empty circle)
         assert!(buffer_contains(&buffer, "○"));
-        // Should show keybindings
-        assert!(buffer_contains(&buffer, "Enter=Detail"));
-        assert!(buffer_contains(&buffer, "Quit"));
+        // Should show keybindings (updated to new Ctrl-modifier scheme)
+        assert!(buffer_contains(&buffer, "Enter=Search"));
+        assert!(buffer_contains(&buffer, "C-c=Quit"));
     }
 
     #[test]
@@ -487,7 +599,7 @@ mod tests {
         app.connected = true;
         app.doc_count = 15;
         app.chunk_count = 1247;
-        app.status = "ready".to_string();
+        app.status = ServerStatus::Ready;
 
         let buffer = render_to_buffer(&app, 80, 30);
 
@@ -554,7 +666,7 @@ mod tests {
     #[test]
     fn test_render_reindexing_state() {
         let mut app = make_test_app();
-        app.status = "reindexing".to_string();
+        app.status = ServerStatus::Reindexing;
 
         let buffer = render_to_buffer(&app, 80, 30);
 
