@@ -1,8 +1,9 @@
 # Mini PRD: Per-Query Score Weight Customization
 
-**Status**: Draft
+**Status**: ✅ Implemented
 **Date**: 2024-12-09
 **Revised**: Simplified after ensemble review (Gemini + Codex)
+**Implemented**: 2025-12-09
 
 ---
 
@@ -143,3 +144,40 @@ Only `embedding` and `lexical` are overridden; `reranker` and `initial` use cach
 ---
 
 **Estimated Time**: 1.5-2 hours total
+
+---
+
+## 8. Implementation Notes (2025-12-09)
+
+### What Was Built
+
+1. **`QueryWeights` struct** in `rag_engine.rs` with schemars JSON schema support
+2. **`resolve_weight()` helper** - pure function for testability
+3. **`ResolvedWeights` struct** with `from_query_weights()` constructor
+4. **Updated `search()` and `search_with_diversity()`** signatures to accept `Option<&QueryWeights>`
+5. **Updated `SearchRequest`** in `mcp_server.rs` with optional `weights` field
+6. **12 unit tests** covering all resolution scenarios
+
+### Key Design Decisions
+
+- Used `rmcp::schemars::JsonSchema` to resolve schemars version conflict (rmcp uses 1.1.0)
+- Created `ResolvedWeights` struct instead of inline resolution for better testability
+- `resolve_weight()` is a standalone pure function for easy unit testing
+- HTTP endpoint intentionally passes `None` (per-query weights via HTTP out of scope)
+
+### Test Results (MCP Tool Calls)
+
+| Test Case | Result |
+|-----------|--------|
+| Default (no weights) | ✅ Works as before |
+| `reranker=0, initial=1` | ✅ Different results (bibliographies surfaced) |
+| `reranker=1, initial=0` | ✅ Reranker-only scoring |
+| Partial weights | ✅ Unspecified weights use defaults |
+| All 4 weights | ✅ All overrides applied |
+| Invalid values (>1, <0, NaN) | ✅ Silently ignored, defaults used |
+
+### Files Modified
+
+- `src/rag_engine.rs`: QueryWeights, resolve_weight, ResolvedWeights, search signatures
+- `src/mcp_server.rs`: SearchRequest.weights field, search_documents tool
+- `docs/per_query_weights_prd.md`: Status and implementation notes

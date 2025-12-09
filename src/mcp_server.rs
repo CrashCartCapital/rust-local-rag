@@ -24,6 +24,10 @@ pub struct SearchRequest {
         description = "Diversity factor for MMR reranking (0.0-1.0, default: 0.3). Higher values increase result diversity."
     )]
     pub diversity_factor: Option<f32>,
+    #[schemars(
+        description = "Optional per-query weight overrides for scoring. Omitted weights use cached defaults."
+    )]
+    pub weights: Option<crate::rag_engine::QueryWeights>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -71,7 +75,7 @@ impl RagMcpServer {
     }
 
     #[tool(
-        description = "Search through uploaded documents using semantic similarity with optional MMR diversification"
+        description = "Search through uploaded documents using semantic similarity with optional MMR diversification and per-query weight customization"
     )]
     async fn search_documents(
         &self,
@@ -80,10 +84,11 @@ impl RagMcpServer {
         let top_k = params.top_k.unwrap_or(5).min(MAX_TOP_K);
         let diversity_factor = params.diversity_factor.unwrap_or(0.3).clamp(0.0, 1.0);
         let query = params.query;
+        let weights = params.weights;
         let engine = self.rag_state.read().await;
 
         match engine
-            .search_with_diversity(&query, top_k, diversity_factor)
+            .search_with_diversity(&query, top_k, diversity_factor, weights.as_ref())
             .await
         {
             Ok(results) => {
@@ -398,8 +403,9 @@ async fn http_search(
     let top_k = request.top_k.min(MAX_TOP_K);
     let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
     let engine = app_state.rag_state.read().await;
+    // Note: HTTP endpoint uses default weights (per-query weights not exposed via HTTP yet)
     match engine
-        .search_with_diversity(&request.query, top_k, diversity_factor)
+        .search_with_diversity(&request.query, top_k, diversity_factor, None)
         .await
     {
         Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),

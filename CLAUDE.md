@@ -603,6 +603,26 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 3. If diversity_factor > 0: MMR diversification selects final top-k balancing relevance vs similarity
 4. Results → MCP response → Claude Desktop
 
+#### Per-Query Weight Customization:
+The `search_documents` MCP tool supports optional weight overrides:
+
+```json
+{
+  "query": "machine learning",
+  "top_k": 5,
+  "weights": {
+    "embedding": 0.9,    // First-stage embedding similarity (0.0-1.0)
+    "lexical": 0.1,      // First-stage lexical/BM25 (0.0-1.0)
+    "reranker": 0.8,     // Second-stage reranker weight (0.0-1.0)
+    "initial": 0.2       // Second-stage initial score weight (0.0-1.0)
+  }
+}
+```
+
+- All weight fields are optional; omitted weights use cached env var defaults
+- Invalid values (NaN, Inf, <0, >1) are silently ignored and defaults used
+- Set `reranker: 0, initial: 1` to bypass reranker and use embedding scores only
+
 ## Common Development Tasks
 
 ### Building and Running
@@ -850,10 +870,10 @@ Tools are defined using the `#[tool]` attribute:
 
 ```rust
 #[tool(description = "Search through uploaded documents using semantic similarity")]
-async fn search_documents(&self, #[tool(aggr)] SearchRequest { query, top_k }: SearchRequest) -> Result<CallToolResult, McpError>
+async fn search_documents(&self, #[tool(aggr)] SearchRequest { query, top_k, diversity_factor, weights }: SearchRequest) -> Result<CallToolResult, McpError>
 ```
 
-The `#[tool(aggr)]` attribute indicates parameter aggregation for structured input.
+The `#[tool(aggr)]` attribute indicates parameter aggregation for structured input. The `weights` field accepts optional `QueryWeights` for per-query score tuning.
 
 ### Persistence Format
 

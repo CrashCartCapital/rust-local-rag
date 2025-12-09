@@ -5,7 +5,10 @@
 documents/*.pdf
 data/chunks.json
 data/chunks_*.json
+data/chunks_*.json.tmp
 data/jobs.db
+data/jobs.db-wal
+data/jobs.db-shm
 data/*.bak.*
 
 !documents/.keep

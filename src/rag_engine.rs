@@ -460,10 +460,30 @@ impl RagEngine {
 
     /// Performs semantic search over indexed documents.
     /// Uses two-stage retrieval: embedding similarity + optional LLM reranking.
-    pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
+    ///
+    /// # Arguments
+    /// * `query` - Search query string
+    /// * `top_k` - Number of results to return
+    /// * `weights` - Optional per-query weight overrides. If None or fields are None, uses cached defaults.
+    pub async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+        weights: Option<&QueryWeights>,
+    ) -> Result<Vec<SearchResult>> {
         if self.chunks.is_empty() {
             return Ok(vec![]);
         }
+
+        // Resolve weights: use overrides if valid, else cached defaults
+        let resolved = ResolvedWeights::from_query_weights(weights);
+        tracing::debug!(
+            "Search weights: embedding={:.2}, lexical={:.2}, reranker={:.2}, initial={:.2}",
+            resolved.embedding,
+            resolved.lexical,
+            resolved.reranker,
+            resolved.initial
+        );
 
         let top_k = top_k.max(1);
         tracing::debug!("Searching for: '{}'", query);
@@ -506,7 +526,7 @@ impl RagEngine {
                     .map(|score| score / max_lexical)
                     .unwrap_or(0.0);
                 let combined_score =
-                    get_embedding_weight() * embedding_score + get_lexical_weight() * lexical_score;
+                    resolved.embedding * embedding_score + resolved.lexical * lexical_score;
 
                 scores.push((
                     combined_score,
@@ -599,9 +619,9 @@ impl RagEngine {
                     let initial_norm = candidate.initial_score / max_initial;
 
                     // Blend: reranker dominates but initial score provides discrimination
-                    // Weights configurable via RAG_RERANKER_WEIGHT and RAG_INITIAL_SCORE_WEIGHT env vars
-                    let blended_score = get_reranker_weight() * reranker_norm
-                        + get_initial_score_weight() * initial_norm;
+                    // Weights configurable via RAG_RERANKER_WEIGHT/RAG_INITIAL_SCORE_WEIGHT env vars or per-query override
+                    let blended_score =
+                        resolved.reranker * reranker_norm + resolved.initial * initial_norm;
 
                     tracing::debug!(
                         chunk_id = %candidate.chunk_id,
@@ -690,24 +710,26 @@ impl RagEngine {
     ///   - 0.0 = pure relevance (no diversity penalty)
     ///   - 1.0 = maximum diversity (heavily penalizes similar results)
     ///   - Recommended: 0.2-0.4 for most use cases
+    /// * `weights` - Optional per-query weight overrides
     pub async fn search_with_diversity(
         &self,
         query: &str,
         top_k: usize,
         diversity_factor: f32,
+        weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
         // Clamp diversity factor to valid range
         let diversity_factor = diversity_factor.clamp(0.0, 1.0);
 
         // If no diversity requested, just do normal search
         if diversity_factor == 0.0 {
-            return self.search(query, top_k).await;
+            return self.search(query, top_k, weights).await;
         }
 
         // Fetch more candidates than needed for MMR selection
         // We need extra candidates because MMR may skip similar ones
         let candidate_pool_size = (top_k * 3).max(top_k + 10);
-        let candidates = self.search(query, candidate_pool_size).await?;
+        let candidates = self.search(query, candidate_pool_size, weights).await?;
 
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -1801,6 +1823,62 @@ fn get_initial_score_weight() -> f32 {
     *INITIAL_SCORE_WEIGHT
         .get_or_init(|| parse_weight("RAG_INITIAL_SCORE_WEIGHT", DEFAULT_INITIAL_SCORE_WEIGHT))
 }
+
+/// Optional per-query weight overrides for search scoring.
+/// All fields are optional - omitted weights fall back to cached defaults.
+/// Invalid values (NaN, Inf, out of range) are ignored and defaults are used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct QueryWeights {
+    /// Embedding similarity weight for first-stage retrieval (0.0-1.0)
+    #[schemars(description = "Embedding similarity weight (0.0-1.0, default: 0.7)")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<f32>,
+    /// Lexical/BM25 weight for first-stage retrieval (0.0-1.0)
+    #[schemars(description = "Lexical/BM25 weight (0.0-1.0, default: 0.3)")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lexical: Option<f32>,
+    /// Reranker weight for second-stage scoring (0.0-1.0)
+    #[schemars(description = "Reranker weight for score blending (0.0-1.0, default: 0.7)")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<f32>,
+    /// Initial score weight for second-stage scoring (0.0-1.0)
+    #[schemars(description = "Initial score weight for score blending (0.0-1.0, default: 0.3)")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial: Option<f32>,
+}
+
+/// Resolve a single weight: use override if valid (finite and in [0.0, 1.0]), else use default.
+/// This is a pure helper function for testability.
+fn resolve_weight(override_weight: Option<f32>, default: f32) -> f32 {
+    override_weight
+        .filter(|&w| w.is_finite() && (0.0..=1.0).contains(&w))
+        .unwrap_or(default)
+}
+
+/// Resolved weights for a search query.
+/// Contains the effective weight values after applying overrides and validation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedWeights {
+    pub embedding: f32,
+    pub lexical: f32,
+    pub reranker: f32,
+    pub initial: f32,
+}
+
+impl ResolvedWeights {
+    /// Resolve query weights by applying overrides to cached defaults.
+    /// Invalid overrides (NaN, Inf, out of range) are silently ignored.
+    pub fn from_query_weights(weights: Option<&QueryWeights>) -> Self {
+        Self {
+            embedding: resolve_weight(weights.and_then(|w| w.embedding), get_embedding_weight()),
+            lexical: resolve_weight(weights.and_then(|w| w.lexical), get_lexical_weight()),
+            reranker: resolve_weight(weights.and_then(|w| w.reranker), get_reranker_weight()),
+            initial: resolve_weight(weights.and_then(|w| w.initial), get_initial_score_weight()),
+        }
+    }
+}
+
 const MAX_SINGLE_BIT_NEIGHBORS: usize = 32;
 const MAX_TOTAL_NEIGHBORS: usize = 64;
 
@@ -2617,7 +2695,7 @@ mod tests {
         let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
         assert_eq!(similarity, 0.0, "Zero vectors should return 0.0");
 
-        let both_zero = RagEngine::cosine_similarity(&vec_a, &vec![0.0, 0.0, 0.0]);
+        let both_zero = RagEngine::cosine_similarity(&vec_a, &[0.0, 0.0, 0.0]);
         assert_eq!(both_zero, 0.0, "Both zero vectors should return 0.0");
     }
 
@@ -2659,7 +2737,7 @@ mod tests {
         let vec_b = vec![1.0, 1.0, 1.0];
         let similarity = RagEngine::cosine_similarity(&vec_a, &vec_b);
         assert!(
-            similarity >= -1.0 && similarity <= 1.0,
+            (-1.0..=1.0).contains(&similarity),
             "Similarity should be clamped to [-1, 1]"
         );
     }
@@ -2915,6 +2993,194 @@ mod tests {
         assert_eq!(
             result[1].chunk_id, "diverse",
             "MMR should prefer diverse chunk when λ=0.5"
+        );
+    }
+
+    // ============================================
+    // Per-Query Weight Resolution Tests (TDD)
+    // ============================================
+
+    #[test]
+    fn test_resolve_weight_uses_override_when_valid() {
+        // Valid override should be used
+        assert_eq!(resolve_weight(Some(0.5), 0.7), 0.5);
+        assert_eq!(resolve_weight(Some(0.9), 0.3), 0.9);
+    }
+
+    #[test]
+    fn test_resolve_weight_uses_default_when_none() {
+        // None should fall back to default
+        assert_eq!(resolve_weight(None, 0.7), 0.7);
+        assert_eq!(resolve_weight(None, 0.3), 0.3);
+    }
+
+    #[test]
+    fn test_resolve_weight_accepts_valid_boundaries() {
+        // Edge values 0.0 and 1.0 should be accepted
+        let default = 0.5;
+        assert_eq!(resolve_weight(Some(0.0), default), 0.0);
+        assert_eq!(resolve_weight(Some(1.0), default), 1.0);
+    }
+
+    #[test]
+    fn test_resolve_weight_rejects_invalid_values() {
+        let default = 0.5;
+
+        // NaN should fall back to default
+        assert_eq!(
+            resolve_weight(Some(f32::NAN), default),
+            default,
+            "NaN should fall back to default"
+        );
+
+        // Infinity should fall back to default
+        assert_eq!(
+            resolve_weight(Some(f32::INFINITY), default),
+            default,
+            "INFINITY should fall back to default"
+        );
+        assert_eq!(
+            resolve_weight(Some(f32::NEG_INFINITY), default),
+            default,
+            "NEG_INFINITY should fall back to default"
+        );
+
+        // Out of range values should fall back to default
+        assert_eq!(
+            resolve_weight(Some(-0.1), default),
+            default,
+            "Negative value should fall back to default"
+        );
+        assert_eq!(
+            resolve_weight(Some(1.5), default),
+            default,
+            "Value > 1.0 should fall back to default"
+        );
+        assert_eq!(
+            resolve_weight(Some(2.0), default),
+            default,
+            "Value > 1.0 should fall back to default"
+        );
+    }
+
+    #[test]
+    fn test_query_weights_default_all_none() {
+        // QueryWeights::default() should have all fields as None
+        let weights = QueryWeights::default();
+        assert!(weights.embedding.is_none());
+        assert!(weights.lexical.is_none());
+        assert!(weights.reranker.is_none());
+        assert!(weights.initial.is_none());
+    }
+
+    #[test]
+    fn test_resolved_weights_from_none_uses_cached_defaults() {
+        // When no overrides provided, should use cached defaults
+        let resolved = ResolvedWeights::from_query_weights(None);
+
+        // These should match the get_*_weight() functions
+        assert_eq!(resolved.embedding, get_embedding_weight());
+        assert_eq!(resolved.lexical, get_lexical_weight());
+        assert_eq!(resolved.reranker, get_reranker_weight());
+        assert_eq!(resolved.initial, get_initial_score_weight());
+    }
+
+    #[test]
+    fn test_resolved_weights_from_default_query_weights_uses_cached_defaults() {
+        // QueryWeights::default() (all None) should use cached defaults
+        let weights = QueryWeights::default();
+        let resolved = ResolvedWeights::from_query_weights(Some(&weights));
+
+        assert_eq!(resolved.embedding, get_embedding_weight());
+        assert_eq!(resolved.lexical, get_lexical_weight());
+        assert_eq!(resolved.reranker, get_reranker_weight());
+        assert_eq!(resolved.initial, get_initial_score_weight());
+    }
+
+    #[test]
+    fn test_resolved_weights_partial_override() {
+        // Override only embedding, others should use defaults
+        let weights = QueryWeights {
+            embedding: Some(0.9),
+            lexical: None,
+            reranker: None,
+            initial: None,
+        };
+        let resolved = ResolvedWeights::from_query_weights(Some(&weights));
+
+        // Overridden field should use override
+        assert_eq!(resolved.embedding, 0.9);
+        // Others should use cached defaults
+        assert_eq!(resolved.lexical, get_lexical_weight());
+        assert_eq!(resolved.reranker, get_reranker_weight());
+        assert_eq!(resolved.initial, get_initial_score_weight());
+    }
+
+    #[test]
+    fn test_resolved_weights_multiple_overrides() {
+        // Override multiple fields
+        let weights = QueryWeights {
+            embedding: Some(0.8),
+            lexical: Some(0.2),
+            reranker: None,
+            initial: Some(0.4),
+        };
+        let resolved = ResolvedWeights::from_query_weights(Some(&weights));
+
+        assert_eq!(resolved.embedding, 0.8);
+        assert_eq!(resolved.lexical, 0.2);
+        assert_eq!(resolved.reranker, get_reranker_weight()); // Not overridden
+        assert_eq!(resolved.initial, 0.4);
+    }
+
+    #[test]
+    fn test_resolved_weights_invalid_override_falls_back() {
+        // Invalid override should fall back to default
+        let weights = QueryWeights {
+            embedding: Some(f32::NAN), // Invalid
+            lexical: Some(-0.1),       // Invalid (out of range)
+            reranker: Some(0.6),       // Valid
+            initial: Some(1.5),        // Invalid (out of range)
+        };
+        let resolved = ResolvedWeights::from_query_weights(Some(&weights));
+
+        // Invalid overrides fall back to defaults
+        assert_eq!(resolved.embedding, get_embedding_weight());
+        assert_eq!(resolved.lexical, get_lexical_weight());
+        // Valid override is used
+        assert_eq!(resolved.reranker, 0.6);
+        // Invalid falls back
+        assert_eq!(resolved.initial, get_initial_score_weight());
+    }
+
+    #[test]
+    fn test_resolve_weight_edge_case_values() {
+        let default = 0.5;
+
+        // Values very close to but just outside valid range should fall back
+        assert_eq!(
+            resolve_weight(Some(-1e-6), default),
+            default,
+            "Negative value very close to zero should fall back"
+        );
+        assert_eq!(
+            resolve_weight(Some(1.000001), default),
+            default,
+            "Value slightly above 1.0 should fall back"
+        );
+
+        // NEG_INFINITY should fall back
+        assert_eq!(
+            resolve_weight(Some(f32::NEG_INFINITY), default),
+            default,
+            "NEG_INFINITY should fall back"
+        );
+
+        // Negative zero is valid (0.0 == -0.0 in IEEE-754)
+        assert_eq!(
+            resolve_weight(Some(-0.0), default),
+            -0.0,
+            "Negative zero is valid and should be accepted"
         );
     }
 }
