@@ -57,8 +57,7 @@ impl App {
         let ollama_url = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "localhost:11434".to_string());
 
         let config_summary = format!(
-            "DATA_DIR={}  DOCS_DIR={}  OLLAMA={}",
-            data_dir, docs_dir, ollama_url
+            "DATA_DIR={data_dir}  DOCS_DIR={docs_dir}  OLLAMA={ollama_url}"
         );
 
         // Get top_k from env or default to 10

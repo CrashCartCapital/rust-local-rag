@@ -88,7 +88,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
         s.to_string()
     } else {
         let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{}…", truncated)
+        format!("{truncated}…")
     }
 }
 
@@ -137,11 +137,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 #[allow(dead_code)]
 fn draw_models(frame: &mut Frame, app: &App, area: Rect) {
-    let reranker = app
-        .reranker_model
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
+    let reranker = app.reranker_model.as_deref().unwrap_or("none");
 
     let models = Paragraph::new(format!(
         "Embed: {} │ Rerank: {}",
@@ -165,7 +161,7 @@ fn draw_progress(frame: &mut Frame, app: &App, area: Rect) {
             .block(Block::default().borders(Borders::ALL).title(" Progress "))
             .gauge_style(Style::default().fg(Color::Cyan))
             .ratio(ratio)
-            .label(format!("{}/{} docs", current, total));
+            .label(format!("{current}/{total} docs"));
 
         frame.render_widget(gauge, area);
     } else if app.status == "reindexing" {
@@ -199,7 +195,7 @@ fn draw_query_input(frame: &mut Frame, app: &App, area: Rect) {
             2 => "-",
             _ => "\\",
         };
-        format!(" {} {}s", spinner, elapsed)
+        format!(" {spinner} {elapsed}s")
     } else {
         String::new()
     };
@@ -211,7 +207,7 @@ fn draw_query_input(frame: &mut Frame, app: &App, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Query{} ", search_status)),
+            .title(format!(" Query{search_status} ")),
     );
 
     frame.render_widget(input, area);
@@ -251,10 +247,11 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             let is_selected = i == app.selected_result;
 
             // Build spans with score color
+            let idx = i + 1;
             let spans = vec![
-                Span::raw(format!("{}. [", i + 1)),
+                Span::raw(format!("{idx}. [")),
                 Span::styled(score_str, Style::default().fg(score_color)),
-                Span::raw(format!("] {} \"{}...\"", provenance, text_preview)),
+                Span::raw(format!("] {provenance} \"{text_preview}...\"")),
             ];
 
             let style = if is_selected {
@@ -290,7 +287,7 @@ fn draw_error(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let error = Paragraph::new(format!("Error: {}", error_text))
+    let error = Paragraph::new(format!("Error: {error_text}"))
         .style(style)
         .block(Block::default().borders(Borders::ALL));
 
@@ -355,9 +352,9 @@ fn draw_results_compact(frame: &mut Frame, app: &App, area: Rect) {
             let marker = if is_selected { "▶" } else { " " };
 
             let spans = vec![
-                Span::raw(format!("{} [", marker)),
+                Span::raw(format!("{marker} [")),
                 Span::styled(score_str, Style::default().fg(score_color)),
-                Span::raw(format!("] {}", doc_name)),
+                Span::raw(format!("] {doc_name}")),
             ];
 
             let style = if is_selected {
@@ -395,7 +392,7 @@ fn draw_detail_view(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         let section_info = result.section.as_ref()
-            .map(|s| format!("  §{}", s))
+            .map(|s| format!("  §{s}"))
             .unwrap_or_default();
 
         let header = Line::from(vec![

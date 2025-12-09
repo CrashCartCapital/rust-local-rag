@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     let result = run_app(&mut tui.terminal, app, api).await;
 
     if let Err(e) = &result {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
     }
 
     result
@@ -276,7 +276,7 @@ async fn run_app(
                     }
                     Err(e) => {
                         app.cancel_search();
-                        app.set_error(Some(format!("Search failed: {}", e)));
+                        app.set_error(Some(format!("Search failed: {e}")));
                     }
                 }
             }
@@ -290,7 +290,7 @@ async fn run_app(
                             app.set_error(None); // Clear error on successful stats
                         }
                         Ok(Err(e)) => {
-                            app.set_error(Some(format!("Stats: {}", e)));
+                            app.set_error(Some(format!("Stats: {e}")));
                         }
                         Err(_) => {
                             app.set_error(Some("Stats: request timed out".to_string()));
