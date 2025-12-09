@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod constants;
+mod settings;
 mod theme;
 mod ui;
 
@@ -274,6 +275,12 @@ async fn run_app(
                                     }
                                 }
 
+                                // === SETTINGS (Shift+S - uppercase only) ===
+
+                                (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+                                    app.enter_settings_mode();
+                                }
+
                                 // === TEXT INPUT (all other characters) ===
                                 // j/k/g go to input when no results, all letters work
 
@@ -379,6 +386,103 @@ async fn run_app(
                                 }
 
                                 _ => {}
+                            }
+                        }
+
+                        AppMode::Settings => {
+                            // Check if we're in edit mode for a setting
+                            if app.settings.editing {
+                                match (key.code, key.modifiers) {
+                                    // Confirm edit
+                                    (KeyCode::Enter, _) => {
+                                        app.settings.confirm_edit();
+                                    }
+                                    // Cancel edit
+                                    (KeyCode::Esc, _) => {
+                                        app.settings.cancel_edit();
+                                    }
+                                    // Text input
+                                    (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                        app.settings.input_char(c);
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        app.settings.backspace();
+                                    }
+                                    (KeyCode::Delete, _) => {
+                                        app.settings.delete();
+                                    }
+                                    // Cursor movement
+                                    (KeyCode::Left, _) => {
+                                        app.settings.cursor_left();
+                                    }
+                                    (KeyCode::Right, _) => {
+                                        app.settings.cursor_right();
+                                    }
+                                    (KeyCode::Home, _) => {
+                                        app.settings.cursor_home();
+                                    }
+                                    (KeyCode::End, _) => {
+                                        app.settings.cursor_end();
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match (key.code, key.modifiers) {
+                                    // Quit app: Ctrl+C only
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                        app.should_quit = true;
+                                    }
+
+                                    // Exit settings: q or Escape
+                                    (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Esc, _) => {
+                                        app.exit_settings_mode();
+                                    }
+
+                                    // Navigate settings
+                                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                                        app.settings.prev();
+                                    }
+                                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                                        app.settings.next();
+                                    }
+
+                                    // Edit current setting
+                                    (KeyCode::Enter, _) => {
+                                        // Check if this setting has dropdown options
+                                        if app.settings.current().map(|s| s.options.is_some()).unwrap_or(false) {
+                                            // Cycle through options
+                                            app.settings.cycle_option(true);
+                                        } else {
+                                            // Open text edit
+                                            app.settings.start_edit();
+                                        }
+                                    }
+
+                                    // Cycle options with Tab (for dropdown-style)
+                                    (KeyCode::Tab, _) => {
+                                        if app.settings.current().map(|s| s.options.is_some()).unwrap_or(false) {
+                                            app.settings.cycle_option(true);
+                                        }
+                                    }
+                                    (KeyCode::BackTab, _) => {
+                                        if app.settings.current().map(|s| s.options.is_some()).unwrap_or(false) {
+                                            app.settings.cycle_option(false);
+                                        }
+                                    }
+
+                                    // Save settings: Ctrl+S
+                                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                                        app.save_settings();
+                                    }
+
+                                    // Reset all to original values: r
+                                    (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                                        app.settings.reset_all();
+                                        app.settings_message = Some(("Settings reset to original values".to_string(), false));
+                                    }
+
+                                    _ => {}
+                                }
                             }
                         }
                     }

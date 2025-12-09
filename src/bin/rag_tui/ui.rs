@@ -42,6 +42,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             // Overlay help on top
             draw_help_overlay(frame);
         }
+        AppMode::Settings => {
+            draw_results(frame, app, chunks[2]);
+            draw_keybindings_settings(frame, app, chunks[3]);
+            // Overlay settings on top
+            draw_settings_overlay(frame, app);
+        }
     }
 }
 
@@ -49,9 +55,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_help_overlay(frame: &mut Frame) {
     let area = frame.area();
 
-    // Calculate centered area (60% width, 70% height)
-    let popup_width = (area.width * 60 / 100).min(70);
-    let popup_height = (area.height * 70 / 100).min(24);
+    // Skip rendering on very small terminals
+    if area.width < 20 || area.height < 10 {
+        return;
+    }
+
+    // Calculate centered area (60% width, 70% height) with minimum sizes
+    let popup_width = (area.width * 60 / 100).min(70).max(20);
+    let popup_height = (area.height * 70 / 100).min(24).max(10);
     let popup_x = (area.width.saturating_sub(popup_width)) / 2;
     let popup_y = (area.height.saturating_sub(popup_height)) / 2;
 
@@ -94,6 +105,7 @@ fn draw_help_overlay(frame: &mut Frame) {
             Span::styled("── General ──", Style::default().fg(Color::Yellow)),
         ]),
         Line::from("  ?            Toggle this help"),
+        Line::from("  Shift+S      Open settings"),
         Line::from("  Ctrl+R       Refresh stats"),
         Line::from("  Shift+R      Trigger reindex"),
         Line::from("  Ctrl+C       Quit"),
@@ -123,6 +135,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         AppMode::Normal => ("NORMAL", Color::Blue),
         AppMode::Detail => ("DETAIL", Color::Magenta),
         AppMode::Help => ("HELP", Color::Yellow),
+        AppMode::Settings => ("SETTINGS", Color::Green),
     };
 
     let connection = if app.connected {
@@ -408,7 +421,7 @@ fn draw_error(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_keybindings_normal(frame: &mut Frame, app: &App, area: Rect) {
     let bindings = Paragraph::new(format!(
-        "Enter=Search/Detail  j/k=Nav  [/]=top_k({})  C-U=Clear  C-R=Refresh  C-c=Quit  ?=Help",
+        "Enter=Search  j/k=Nav  [/]=top_k({})  Shift+S=Settings  ?=Help  C-c=Quit",
         app.top_k
     ))
     .style(Style::default().fg(Color::DarkGray));
@@ -423,6 +436,169 @@ fn draw_keybindings_detail(frame: &mut Frame, area: Rect) {
     .style(Style::default().fg(Color::DarkGray));
 
     frame.render_widget(bindings, area);
+}
+
+fn draw_keybindings_settings(frame: &mut Frame, app: &App, area: Rect) {
+    let bindings = if app.settings.editing {
+        "Enter=Confirm  Esc=Cancel  ←→=Cursor  Type to edit"
+    } else if app.settings.has_changes() {
+        "j/k=Nav  Enter=Edit/Cycle  Tab=Cycle  C-S=Save  r=Reset  Esc=Back  C-c=Quit  [UNSAVED]"
+    } else {
+        "j/k=Nav  Enter=Edit/Cycle  Tab=Cycle  C-S=Save  Esc=Back  C-c=Quit"
+    };
+
+    let style = if app.settings.has_changes() {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    frame.render_widget(Paragraph::new(bindings).style(style), area);
+}
+
+/// Settings overlay showing editable configuration
+fn draw_settings_overlay(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Skip rendering on very small terminals
+    if area.width < 30 || area.height < 15 {
+        return;
+    }
+
+    // Calculate centered area (70% width, 80% height) with minimum sizes
+    let popup_width = (area.width * 70 / 100).min(80).max(30);
+    let popup_height = (area.height * 80 / 100).min(30).max(15);
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Clear the background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    frame.render_widget(clear, popup_area);
+
+    // Build settings list
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("Settings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            if app.settings.has_restart_required() {
+                Span::styled("⚠ Restart required for some changes", Style::default().fg(Color::Yellow))
+            } else if app.settings.has_changes() {
+                Span::styled("● Unsaved changes", Style::default().fg(Color::Yellow))
+            } else {
+                Span::styled("", Style::default())
+            },
+        ]),
+        Line::from(""),
+    ];
+
+    // Show settings message if any
+    if let Some((ref msg, is_error)) = app.settings_message {
+        let color = if is_error { Color::Red } else { Color::Green };
+        lines.push(Line::from(Span::styled(msg.as_str(), Style::default().fg(color))));
+        lines.push(Line::from(""));
+    }
+
+    // Setting items
+    for (i, setting) in app.settings.items.iter().enumerate() {
+        let is_selected = i == app.settings.selected;
+        let is_modified = setting.is_modified();
+
+        // Marker and name
+        let marker = if is_selected { "▶ " } else { "  " };
+        let name_style = if is_selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        // Value display - using owned strings for Span to avoid lifetime issues
+        let value_display: Vec<Span> = if app.settings.editing && is_selected {
+            // Show edit buffer with cursor (edit_buffer is Vec<char>)
+            let before_cursor: String = app.settings.edit_buffer.iter().take(app.settings.cursor_pos).collect();
+            let at_cursor: String = app.settings.edit_buffer.iter().skip(app.settings.cursor_pos).take(1).collect();
+            let after_cursor: String = app.settings.edit_buffer.iter().skip(app.settings.cursor_pos + 1).collect();
+
+            let cursor_char = if at_cursor.is_empty() { " ".to_string() } else { at_cursor };
+
+            vec![
+                Span::raw(before_cursor),
+                Span::styled(cursor_char, Style::default().bg(Color::White).fg(Color::Black)),
+                Span::raw(after_cursor),
+            ]
+        } else {
+            // Show current value
+            let value_color = if is_modified { Color::Yellow } else { Color::Green };
+            let modified_marker = if is_modified { " *" } else { "" };
+
+            // Show options hint if available
+            let options_hint = if setting.options.is_some() && is_selected {
+                " [Tab to cycle]"
+            } else {
+                ""
+            };
+
+            vec![
+                Span::styled(setting.value.clone(), Style::default().fg(value_color)),
+                Span::styled(modified_marker, Style::default().fg(Color::Yellow)),
+                Span::styled(options_hint, Style::default().fg(Color::Gray)),
+            ]
+        };
+
+        // Restart indicator
+        let restart_indicator = if setting.requires_restart && is_modified {
+            Span::styled(" (restart)", Style::default().fg(Color::Red))
+        } else {
+            Span::raw("")
+        };
+
+        let mut spans = vec![
+            Span::raw(marker),
+            Span::styled(&setting.display_name, name_style),
+            Span::raw(": "),
+        ];
+        spans.extend(value_display);
+        spans.push(restart_indicator);
+
+        let line_style = if is_selected {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            Style::default()
+        };
+
+        lines.push(Line::from(spans).style(line_style));
+
+        // Show description for selected item
+        if is_selected {
+            lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(&setting.description, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+            ]));
+        }
+    }
+
+    // Footer with .env path
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Config file: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            app.settings.env_path().display().to_string(),
+            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+        ),
+    ]));
+
+    let settings = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green))
+                .title(" Settings ")
+                .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(settings, popup_area);
 }
 
 /// Split-pane layout: results list on left, detail view on right

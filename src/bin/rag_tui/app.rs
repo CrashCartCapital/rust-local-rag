@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crate::api::{SearchResult, Stats};
 use crate::config::Config;
 use crate::constants::{DEFAULT_TOP_K, INPUT_DEBOUNCE_MS, MAX_TOP_K, MIN_TOP_K, TOP_K_STEP};
+use crate::settings::Settings;
 use crate::theme::Theme;
 
 /// App viewing mode
@@ -12,6 +13,7 @@ pub enum AppMode {
     Normal,
     Detail,
     Help,
+    Settings,
 }
 
 /// Server status enum for type-safe status handling
@@ -154,6 +156,11 @@ pub struct App {
     // Theming
     pub theme: Theme,
 
+    // Settings
+    pub settings: Settings,
+    /// Message to show after settings save
+    pub settings_message: Option<(String, bool)>, // (message, is_error)
+
     // Control
     pub should_quit: bool,
 }
@@ -188,6 +195,8 @@ impl App {
             detail_scroll: 0,
             terminal_size: (80, 24), // Default, updated on first resize event
             theme: Theme::from_name(&config.theme),
+            settings: Settings::new(),
+            settings_message: None,
             should_quit: false,
         }
     }
@@ -237,6 +246,8 @@ impl App {
             detail_scroll: 0,
             terminal_size: (80, 24), // Default, updated on first resize event
             theme: Theme::default(),
+            settings: Settings::new(),
+            settings_message: None,
             should_quit: false,
         }
     }
@@ -433,12 +444,53 @@ impl App {
         }
     }
 
+    // Settings mode
+    pub fn enter_settings_mode(&mut self) {
+        self.mode = AppMode::Settings;
+        self.settings_message = None;
+    }
+
+    pub fn exit_settings_mode(&mut self) {
+        if self.mode == AppMode::Settings {
+            // Cancel any in-progress edit
+            self.settings.cancel_edit();
+            self.mode = AppMode::Normal;
+        }
+    }
+
+    /// Save settings and update theme if needed
+    pub fn save_settings(&mut self) {
+        match self.settings.save_to_env() {
+            Ok(had_restart_required) => {
+                // save_to_env returns whether restart-required settings were modified
+                // (checked BEFORE marking as saved, so this is accurate)
+                let msg = if had_restart_required {
+                    "Settings saved! Restart server for changes to take effect."
+                } else {
+                    "Settings saved!"
+                };
+                self.settings_message = Some((msg.to_string(), false));
+
+                // Apply TUI-only settings immediately
+                if let Some(theme_setting) = self.settings.items.iter()
+                    .find(|s| s.env_var == "RAG_TUI_THEME")
+                {
+                    self.theme = Theme::from_name(&theme_setting.value);
+                }
+            }
+            Err(e) => {
+                self.settings_message = Some((format!("Save failed: {e}"), true));
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn toggle_mode(&mut self) {
         match self.mode {
             AppMode::Normal => self.enter_detail_mode(),
             AppMode::Detail => self.exit_detail_mode(),
             AppMode::Help => self.exit_help_mode(),
+            AppMode::Settings => self.exit_settings_mode(),
         }
     }
 
