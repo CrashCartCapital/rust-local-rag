@@ -122,6 +122,11 @@ impl RerankerService {
         Ok(service)
     }
 
+    /// Returns the name of the reranking model being used.
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     /// Load prompt template from external file or fall back to default
     fn load_prompt_template() -> String {
         let prompts_dir = std::env::var("PROMPTS_DIR").unwrap_or_else(|_| "./prompts".to_string());
@@ -271,7 +276,7 @@ Score (0-100):"#.to_string()
             stream: false,
             options: Some(OllamaOptions {
                 stop: Some(vec!["<|end|>".to_string(), "<|user|>".to_string()]),
-                temperature: Some(0.1), // Low temperature for consistent scoring
+                temperature: Some(0.0), // Zero temperature for deterministic scoring
             }),
         };
         let phase2_elapsed = phase2_start.elapsed().as_millis();
@@ -359,9 +364,9 @@ Score (0-100):"#.to_string()
         );
 
         // Reconstruct full JSON by prepending the pre-fill from the prompt
-        // Prompt ends with: {"classification": "
-        // Model completes: DIRECT_ANSWER", "reasoning": "...", "score": 95}
-        let full_json = format!(r#"{{"classification": "{response}"#);
+        // Prompt ends with: {"score":
+        // Model completes: 45, "reason": "..."}
+        let full_json = format!(r#"{{"score":{response}"#);
 
         // Try to parse as JSON and extract score
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&full_json) {

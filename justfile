@@ -23,21 +23,33 @@ up:
     set -e
     echo "Starting rust-local-rag server..."
     cargo build --release
-    DEV=true ./target/release/rust-local-rag &
+    mkdir -p logs
+    ./target/release/rust-local-rag > logs/server.log 2>&1 &
+    SERVER_PID=$!
+    echo "Server started (PID: $SERVER_PID, logs: logs/server.log)"
     sleep 2
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        echo "Server failed to start. Check logs/server.log"
+        exit 1
+    fi
     echo "Launching TUI..."
     cargo run --bin rag-tui --release
 
-# Start server only (foreground, with logs)
+# Start server only (foreground, with logs to console)
 server:
     DEV=true cargo run --release
 
-# Start server in background
+# Start server in background (logs to file)
 server-bg:
     #!/usr/bin/env bash
     cargo build --release
-    DEV=true ./target/release/rust-local-rag &
-    echo "Server started in background (PID: $!)"
+    mkdir -p logs
+    ./target/release/rust-local-rag > logs/server.log 2>&1 &
+    echo "Server started in background (PID: $!, logs: logs/server.log)"
+
+# Tail server logs
+logs:
+    @tail -f logs/server.log
 
 # Stop background server
 server-stop:

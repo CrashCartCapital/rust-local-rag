@@ -521,24 +521,60 @@ impl RagEngine {
         let mut seen: HashSet<String> = HashSet::new();
 
         if !reranked.is_empty() {
-            for result in reranked {
-                if let Some(candidate) = candidate_map.get(&result.chunk_id)
-                    && seen.insert(result.chunk_id.clone()) {
-                        ordered_results.push(SearchResult {
-                            text: candidate.text.clone(),
-                            score: result.relevance,
-                            document: candidate.document.clone(),
-                            chunk_id: candidate.chunk_id.clone(),
-                            chunk_index: candidate.chunk_index,
-                            page_number: candidate.page_number,
-                            section: candidate.section.clone(),
-                        });
-                    }
+            // Calculate max scores for per-query normalization
+            let max_reranker = reranked
+                .iter()
+                .map(|r| r.relevance)
+                .fold(0.0_f32, f32::max)
+                .max(f32::EPSILON);
+            let max_initial = candidates
+                .iter()
+                .map(|c| c.initial_score)
+                .fold(0.0_f32, f32::max)
+                .max(f32::EPSILON);
 
-                if ordered_results.len() == top_k {
-                    break;
+            // Build results with blended scores
+            for result in &reranked {
+                if let Some(candidate) = candidate_map.get(&result.chunk_id)
+                    && seen.insert(result.chunk_id.clone())
+                {
+                    // Normalize both scores to [0,1] range within this query's candidates
+                    let reranker_norm = result.relevance / max_reranker;
+                    let initial_norm = candidate.initial_score / max_initial;
+
+                    // Blend: reranker dominates (70%) but initial score provides discrimination (30%)
+                    let blended_score =
+                        RERANKER_WEIGHT * reranker_norm + INITIAL_SCORE_WEIGHT * initial_norm;
+
+                    tracing::debug!(
+                        chunk_id = %candidate.chunk_id,
+                        reranker = %result.relevance,
+                        initial = %candidate.initial_score,
+                        blended = %blended_score,
+                        "Score blending"
+                    );
+
+                    ordered_results.push(SearchResult {
+                        text: candidate.text.clone(),
+                        score: blended_score,
+                        document: candidate.document.clone(),
+                        chunk_id: candidate.chunk_id.clone(),
+                        chunk_index: candidate.chunk_index,
+                        page_number: candidate.page_number,
+                        section: candidate.section.clone(),
+                    });
                 }
             }
+
+            // Re-sort by blended score (reranked order may differ after blending)
+            ordered_results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Truncate to top_k
+            ordered_results.truncate(top_k);
         }
 
         if ordered_results.len() < top_k {
@@ -592,10 +628,14 @@ impl RagEngine {
             "ready"
         };
 
+        let reranker_model = self.reranker.as_ref().map(|r| r.model_name());
+
         serde_json::json!({
             "documents": doc_count,
             "chunks": chunk_count,
-            "status": status
+            "status": status,
+            "embedding_model": self.embedding_model(),
+            "reranker_model": reranker_model
         })
     }
 
@@ -1478,6 +1518,11 @@ impl SimpleRng {
 const NUM_HYPERPLANES: usize = 32;
 const EMBEDDING_WEIGHT: f32 = 0.7;
 const LEXICAL_WEIGHT: f32 = 0.3;
+
+// Score blending weights for combining reranker with initial retrieval scores
+// Reranker provides semantic relevance, initial score provides discrimination
+const RERANKER_WEIGHT: f32 = 0.7;
+const INITIAL_SCORE_WEIGHT: f32 = 0.3;
 const MAX_SINGLE_BIT_NEIGHBORS: usize = 32;
 const MAX_TOTAL_NEIGHBORS: usize = 64;
 
