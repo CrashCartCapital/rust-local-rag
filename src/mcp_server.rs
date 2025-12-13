@@ -46,6 +46,7 @@ pub struct CalibrateRerankerRequest {
 
 // Empty param structs for tools with no parameters
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 pub struct EmptyParams {}
 
 #[derive(Clone)]
