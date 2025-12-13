@@ -355,7 +355,8 @@ impl RagEngine {
             }
 
             // Use pre-generated embeddings from batch call
-            let embedding = embeddings[embedding_index].clone();
+            let mut embedding = embeddings[embedding_index].clone();
+            normalize(&mut embedding);
             embedding_index += 1;
 
             let chunk = DocumentChunk {
@@ -420,7 +421,8 @@ impl RagEngine {
             return Ok(vec![]);
         }
 
-        let query_embedding = self.embedding_service.get_query_embedding(query).await?;
+        let mut query_embedding = self.embedding_service.get_query_embedding(query).await?;
+        normalize(&mut query_embedding);
 
         let ann_candidate_iter = match &self.ann_index {
             Some(index) => Box::new(
@@ -435,7 +437,7 @@ impl RagEngine {
 
         for chunk_id in ann_candidate_iter {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
-                let embedding_score = cosine_similarity(&query_embedding, &chunk.embedding);
+                let embedding_score = dot_product(&query_embedding, &chunk.embedding);
                 scores.push((embedding_score, chunk.clone()));
             }
         }
@@ -488,7 +490,8 @@ impl RagEngine {
         let top_k = top_k.max(1);
         tracing::debug!("Searching for: '{}'", query);
 
-        let query_embedding = self.embedding_service.get_query_embedding(query).await?;
+        let mut query_embedding = self.embedding_service.get_query_embedding(query).await?;
+        normalize(&mut query_embedding);
 
         let ann_candidate_iter = match &self.ann_index {
             Some(index) => Box::new(
@@ -520,7 +523,7 @@ impl RagEngine {
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
-                let embedding_score = cosine_similarity(&query_embedding, &chunk.embedding);
+                let embedding_score = dot_product(&query_embedding, &chunk.embedding);
                 let lexical_score = lexical_map
                     .get(&chunk_id)
                     .map(|score| score / max_lexical)
@@ -796,7 +799,7 @@ impl RagEngine {
                 // Calculate max similarity to any already-selected result
                 let max_similarity = selected
                     .iter()
-                    .map(|s| Self::cosine_similarity(&candidate.embedding, &s.embedding))
+                    .map(|s| dot_product(&candidate.embedding, &s.embedding))
                     .filter(|sim| sim.is_finite()) // Filter out NaN/Inf similarities
                     .fold(0.0_f32, |a, b| a.max(b));
 
@@ -838,27 +841,10 @@ impl RagEngine {
     /// Calculate cosine similarity between two embeddings.
     /// Returns a value in [-1, 1] where 1 means identical direction.
     /// Returns 0.0 for edge cases (empty, mismatched length, near-zero norm).
+    #[allow(dead_code)] // Used in tests and legacy paths
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        // Epsilon for near-zero norm detection (prevents division instability)
-        const EPSILON: f32 = 1e-10;
-
-        if a.len() != b.len() || a.is_empty() {
-            return 0.0;
-        }
-
-        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        // Use epsilon threshold instead of exact zero check for numerical stability
-        if norm_a < EPSILON || norm_b < EPSILON {
-            return 0.0;
-        }
-
-        let similarity = dot_product / (norm_a * norm_b);
-
-        // Clamp to valid range to handle floating point errors
-        similarity.clamp(-1.0, 1.0)
+        // We use the same epsilon as the free function below to match behavior
+        cosine_similarity(a, b)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
@@ -1687,6 +1673,12 @@ impl RagEngine {
         }
 
         self.chunks = chunks;
+        // Normalize all embeddings to ensure fast cosine similarity optimization works
+        // This handles legacy data that might not be normalized
+        for chunk in self.chunks.values_mut() {
+            normalize(&mut chunk.embedding);
+        }
+
         self.needs_reindex = needs_reindex;
         self.document_hashes = document_hashes;
 
@@ -1746,20 +1738,44 @@ fn default_page_number() -> usize {
     0
 }
 
+#[allow(dead_code)] // Used in tests
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
     }
 
+    // Epsilon for near-zero norm detection (prevents division instability)
+    const EPSILON: f32 = 1e-10;
+
     let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
+    if norm_a < EPSILON || norm_b < EPSILON {
+        return 0.0;
     } else {
-        dot_product / (norm_a * norm_b)
+        (dot_product / (norm_a * norm_b)).clamp(-1.0, 1.0)
     }
+}
+
+/// Normalize a vector to unit length in-place.
+/// If the vector has zero or very small norm, it is left unchanged.
+fn normalize(v: &mut [f32]) {
+    let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+    if norm_sq > 1e-20 {
+        let norm = norm_sq.sqrt();
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Calculate dot product between two vectors.
+/// Assumes vectors are of the same length (or truncates to shorter length).
+/// If vectors are normalized, this is equivalent to cosine similarity.
+#[inline(always)]
+fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 struct SimpleRng {
@@ -2757,6 +2773,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dot_product_equivalence_when_normalized() {
+        let dim = 384;
+        let mut vec_a: Vec<f32> = (0..dim).map(|i| (i as f32) / dim as f32).collect();
+        let mut vec_b: Vec<f32> = (0..dim).map(|i| ((i + 10) as f32) / dim as f32).collect();
+
+        // Calculate cosine similarity on unnormalized vectors
+        let cos_sim = RagEngine::cosine_similarity(&vec_a, &vec_b);
+
+        // Normalize vectors
+        normalize(&mut vec_a);
+        normalize(&mut vec_b);
+
+        // Calculate dot product on normalized vectors
+        let dot_prod = dot_product(&vec_a, &vec_b);
+
+        // Should be equal within floating point error
+        assert!(
+            (cos_sim - dot_prod).abs() < 1e-6,
+            "Dot product of normalized vectors should equal cosine similarity: {} vs {}",
+            cos_sim,
+            dot_prod
+        );
+    }
+
     // Helper function to create test SearchResultWithEmbedding
     fn make_test_candidate(id: &str, score: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
         SearchResultWithEmbedding {
@@ -2809,7 +2850,7 @@ mod tests {
 
                 let max_similarity = selected
                     .iter()
-                    .map(|s| RagEngine::cosine_similarity(&candidate.embedding, &s.embedding))
+                    .map(|s| dot_product(&candidate.embedding, &s.embedding))
                     .filter(|sim| sim.is_finite())
                     .fold(0.0_f32, |a, b| a.max(b));
 
