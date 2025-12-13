@@ -2773,6 +2773,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dot_product_equivalence_when_normalized() {
+        let dim = 384;
+        let mut vec_a: Vec<f32> = (0..dim).map(|i| (i as f32) / dim as f32).collect();
+        let mut vec_b: Vec<f32> = (0..dim).map(|i| ((i + 10) as f32) / dim as f32).collect();
+
+        // Calculate cosine similarity on unnormalized vectors
+        let cos_sim = RagEngine::cosine_similarity(&vec_a, &vec_b);
+
+        // Normalize vectors
+        normalize(&mut vec_a);
+        normalize(&mut vec_b);
+
+        // Calculate dot product on normalized vectors
+        let dot_prod = dot_product(&vec_a, &vec_b);
+
+        // Should be equal within floating point error
+        assert!(
+            (cos_sim - dot_prod).abs() < 1e-6,
+            "Dot product of normalized vectors should equal cosine similarity: {} vs {}",
+            cos_sim,
+            dot_prod
+        );
+    }
+
     // Helper function to create test SearchResultWithEmbedding
     fn make_test_candidate(id: &str, score: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
         SearchResultWithEmbedding {
@@ -2825,7 +2850,7 @@ mod tests {
 
                 let max_similarity = selected
                     .iter()
-                    .map(|s| RagEngine::cosine_similarity(&candidate.embedding, &s.embedding))
+                    .map(|s| dot_product(&candidate.embedding, &s.embedding))
                     .filter(|sim| sim.is_finite())
                     .fold(0.0_f32, |a, b| a.max(b));
 
