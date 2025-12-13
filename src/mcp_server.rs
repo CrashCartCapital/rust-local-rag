@@ -46,6 +46,7 @@ pub struct CalibrateRerankerRequest {
 
 // Empty param structs for tools with no parameters
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 pub struct EmptyParams {}
 
 #[derive(Clone)]
@@ -92,41 +93,12 @@ impl RagMcpServer {
             .await
         {
             Ok(results) => {
-                let formatted_results = if results.is_empty() {
-                    "No results found.".to_string()
-                } else {
-                    results
-                        .iter()
-                        .enumerate()
-                        .map(|(i, result)| {
-                            let provenance = if result.page_number > 0 {
-                                format!("{} (page {})", result.document, result.page_number)
-                            } else {
-                                result.document.clone()
-                            };
-                            let section = result
-                                .section
-                                .as_ref()
-                                .map(|s| format!("Section: {s}\n"))
-                                .unwrap_or_default();
-                            format!(
-                                "**Result {}** (Relevance: {:.3}) [{}] (Chunk: {} / idx {})\n{}{}\n",
-                                i + 1,
-                                result.score,
-                                provenance,
-                                result.chunk_id,
-                                result.chunk_index,
-                                section,
-                                result.text
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n---\n\n")
-                };
+                let count = results.len();
+                let formatted_results = format_search_results(&results);
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Found {} results for '{}':\n\n{}",
-                    results.len(),
+                    count,
                     query,
                     formatted_results
                 ))]))
@@ -622,4 +594,96 @@ pub async fn start_mcp_server(
         .await?;
 
     Ok(())
+}
+
+fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String {
+    if results.is_empty() {
+        return "No results found.".to_string();
+    }
+
+    results
+        .iter()
+        .enumerate()
+        .map(|(i, result)| {
+            let provenance = if result.page_number > 0 {
+                format!("{} (page {})", result.document, result.page_number)
+            } else {
+                result.document.clone()
+            };
+            let section = result
+                .section
+                .as_ref()
+                .map(|s| format!("*Section: {s}*\n"))
+                .unwrap_or_default();
+
+            // Format score as percentage
+            let percentage = (result.score * 100.0).round() as i32;
+
+            // Format: **1. [85%] document.pdf (page 5)**
+            // *Section: Introduction*
+            //
+            // content...
+            format!(
+                "**{}. [{}%] {}**\n{}\n{}\n",
+                i + 1,
+                percentage,
+                provenance,
+                section,
+                result.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rag_engine::SearchResult;
+
+    #[test]
+    fn test_format_search_results() {
+        let results = vec![
+            SearchResult {
+                text: "The quick brown fox jumps over the lazy dog.".to_string(),
+                score: 0.8531,
+                document: "fox.pdf".to_string(),
+                chunk_id: "chunk-123".to_string(),
+                chunk_index: 0,
+                page_number: 1,
+                section: Some("Intro".to_string()),
+                embedding_score: None,
+                lexical_score: None,
+                initial_score: None,
+                reranker_score: None,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            SearchResult {
+                text: "Lorem ipsum dolor sit amet.".to_string(),
+                score: 0.725,
+                document: "lorem.pdf".to_string(),
+                chunk_id: "chunk-456".to_string(),
+                chunk_index: 5,
+                page_number: 10,
+                section: None,
+                embedding_score: None,
+                lexical_score: None,
+                initial_score: None,
+                reranker_score: None,
+                yes_logprob: None,
+                no_logprob: None,
+            }
+        ];
+
+        let formatted = format_search_results(&results);
+
+        // This confirms the NEW format logic works as expected.
+        // **1. [85%] fox.pdf (page 1)**
+        assert!(formatted.contains("**1. [85%] fox.pdf (page 1)**"));
+        assert!(formatted.contains("*Section: Intro*"));
+        assert!(formatted.contains("The quick brown fox"));
+        assert!(formatted.contains("---\n\n"));
+        assert!(formatted.contains("**2. [73%] lorem.pdf (page 10)**"));
+    }
 }
