@@ -1388,6 +1388,22 @@ impl RagEngine {
             }
         }
 
+        // Initialize ANN index if missing but we have chunks (e.g. after restart)
+        if self.ann_index.is_none() && !self.chunks.is_empty() {
+            // Use the dimension of the first chunk's embedding
+            if let Some(first_chunk) = self.chunks.values().next() {
+                let dim = first_chunk.embedding.len();
+                if dim > 0 {
+                    tracing::info!(
+                        "Rebuilding ANN index with dimension {} for {} chunks...",
+                        dim,
+                        self.chunks.len()
+                    );
+                    self.ann_index = Some(AnnIndex::new(dim));
+                }
+            }
+        }
+
         // Validate ANN index if present
         if let Some(ann_index) = &mut self.ann_index {
             // Remove stale entries from ANN
