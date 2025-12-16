@@ -98,9 +98,7 @@ impl RagMcpServer {
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Found {} results for '{}':\n\n{}",
-                    count,
-                    query,
-                    formatted_results
+                    count, query, formatted_results
                 ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -115,7 +113,7 @@ impl RagMcpServer {
         let documents = engine.list_documents();
 
         let response = if documents.is_empty() {
-            "No documents uploaded yet.".to_string()
+            "No documents uploaded yet. Please add PDF files to your documents directory and run `start_reindex`.".to_string()
         } else {
             format!(
                 "Uploaded documents ({}):\n{}",
@@ -598,7 +596,7 @@ pub async fn start_mcp_server(
 
 fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String {
     if results.is_empty() {
-        return "No results found.".to_string();
+        return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`.".to_string();
     }
 
     results
@@ -619,16 +617,38 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String 
             // Format score as percentage
             let percentage = (result.score * 100.0).round() as i32;
 
+            // Generate score breakdown string
+            let mut score_parts = Vec::new();
+            if let Some(s) = result.embedding_score {
+                score_parts.push(format!("Semantic: {:.2}", s));
+            }
+            if let Some(s) = result.lexical_score {
+                if s > 0.0 {
+                    score_parts.push(format!("Keyword: {:.2}", s));
+                }
+            }
+            if let Some(s) = result.reranker_score {
+                score_parts.push(format!("Reranker: {:.2}", s));
+            }
+
+            let score_breakdown = if !score_parts.is_empty() {
+                format!("*Scores: {}*\n", score_parts.join(" | "))
+            } else {
+                String::new()
+            };
+
             // Format: **1. [85%] document.pdf (page 5)**
             // *Section: Introduction*
+            // *Scores: Semantic: 0.82 | Keyword: 0.65*
             //
             // content...
             format!(
-                "**{}. [{}%] {}**\n{}\n{}\n",
+                "**{}. [{}%] {}**\n{}{}{}\n",
                 i + 1,
                 percentage,
                 provenance,
                 section,
+                score_breakdown,
                 result.text
             )
         })
@@ -652,9 +672,9 @@ mod tests {
                 chunk_index: 0,
                 page_number: 1,
                 section: Some("Intro".to_string()),
-                embedding_score: None,
-                lexical_score: None,
-                initial_score: None,
+                embedding_score: Some(0.82),
+                lexical_score: Some(0.65),
+                initial_score: Some(0.7),
                 reranker_score: None,
                 yes_logprob: None,
                 no_logprob: None,
@@ -667,13 +687,13 @@ mod tests {
                 chunk_index: 5,
                 page_number: 10,
                 section: None,
-                embedding_score: None,
-                lexical_score: None,
+                embedding_score: Some(0.72),
+                lexical_score: None, // Missing score
                 initial_score: None,
-                reranker_score: None,
+                reranker_score: Some(0.95), // Has reranker score
                 yes_logprob: None,
                 no_logprob: None,
-            }
+            },
         ];
 
         let formatted = format_search_results(&results);
@@ -682,8 +702,12 @@ mod tests {
         // **1. [85%] fox.pdf (page 1)**
         assert!(formatted.contains("**1. [85%] fox.pdf (page 1)**"));
         assert!(formatted.contains("*Section: Intro*"));
+        assert!(formatted.contains("Scores: Semantic: 0.82 | Keyword: 0.65"));
         assert!(formatted.contains("The quick brown fox"));
+
         assert!(formatted.contains("---\n\n"));
+
         assert!(formatted.contains("**2. [73%] lorem.pdf (page 10)**"));
+        assert!(formatted.contains("Scores: Semantic: 0.72 | Reranker: 0.95"));
     }
 }
