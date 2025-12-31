@@ -97,8 +97,7 @@ impl RagMcpServer {
                 let formatted_results = format_search_results(&results);
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Found {} results for '{}':\n\n{}",
-                    count, query, formatted_results
+                    "Found {count} results for '{query}':\n\n{formatted_results}"
                 ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -620,16 +619,16 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String 
             // Generate score breakdown string
             let mut score_parts = Vec::new();
             if let Some(s) = result.embedding_score {
-                score_parts.push(format!("Semantic: {:.2}", s));
+                score_parts.push(format!("Semantic: {s:.2}"));
             }
             if let Some(s) = result.lexical_score {
                 #[allow(clippy::collapsible_if)]
                 if s > 0.0 {
-                    score_parts.push(format!("Keyword: {:.2}", s));
+                    score_parts.push(format!("Keyword: {s:.2}"));
                 }
             }
             if let Some(s) = result.reranker_score {
-                score_parts.push(format!("Reranker: {:.2}", s));
+                score_parts.push(format!("Reranker: {s:.2}"));
             }
 
             let score_breakdown = if !score_parts.is_empty() {

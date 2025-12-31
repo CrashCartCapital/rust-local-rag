@@ -773,15 +773,31 @@ Answer:"#
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_load_prompt_template_default() {
-        // Ensure PROMPTS_DIR is set to a non-existent directory to trigger default
-        // Safety: safe to set env var in test if not threaded with other env var access
+        // Save original value
+        let original = std::env::var("PROMPTS_DIR").ok();
+
+        // SAFETY: This test runs serially (via #[serial]) to prevent concurrent
+        // env var access. We save and restore the original value.
         unsafe {
+            // Set to non-existent directory to trigger default template
             std::env::set_var("PROMPTS_DIR", "/non/existent/dir");
         }
+
         let template = RerankerService::load_prompt_template().await;
+
+        // SAFETY: Restoring original value, still in serial context
+        unsafe {
+            match original {
+                Some(val) => std::env::set_var("PROMPTS_DIR", val),
+                None => std::env::remove_var("PROMPTS_DIR"),
+            }
+        }
+
         assert!(template.contains("Consider semantic meaning"));
     }
 }

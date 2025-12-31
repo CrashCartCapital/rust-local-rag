@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&documents_dir)?;
 
     // Initialize Job Manager (SQLite)
-    let db_path = format!("sqlite:{}/jobs.db", data_dir);
+    let db_path = format!("sqlite:{data_dir}/jobs.db");
     let job_manager = Arc::new(JobManager::new(&db_path).await?);
 
     // Initialize RagEngine (Chunks + Index)
