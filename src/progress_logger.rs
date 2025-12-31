@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
 /// Processing stage for reindexing
@@ -111,14 +111,15 @@ pub struct ProgressLogger {
 
 impl ProgressLogger {
     /// Create a new progress logger in the specified directory
-    pub fn new(log_dir: &str) -> Result<Self> {
-        std::fs::create_dir_all(log_dir)?;
+    pub async fn new(log_dir: &str) -> Result<Self> {
+        tokio::fs::create_dir_all(log_dir).await?;
         let log_path = format!("{log_dir}/progress_tracking.log");
 
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&log_path)?;
+            .open(&log_path)
+            .await?;
 
         let writer = BufWriter::new(file);
 
@@ -172,8 +173,8 @@ impl ProgressLogger {
         );
 
         let mut guard = self.writer.lock().await;
-        guard.write_all(line.as_bytes())?;
-        guard.flush()?;
+        guard.write_all(line.as_bytes()).await?;
+        guard.flush().await?;
 
         Ok(())
     }
@@ -218,8 +219,8 @@ impl ProgressLogger {
         );
 
         let mut guard = self.writer.lock().await;
-        guard.write_all(line.as_bytes())?;
-        guard.flush()?;
+        guard.write_all(line.as_bytes()).await?;
+        guard.flush().await?;
 
         Ok(())
     }
