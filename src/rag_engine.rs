@@ -843,23 +843,9 @@ impl RagEngine {
     /// Returns 0.0 for edge cases (empty, mismatched length, near-zero norm).
     #[allow(dead_code)] // Used in tests and legacy paths
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        // We use the same epsilon as the free function below to match behavior
-        if a.len() != b.len() {
-            return 0.0;
-        }
-
-        // Epsilon for near-zero norm detection (prevents division instability)
-        const EPSILON: f32 = 1e-10;
-
-        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        if norm_a < EPSILON || norm_b < EPSILON {
-            0.0
-        } else {
-            (dot_product / (norm_a * norm_b)).clamp(-1.0, 1.0)
-        }
+        // Delegate to the module-level free function (not infinite recursion -
+        // Rust resolves bare function calls to module scope, not Self::)
+        cosine_similarity(a, b)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
