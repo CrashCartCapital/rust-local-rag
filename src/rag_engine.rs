@@ -473,6 +473,17 @@ impl RagEngine {
         top_k: usize,
         weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
+        let results = self.search_internal(query, top_k, weights).await?;
+        Ok(results.into_iter().map(|r| r.result).collect())
+    }
+
+    /// Internal search implementation that returns results with embeddings.
+    async fn search_internal(
+        &self,
+        query: &str,
+        top_k: usize,
+        weights: Option<&QueryWeights>,
+    ) -> Result<Vec<SearchResultWithEmbedding>> {
         if self.chunks.is_empty() {
             return Ok(vec![]);
         }
@@ -634,29 +645,32 @@ impl RagEngine {
                         "Score blending"
                     );
 
-                    ordered_results.push(SearchResult {
-                        text: candidate.text.clone(),
-                        score: blended_score,
-                        document: candidate.document.clone(),
-                        chunk_id: candidate.chunk_id.clone(),
-                        chunk_index: candidate.chunk_index,
-                        page_number: candidate.page_number,
-                        section: candidate.section.clone(),
-                        // Detailed score breakdown for TUI display
-                        embedding_score: Some(candidate.embedding_score),
-                        lexical_score: Some(candidate.lexical_score),
-                        initial_score: Some(candidate.initial_score),
-                        reranker_score: Some(result.relevance),
-                        yes_logprob: result.yes_logprob,
-                        no_logprob: result.no_logprob,
+                    ordered_results.push(SearchResultWithEmbedding {
+                        result: SearchResult {
+                            text: candidate.text.clone(),
+                            score: blended_score,
+                            document: candidate.document.clone(),
+                            chunk_id: candidate.chunk_id.clone(),
+                            chunk_index: candidate.chunk_index,
+                            page_number: candidate.page_number,
+                            section: candidate.section.clone(),
+                            // Detailed score breakdown for TUI display
+                            embedding_score: Some(candidate.embedding_score),
+                            lexical_score: Some(candidate.lexical_score),
+                            initial_score: Some(candidate.initial_score),
+                            reranker_score: Some(result.relevance),
+                            yes_logprob: result.yes_logprob,
+                            no_logprob: result.no_logprob,
+                        },
+                        embedding: candidate.embedding.clone(),
                     });
                 }
             }
 
             // Re-sort by blended score (reranked order may differ after blending)
             ordered_results.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
+                b.result.score
+                    .partial_cmp(&a.result.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
 
@@ -677,21 +691,24 @@ impl RagEngine {
                 }
 
                 if seen.insert(candidate.chunk_id.clone()) {
-                    ordered_results.push(SearchResult {
-                        text: candidate.text.clone(),
-                        score: candidate.initial_score,
-                        document: candidate.document.clone(),
-                        chunk_id: candidate.chunk_id.clone(),
-                        chunk_index: candidate.chunk_index,
-                        page_number: candidate.page_number,
-                        section: candidate.section.clone(),
-                        // No reranking for fallback results
-                        embedding_score: Some(candidate.embedding_score),
-                        lexical_score: Some(candidate.lexical_score),
-                        initial_score: Some(candidate.initial_score),
-                        reranker_score: None,
-                        yes_logprob: None,
-                        no_logprob: None,
+                    ordered_results.push(SearchResultWithEmbedding {
+                        result: SearchResult {
+                            text: candidate.text.clone(),
+                            score: candidate.initial_score,
+                            document: candidate.document.clone(),
+                            chunk_id: candidate.chunk_id.clone(),
+                            chunk_index: candidate.chunk_index,
+                            page_number: candidate.page_number,
+                            section: candidate.section.clone(),
+                            // No reranking for fallback results
+                            embedding_score: Some(candidate.embedding_score),
+                            lexical_score: Some(candidate.lexical_score),
+                            initial_score: Some(candidate.initial_score),
+                            reranker_score: None,
+                            yes_logprob: None,
+                            no_logprob: None,
+                        },
+                        embedding: candidate.embedding.clone(),
                     });
                 }
             }
@@ -732,25 +749,11 @@ impl RagEngine {
         // Fetch more candidates than needed for MMR selection
         // We need extra candidates because MMR may skip similar ones
         let candidate_pool_size = (top_k * 3).max(top_k + 10);
-        let candidates = self.search(query, candidate_pool_size, weights).await?;
+        let candidates_with_embeddings = self.search_internal(query, candidate_pool_size, weights).await?;
 
-        if candidates.is_empty() {
+        if candidates_with_embeddings.is_empty() {
             return Ok(vec![]);
         }
-
-        // Build candidates with embeddings for MMR
-        let candidates_with_embeddings: Vec<SearchResultWithEmbedding> = candidates
-            .into_iter()
-            .filter_map(|result| {
-                // Look up the embedding from our chunks
-                self.chunks
-                    .get(&result.chunk_id)
-                    .map(|chunk| SearchResultWithEmbedding {
-                        result,
-                        embedding: chunk.embedding.clone(),
-                    })
-            })
-            .collect();
 
         // Apply MMR diversification
         let diversified = self.mmr_diversify(candidates_with_embeddings, top_k, diversity_factor);
