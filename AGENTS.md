@@ -32,65 +32,15 @@ If your environment provides a sandbox/approval model, obey it. Don’t run dest
 
 ---
 
-## Repo Layout (key paths)
+## Repo Layout
 
-- `src/main.rs`: entrypoint; env + logging; initializes engine + job system; starts server
-- `src/mcp_server.rs`: MCP tool definitions + Streamable HTTP server + health/eval endpoints
-- `src/rag_engine.rs`: chunking, persistence, retrieval, MMR diversification, scoring + reranking orchestration
-- `src/embeddings.rs`: Ollama embeddings client; batch embedding; query LRU cache
-- `src/reranker.rs`: optional Ollama-based reranker; prompt override via `PROMPTS_DIR/prompts/reranker.txt`
-- `src/job_manager.rs`: SQLite job persistence; atomic “single active job” semantics
-- `src/worker.rs`: background worker supervisor; resumable jobs; per-document locking
-- `src/bin/rag_tui/*`: TUI client for the HTTP endpoints
-- `docs/*`: setup/usage/eval specs and debugging notes
-- `eval/*`: Python evaluation harness (talks to HTTP endpoints)
-- `.mcp.json`: local MCP wiring (includes this server + `mcpjungle-ccc`)
-- `.cargo/config.toml`: cargo aliases; **warnings are errors** via `-D warnings`
-
----
-
-## Build, Run, Test (common commands)
-
-Preferred (repo-provided):
-- `make run` (dev logging)
-- `make ci` (check + lint + test + build)
-- `make fmt`, `make clippy`, `make test`
-
-Cargo aliases (from `.cargo/config.toml`):
-- `cargo c` (check), `cargo cc` (clippy), `cargo ccd` (clippy -D warnings), `cargo f` (fmt), `cargo t` (test)
-
-TUI (via `justfile`):
-- `just tui` (runs `rag-tui` against `http://localhost:3046`)
-- `just up` (build server, run in background, then launch TUI)
+See **[docs/development.md](docs/development.md)** for the canonical repository layout and build instructions.
 
 ---
 
 ## Runtime Configuration (env vars)
 
-Core:
-- `DATA_DIR` (default `./data`)
-- `DOCUMENTS_DIR` (default `./documents`)
-- `LOG_DIR` (default `/var/log/rust-local-rag` if writable else `./logs`)
-- `LOG_LEVEL` (default `info`)
-- `LOG_MAX_MB` (default `5`)
-- `DEV` / `DEVELOPMENT` (prefer console logs)
-- `CONSOLE_LOGS` (force console logs)
-
-Ollama:
-- `OLLAMA_URL` (default `http://localhost:11434`)
-- `OLLAMA_EMBEDDING_MODEL` (default `nomic-embed-text`)
-- `OLLAMA_RERANK_MODEL` (default `llama3.1`; reranker init is non-fatal if unavailable)
-- `PROMPTS_DIR` (default `./prompts`) — prompt override at `prompts/reranker.txt`
-
-MCP/HTTP:
-- `MCP_HTTP_BIND` (default `127.0.0.1:3046`)
-- `MCP_HTTP_ENDPOINT` (default `/mcp`)
-
-Retrieval weights (global defaults; may be overridden per-query):
-- `RAG_EMBEDDING_WEIGHT` (default `0.7`)
-- `RAG_LEXICAL_WEIGHT` (default `0.3`)
-- `RAG_RERANKER_WEIGHT` (default `0.7`)
-- `RAG_INITIAL_SCORE_WEIGHT` (default `0.3`)
+See **[docs/configuration.md](docs/configuration.md)** for the canonical list of environment variables and configuration options.
 
 ---
 
@@ -195,4 +145,3 @@ When using ccc-code-mode tools:
 1. Always `search_workflows` before creating new workflows
 2. If found: `execute_workflow`
 3. If not found: use `execute_code` (one-off) and optionally `save_workflow` (reusable)
-
