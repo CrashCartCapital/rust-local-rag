@@ -181,7 +181,7 @@ impl WorkerSupervisor {
         });
 
         // Create progress logger
-        let progress_logger = match ProgressLogger::new(&log_dir) {
+        let progress_logger = match ProgressLogger::new(&log_dir).await {
             Ok(logger) => Some(logger),
             Err(e) => {
                 tracing::error!("Failed to create progress logger: {}", e);
