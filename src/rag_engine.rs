@@ -844,7 +844,22 @@ impl RagEngine {
     #[allow(dead_code)] // Used in tests and legacy paths
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         // We use the same epsilon as the free function below to match behavior
-        cosine_similarity(a, b)
+        if a.len() != b.len() {
+            return 0.0;
+        }
+
+        // Epsilon for near-zero norm detection (prevents division instability)
+        const EPSILON: f32 = 1e-10;
+
+        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if norm_a < EPSILON || norm_b < EPSILON {
+            0.0
+        } else {
+            (dot_product / (norm_a * norm_b)).clamp(-1.0, 1.0)
+        }
     }
 
     pub fn list_documents(&self) -> Vec<String> {
@@ -1131,6 +1146,7 @@ impl RagEngine {
         }
 
         // Finalize remaining sentences
+        #[allow(clippy::collapsible_if)]
         if !window.is_empty() {
             if let Some((text, metadata)) = Self::finalize_chunk(&window, &sentences, 0) {
                 fragments.push(ChunkFragment::from_metadata(text, metadata));
@@ -1380,6 +1396,7 @@ impl RagEngine {
 
         // Ensure all chunks are in lexical index
         for chunk_id in &valid_chunk_ids {
+            #[allow(clippy::collapsible_if)]
             if let Some(chunk) = self.chunks.get(chunk_id) {
                 if !self.lexical_index.contains(chunk_id) {
                     tracing::debug!("Re-adding missing chunk {} to lexical index", chunk_id);
@@ -1411,6 +1428,7 @@ impl RagEngine {
 
             // Add missing chunks to ANN
             for chunk_id in &valid_chunk_ids {
+                #[allow(clippy::collapsible_if)]
                 if let Some(chunk) = self.chunks.get(chunk_id) {
                     if !ann_index.contains(chunk_id) {
                         tracing::debug!("Re-adding missing chunk {} to ANN index", chunk_id);
@@ -1645,6 +1663,7 @@ impl RagEngine {
                 tracing::warn!(
                     "Legacy index has unknown format. Checking if it can be migrated..."
                 );
+                #[allow(clippy::collapsible_if)]
                 if let Ok(legacy_chunks) =
                     serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
                 {
@@ -1768,7 +1787,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     if norm_a < EPSILON || norm_b < EPSILON {
-        return 0.0;
+        0.0
     } else {
         (dot_product / (norm_a * norm_b)).clamp(-1.0, 1.0)
     }
@@ -1970,6 +1989,7 @@ impl AnnIndex {
     }
 
     fn remove(&mut self, id: &str) {
+        #[allow(clippy::collapsible_if)]
         if let Some(hash) = self.id_to_bucket.remove(id) {
             if let Some(bucket) = self.buckets.get_mut(&hash) {
                 bucket.retain(|stored| stored != id);

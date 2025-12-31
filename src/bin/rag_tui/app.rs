@@ -360,6 +360,7 @@ impl App {
             return false;
         }
 
+        #[allow(clippy::collapsible_if)]
         if let Some(last_time) = self.last_input_time {
             if last_time.elapsed() >= Duration::from_millis(INPUT_DEBOUNCE_MS) {
                 self.debounce_pending = false;
@@ -732,6 +733,7 @@ impl App {
         };
 
         // Update the setting value
+        #[allow(clippy::collapsible_if)]
         if let Some(value) = new_value {
             if let Some(setting) = self.settings.items.get_mut(setting_index) {
                 setting.value = value;
