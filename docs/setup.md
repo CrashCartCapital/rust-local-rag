@@ -1,4 +1,4 @@
-# Rust Local RAG - Setup for Claude Desktop
+# Rust Local RAG - Setup
 
 ## Prerequisites
 
@@ -38,11 +38,8 @@ sudo apt-get install poppler-utils
 sudo yum install poppler-utils
 ```
 
-> 💡 If you skip this step, the server will still work for most PDFs. You'll see a warning in logs if a PDF requires the poppler fallback but it's not installed.
+## Build and Install
 
-## Setup
-
-### 1. Build and Install
 ```bash
 # Clone and build
 git clone <repository-url>
@@ -53,124 +50,8 @@ cargo build --release
 cargo install --path .
 ```
 
-### 2. Create Directories and Add Documents
-```bash
-# Create required directories
-mkdir -p ~/Documents/data
-mkdir -p ~/Documents/rag
-mkdir -p /tmp/rust-local-rag
+## Next Steps
 
-# Add your PDF documents
-cp your-pdfs/*.pdf ~/Documents/rag/
-```
-
-> ℹ️  By default the server writes logs to `/var/log/rust-local-rag` when it can, otherwise `./logs`. Creating `/tmp/rust-local-rag` gives you a convenient writable location that you can point `LOG_DIR` at from your Claude configuration.
-
-## Claude Desktop Integration
-
-### 1. Find Claude Desktop Config
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
-
-### 2. Add This Configuration
-```json
-{
-    "mcpServers": {
-        "rust-local-rag": {
-            "command": "/Users/yourusername/.cargo/bin/rust-local-rag",
-            "env": {
-                "DATA_DIR": "/Users/yourusername/Documents/data",
-                "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
-                "LOG_DIR": "/tmp/rust-local-rag",
-                "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10",
-                "OLLAMA_URL": "http://localhost:11434"
-            }
-        }
-    }
-}
-```
-
-**Important**: Replace `yourusername` with your actual username, or use absolute paths specific to your system.
-
-### 3. Find Your Actual Paths
-```bash
-# Find your cargo bin directory
-echo "$HOME/.cargo/bin/rust-local-rag"
-
-# Verify the binary exists
-which rust-local-rag
-```
-
-### 4. Restart Claude Desktop
-
-## How PDF Processing Works
-
-The application automatically:
-
-1. **Scans the documents directory** on startup for PDF files
-2. **Extracts text** using pure-Rust `lopdf` crate (with automatic fallback to poppler's `pdftotext` for complex PDFs)
-3. **Chunks the text** into sentence-aware segments (typically 500-1000 characters) with metadata
-4. **Generates embeddings** using Ollama's configured embedding model (runs in spawn_blocking to avoid blocking async runtime)
-5. **Stores embeddings** in model-specific index files (e.g., `chunks_nomic-embed-text.json`)
-6. **Indexes documents** for semantic search with SHA-256 fingerprinting to detect changes
-
-> 💡 Each embedding model gets its own index file. Switching models preserves existing indexes, allowing you to switch back without re-indexing.
-
-Supported formats:
-- PDF files (via lopdf or poppler fallback)
-- Text extraction preserves basic formatting
-- Each document is split into searchable chunks
-
-## Troubleshooting
-
-### Installation Issues
-1. **Rust not found**: Restart terminal after installing Rust
-2. **Ollama connection failed**: Ensure `ollama serve` is running
-3. **Poppler not found**: Optional - only needed for complex PDFs. Install with `brew install poppler` if you see fallback warnings
-
-### Claude Desktop Issues
-1. **Binary not found**: Check path with `which rust-local-rag`
-2. **Permission denied**: Ensure directories are writable
-3. **No documents indexed**: Check PDF files exist in `DOCUMENTS_DIR`
-4. **Connection failed**: Check logs in `LOG_DIR` directory
-
-### PDF Processing Issues
-1. **Text extraction failed**: Ensure PDFs are not password-protected or corrupted
-2. **Empty results**: Some PDFs may be image-only (scanned documents)
-3. **Slow indexing**: Large documents take time to process on first run
-
-### Log Files
-Check application logs for detailed error information:
-```bash
-# View latest logs
-tail -f /tmp/rust-local-rag/rust-local-rag.log
-
-# Check for errors
-grep -i error /tmp/rust-local-rag/rust-local-rag.log
-```
-
-That's it! Your documents will be automatically indexed and searchable in Claude Desktop.
-
-## Environment Reference
-
-You can customise the server using environment variables or a `.env` file placed alongside the binary. Common options include:
-
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `DATA_DIR` | Local storage for embeddings (per-model index files) | `./data` |
-| `DOCUMENTS_DIR` | Directory scanned for PDFs | `./documents` |
-| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise `./logs`. | Auto-detected |
-| `LOG_LEVEL` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
-| `LOG_MAX_MB` | Maximum log file size before truncation | `5` |
-| `OLLAMA_URL` | Base URL for Ollama | `http://localhost:11434` |
-| `OLLAMA_EMBEDDING_MODEL` | Embedding model name | `nomic-embed-text` |
-| `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `llama3.1` |
-| `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
-| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:3046` |
-| `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
-| `DEVELOPMENT` / `DEV` | Prefer console logging (development friendly) | _unset_ |
-| `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |
-
-> 🧹 Logs larger than `LOG_MAX_MB` are automatically truncated by a background task to keep disk usage predictable.
+*   **Configuration**: See [Configuration Guide](configuration.md) for setting up Claude Desktop and Environment Variables.
+*   **Usage**: See [Usage Guide](usage.md) for how to use the tools in Claude.
+*   **Architecture**: See [Architecture Guide](architecture.md) for details on how it works.
