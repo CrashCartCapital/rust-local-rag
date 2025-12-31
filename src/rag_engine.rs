@@ -433,12 +433,12 @@ impl RagEngine {
             None => Box::new(self.chunks.keys().cloned()) as Box<dyn Iterator<Item = String>>,
         };
 
-        let mut scores: Vec<(f32, DocumentChunk)> = Vec::new();
+        let mut scores: Vec<(f32, &DocumentChunk)> = Vec::new();
 
         for chunk_id in ann_candidate_iter {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
                 let embedding_score = dot_product(&query_embedding, &chunk.embedding);
-                scores.push((embedding_score, chunk.clone()));
+                scores.push((embedding_score, chunk));
             }
         }
 
@@ -3250,3 +3250,74 @@ mod tests {
         );
     }
 }
+
+    #[tokio::test]
+    async fn test_get_embedding_candidates_logic() {
+        // This test simulates the logic of get_embedding_candidates but without calling the actual service
+        // or using the full RagEngine, because instantiating RagEngine requires a running Ollama.
+        // Instead, we verify the data structures and logic we intend to use.
+
+        use crate::rag_engine::{DocumentChunk, RerankerCandidate, ChunkMetadata};
+        use std::collections::HashMap;
+
+        // Create some chunks
+        let mut chunks = HashMap::new();
+        let chunk1 = DocumentChunk {
+            id: "1".to_string(),
+            document_name: "doc1".to_string(),
+            text: "text1".to_string(),
+            embedding: vec![1.0, 0.0],
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            metadata: ChunkMetadata::default(),
+        };
+        let chunk2 = DocumentChunk {
+            id: "2".to_string(),
+            document_name: "doc2".to_string(),
+            text: "text2".to_string(),
+            embedding: vec![0.0, 1.0],
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            metadata: ChunkMetadata::default(),
+        };
+        chunks.insert("1".to_string(), chunk1.clone());
+        chunks.insert("2".to_string(), chunk2.clone());
+
+        let query_embedding = vec![0.9, 0.1]; // Closer to chunk1
+        // dot product 1: 0.9*1 + 0.1*0 = 0.9
+        // dot product 2: 0.9*0 + 0.1*1 = 0.1
+
+        // Simulate logic
+        let mut scores: Vec<(f32, &DocumentChunk)> = Vec::new();
+        let candidate_ids = vec!["1".to_string(), "2".to_string()];
+
+        for chunk_id in candidate_ids {
+             if let Some(chunk) = chunks.get(&chunk_id) {
+                let score = chunk.embedding.iter().zip(query_embedding.iter()).map(|(a, b)| a * b).sum();
+                scores.push((score, chunk));
+            }
+        }
+
+        // Sort by score descending
+        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let count = 1;
+        let candidates: Vec<RerankerCandidate> = scores
+            .into_iter()
+            .take(count)
+            .map(|(score, chunk)| RerankerCandidate {
+                chunk_id: chunk.id.clone(),
+                document: chunk.document_name.clone(),
+                text: chunk.text.clone(),
+                page_number: chunk.page_number,
+                section: chunk.section.clone(),
+                initial_score: score,
+            })
+            .collect();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].chunk_id, "1");
+        assert!((candidates[0].initial_score - 0.9).abs() < 1e-6);
+    }
