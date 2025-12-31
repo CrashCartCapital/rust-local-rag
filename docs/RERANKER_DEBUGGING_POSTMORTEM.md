@@ -1,5 +1,7 @@
 # Reranker Debugging Postmortem
 
+> **⚠️ HISTORICAL DOCUMENT**: This postmortem documents the debugging process for a **previous** reranker implementation using Phi-4-Mini with JSON scoring (December 2025). The current production system uses **Yes/No binary classification with logprobs-based scoring** (Qwen3-Reranker style), which was adopted after this work. This document remains valuable as a case study in LLM prompt debugging methodology.
+
 ## A Forensic Breakdown of Calibrating Phi-4-Mini for RAG Reranking
 
 **Date**: December 7, 2025

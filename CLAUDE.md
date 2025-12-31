@@ -722,6 +722,9 @@ Configuration is loaded from environment variables and `.env` files:
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model to use |
 | `OLLAMA_RERANK_MODEL` | `llama3.1` | LLM model for reranking search results |
+| `PROMPTS_DIR` | `./prompts` | Directory for prompt template overrides |
+| `MCP_HTTP_BIND` | `127.0.0.1:3046` | HTTP health endpoint address |
+| `MCP_HTTP_ENDPOINT` | `/mcp` | HTTP MCP endpoint path |
 | `DEVELOPMENT` or `DEV` | unset | Forces console logging |
 | `CONSOLE_LOGS` | unset | Console logging without dev mode |
 
@@ -829,40 +832,34 @@ The search process uses a two-stage approach:
 
 **Graceful Degradation**: If reranker model is unavailable at startup, system continues with embedding-only search.
 
-#### Reranker Prompt Architecture (Phi-4-Mini)
+#### Reranker Architecture (Yes/No with Logprobs)
 
-The reranker uses a specialized prompt format for Phi-family models. See `prompts/reranker.txt` for the full template.
+The reranker uses **binary Yes/No classification with logprobs-based scoring** (Qwen3-Reranker style). See `prompts/reranker.txt` for the prompt template.
 
 **Key Implementation Details**:
 
-1. **Phi Chat Template**: Uses `<|user|>...<|end|><|assistant|>` tokens required for Phi models to follow instructions (vs text completion mode)
+1. **Binary Classification**: Prompts the model with "Does this chunk contain relevant information for the query?" expecting Yes/No
 
-2. **JSON Output Format**: Forces structured output via JSON syntax:
-   ```json
-   {"classification": "DIRECT_ANSWER", "reasoning": "...", "score": 95}
+2. **Logprobs Scoring**: Uses Ollama's `logprobs` feature (v0.12.11+) to compute softmax probability:
+   ```
+   score = exp(yes_logprob) / (exp(yes_logprob) + exp(no_logprob))
    ```
 
-3. **Pre-fill Technique**: Prompt ends with `{"classification": "` to force the model into JSON completion mode, preventing early EOS prediction
+3. **Stop Sequences**: Configured with `["\n"]` to stop after the Yes/No answer
 
-4. **Stop Sequences**: Configured with `["<|end|>", "<|user|>"]` to prevent run-on generation
+4. **Low Temperature**: `temperature: 0.0` for deterministic scoring
 
-5. **Score Parsing**: `parse_score()` reconstructs full JSON by prepending the pre-fill, extracts the `score` field, normalizes 0-100 → 0.0-1.0
+5. **Token Limit**: `num_predict: 3` (only need Yes/No)
 
-6. **Fallback Chain**: If JSON parsing fails, falls back to text-based score extraction (finds "score" followed by a number)
+6. **Fallback Chain**: If logprobs parsing fails, falls back to text-based Yes/No detection
 
-**Scoring Rubric**:
-- 90-100: Directly answers with specific info
-- 70-89: Partially answers
-- 50-69: Related but doesn't answer
-- 25-49: Same topic, not useful
-- 0-24: Unrelated
+**Prompt Focus**:
+- Semantic meaning over keyword matches
+- Direct answers to the query
+- Essential context or definitions
+- Logically related information
 
-**Penalties Applied**:
-- Prefaces/intros: MAX 40
-- Table of contents: MAX 30
-- Keywords but no answer: MAX 65
-
-**Debugging Reference**: See `docs/RERANKER_DEBUGGING_POSTMORTEM.md` for detailed documentation of the prompt engineering process and lessons learned.
+**Historical Reference**: See `docs/RERANKER_DEBUGGING_POSTMORTEM.md` for the earlier Phi-4-Mini JSON approach (historical, not current).
 
 ### MCP Tool Definitions
 
