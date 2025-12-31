@@ -519,7 +519,7 @@ impl RagEngine {
             .max(f32::EPSILON);
 
         // Track individual scores: (combined, embedding, lexical, chunk)
-        let mut scores: Vec<(f32, f32, f32, DocumentChunk)> = Vec::new();
+        let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
@@ -535,7 +535,7 @@ impl RagEngine {
                     combined_score,
                     embedding_score,
                     lexical_score,
-                    chunk.clone(),
+                    chunk,
                 ));
             }
         }
