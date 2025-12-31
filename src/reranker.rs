@@ -140,7 +140,7 @@ impl RerankerService {
         let model = std::env::var("OLLAMA_RERANK_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
 
         // Load prompt template from file or use default
-        let prompt_template = Self::load_prompt_template();
+        let prompt_template = Self::load_prompt_template().await;
 
         // Configure client with optimized connection pooling settings
         // to avoid connection overhead on each request
@@ -171,11 +171,11 @@ impl RerankerService {
     }
 
     /// Load prompt template from external file or fall back to default
-    fn load_prompt_template() -> String {
+    async fn load_prompt_template() -> String {
         let prompts_dir = std::env::var("PROMPTS_DIR").unwrap_or_else(|_| "./prompts".to_string());
         let prompt_path = std::path::Path::new(&prompts_dir).join("reranker.txt");
 
-        match std::fs::read_to_string(&prompt_path) {
+        match tokio::fs::read_to_string(&prompt_path).await {
             Ok(template) => {
                 tracing::info!("Loaded reranker prompt from {}", prompt_path.display());
                 template
@@ -767,5 +767,21 @@ Answer:"#
 
         tracing::info!("✅ Rerank model '{}' verified", self.model);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_load_prompt_template_default() {
+        // Ensure PROMPTS_DIR is set to a non-existent directory to trigger default
+        // Safety: safe to set env var in test if not threaded with other env var access
+        unsafe {
+            std::env::set_var("PROMPTS_DIR", "/non/existent/dir");
+        }
+        let template = RerankerService::load_prompt_template().await;
+        assert!(template.contains("Consider semantic meaning"));
     }
 }
