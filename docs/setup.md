@@ -166,6 +166,10 @@ You can customise the server using environment variables or a `.env` file placed
 | `LOG_MAX_MB` | Maximum log file size before truncation | `5` |
 | `OLLAMA_URL` | Base URL for Ollama | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model name | `nomic-embed-text` |
+| `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `llama3.1` |
+| `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
+| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:3046` |
+| `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` / `DEV` | Prefer console logging (development friendly) | _unset_ |
 | `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |
 

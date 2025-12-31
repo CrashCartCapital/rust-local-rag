@@ -33,6 +33,10 @@
 | `LOG_MAX_MB` | Log file size limit in MB before truncation | `5` |
 | `OLLAMA_URL` | Base URL for the Ollama API | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Ollama embedding model name (must be installed locally) | `nomic-embed-text` |
+| `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `llama3.1` |
+| `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
+| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:3046` |
+| `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` / `DEV` | When set, prefer console logging over file logging | _unset_ |
 | `CONSOLE_LOGS` | Force console logging even in production mode | _unset_ |
 

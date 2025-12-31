@@ -180,10 +180,16 @@ cargo clippy
 
 ## Documentation
 
-- [Setup Guide](docs/setup.md) - Installation and configuration details
-- [Usage Guide](docs/how-to-use.md) - Claude Desktop integration examples
+**Getting Started**:
+- [Setup Guide](docs/setup.md) - Installation and configuration
+- [Usage Guide](docs/how-to-use.md) - Claude Desktop integration
+
+**Architecture & Internals**:
+- [Per-Query Weights PRD](docs/per_query_weights_prd.md) - Score weight customization feature
 - [Evaluation Framework](docs/RAG_EVALUATION_FRAMEWORK_SPEC.md) - RAG quality measurement
-- [Reranker Guide](docs/RERANKER_DEBUGGING_POSTMORTEM.md) - LLM reranker implementation notes
+
+**Historical**:
+- [Reranker Debugging Postmortem](docs/RERANKER_DEBUGGING_POSTMORTEM.md) - Historical debugging case study (Phi-4-Mini era)
 
 ## License
 
