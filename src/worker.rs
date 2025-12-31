@@ -314,6 +314,7 @@ impl WorkerSupervisor {
         let mut progress_state = ProgressState::new(job_id.to_string(), total_docs);
 
         // Log discovery stage completion
+        #[allow(clippy::collapsible_if)]
         if let Some(ref logger) = progress_logger {
             if let Err(e) = logger
                 .emit(
@@ -345,6 +346,7 @@ impl WorkerSupervisor {
 
         // Change to embedding stage
         progress_state.stage = Stage::Embedding;
+        #[allow(clippy::collapsible_if)]
         if let Some(ref logger) = progress_logger {
             if let Err(e) = logger
                 .emit(
@@ -496,6 +498,7 @@ impl WorkerSupervisor {
             }
 
             // Log progress
+            #[allow(clippy::collapsible_if)]
             if let Some(ref logger) = progress_logger {
                 if let Err(e) = logger
                     .emit(&progress_state, "progress", Some(&progress_note))
@@ -508,6 +511,7 @@ impl WorkerSupervisor {
 
         // Finalize reindex
         progress_state.stage = Stage::Finalize;
+        #[allow(clippy::collapsible_if)]
         if let Some(ref logger) = progress_logger {
             if let Err(e) = logger
                 .emit(&progress_state, "stage", Some("finalizing reindex"))

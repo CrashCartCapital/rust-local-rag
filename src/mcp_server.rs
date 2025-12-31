@@ -623,6 +623,7 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String 
                 score_parts.push(format!("Semantic: {:.2}", s));
             }
             if let Some(s) = result.lexical_score {
+                #[allow(clippy::collapsible_if)]
                 if s > 0.0 {
                     score_parts.push(format!("Keyword: {:.2}", s));
                 }

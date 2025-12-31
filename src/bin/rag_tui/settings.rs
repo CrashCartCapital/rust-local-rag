@@ -355,6 +355,7 @@ impl Settings {
     }
 
     /// Cycle through options (for dropdown-style settings)
+    #[allow(clippy::collapsible_if)]
     pub fn cycle_option(&mut self, forward: bool) {
         if let Some(setting) = self.items.get_mut(self.selected) {
             if let Some(ref options) = setting.options {
