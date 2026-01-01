@@ -471,14 +471,14 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .collect();
 
         let reranked: Vec<RerankedResult> = match &self.reranker {
-            Some(reranker) => match reranker.rerank(query, &reranker_inputs).await {
-                Ok(results) => results,
-                Err(_err) => {
+            Some(reranker) => reranker
+                .rerank(query, &reranker_inputs)
+                .await
+                .unwrap_or_else(|_err| {
                     #[cfg(feature = "tracing")]
                     tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
                     Vec::new()
-                }
-            },
+                }),
             None => Vec::new(),
         };
 
@@ -618,13 +618,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .map(|chunk| chunk.document_name.clone())
             .collect();
         self.document_hashes.retain(|doc_name, _| {
-            if valid_documents.contains(doc_name) {
-                true
-            } else {
+            let keep = valid_documents.contains(doc_name);
+            if !keep {
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Removing orphaned document hash for {}", doc_name);
-                false
             }
+            keep
         });
 
         Ok(())
