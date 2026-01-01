@@ -394,6 +394,7 @@ execute_code({
 
 ```bash
 # Extract code structure for review
+ai-distiller: distill_file(file_path="crates/rag-core/src/engine.rs")
 ai-distiller: distill_file(file_path="src/rag_engine.rs")
 ai-distiller: distill_directory(directory_path="src/")
 
@@ -432,7 +433,7 @@ githubGetFileContent(queries=[{
 mcp-filesystem: grep_files(pattern="#\[tokio::test\]", output_mode="content", -A=10)
 
 # Search for test examples
-search_codebase("async test patterns with tokio", limit=5)
+grep_files(pattern="async.*test", output_mode="content", -A=5)
 
 # Analyze test failures with AI
 crash: Debug test failure with hypothesis testing
@@ -483,7 +484,7 @@ crash: {
 }
 
 # Step 2: Multi-model validation
-ask-gemini: "@src/main.rs Analyze async task spawning patterns" model="gemini-2.5-pro"
+ask-gemini: "@src/main.rs Analyze async task spawning patterns" model="gemini-3-pro-preview"
 consult_codex: "Review tokio runtime usage in main.rs" timeout=300
 
 # Step 3: Find similar patterns
@@ -505,7 +506,7 @@ crash: {
 }
 
 # Validate with AI consultant
-ask-gemini: "Review these changes for Rust best practices: <diff>" model="gemini-2.5-pro"
+ask-gemini: "Review these changes for Rust best practices: <diff>" model="gemini-3-pro-preview"
 ```
 
 ### Quick Reference for Claude Code
@@ -518,6 +519,7 @@ directory_tree(path="src/", max_depth=2)
 search_files(pattern="test_*.rs", recursive=true)
 
 # Code analysis
+distill_file(file_path="crates/rag-core/src/engine.rs")
 distill_file(file_path="src/rag_engine.rs")
 project_overview(path=".")
 
@@ -525,10 +527,10 @@ project_overview(path=".")
 tavily-search(query="Rust async patterns")
 githubSearchCode(queries=[{queryTerms: ["pattern"]}])
 
-# AI consultants (ALWAYS use free models)
-ask-gemini(prompt="question", model="gemini-2.5-pro")  # FREE
-consult_codex(query="question", timeout=300)  # FREE via CLI
-ask-qwen(prompt="question", model="qwen3-coder-plus")  # FREE
+# AI consultants
+ask-gemini(prompt="question", model="gemini-3-pro-preview")
+consult_codex(query="question", timeout=300)
+ask-qwen(prompt="question", model="qwen3-coder-plus")
 
 # Structured reasoning
 crash({step_number: 1, purpose: "analysis", thought: "..."})
@@ -546,8 +548,8 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 
 | Task Type | Primary Tool | Alternative | Use Case |
 |-----------|-------------|-------------|----------|
-| Find Rust function | `grep_files` | `search_codebase` | Exact identifier search |
-| Understand pattern | `search_codebase` | `grep_files` | Conceptual code understanding |
+| Find Rust function | `grep_files` | `Glob` | Exact identifier search |
+| Understand pattern | `Task (Explore)` | `grep_files` | Conceptual code understanding |
 | Lookup docs | `tavily-search` | `githubSearchCode` | External documentation |
 | Debug error | `crash` | `ask-gemini` | Structured error analysis |
 | Code review | `ask-gemini` | `consult_codex` | Multi-perspective validation |
@@ -562,7 +564,8 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 - **mcp_server.rs**: MCP protocol implementation using the `rmcp` crate, exposes MCP tools (search_documents, list_documents, get_stats, start_reindex, get_job_status, calibrate_reranker), plus health endpoints (/healthz liveness, /readyz readiness)
 - **job_manager.rs**: SQLite-based job persistence with atomic transaction support for concurrent job creation, status tracking, and progress updates
 - **worker.rs**: Background worker supervisor that processes reindexing jobs asynchronously, handles job resumption on restart, implements poison pill handling for document failures, and provides lock instrumentation via TimedWriteLockGuard for monitoring lock durations
-- **rag_engine.rs**: Core RAG logic - sentence-aware chunking with metadata, embedding storage, similarity search, reranking orchestration, SHA-256 document fingerprinting, persistence, pure-Rust PDF extraction via lopdf with pdftotext fallback
+- **rag-core (`crates/rag-core/src/*`)**: Core RAG logic - chunking, retrieval/scoring, reranking traits, persistence, and document fingerprinting
+- **rag_engine.rs**: Server wrapper - PDF extraction + env/config + calls into `rag-core`
 - **embeddings.rs**: Ollama API client for generating embeddings with LRU caching (1000 entries) for query embeddings and batch embedding support
 - **reranker.rs**: LLM-based relevance reranking service using Ollama with Phi-4-mini, performs concurrent second-stage scoring of search candidates using JSON-structured prompts with Phi chat template
 
@@ -580,7 +583,7 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 10. **LRU Caching**: Query embeddings cached with 1000-entry limit to reduce redundant API calls
 11. **Batch Processing**: Multiple document chunks embedded in a single Ollama API call for efficiency
 12. **Document Fingerprinting**: SHA-256 hashes track document changes to skip re-embedding unchanged files
-13. **spawn_blocking for CPU-Bound Work**: All blocking/CPU-intensive operations (PDF extraction, embedding API calls) use `tokio::task::spawn_blocking` to avoid blocking the async runtime
+13. **spawn_blocking for CPU-Bound Work**: All blocking/CPU-intensive operations (e.g., PDF extraction/parsing) use `tokio::task::spawn_blocking` to avoid blocking the async runtime
 14. **Lock Instrumentation**: `TimedWriteLockGuard<T>` wrapper measures lock hold duration and logs warnings when exceeding threshold (1000ms), with AtomicU64 metrics for testing
 15. **Pure-Rust PDF Fallback**: Primary PDF extraction via `lopdf` crate (no external dependencies), with automatic fallback to `pdftotext` command if lopdf fails
 16. **Health Probes**: Axum endpoints `/healthz` (liveness - always 200) and `/readyz` (readiness - 200 if engine lock can be acquired within 100ms)
@@ -591,7 +594,7 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 #### Document Indexing (Job-Based):
 1. MCP client calls `start_reindex` tool → JobManager atomically creates job (or returns existing)
 2. Job request sent via mpsc channel → WorkerSupervisor spawns background task
-3. Worker discovers PDFs → `pdftotext` extraction → sentence-aware chunking with metadata
+3. Worker discovers PDFs → `lopdf` extraction (`pdftotext` fallback) → sentence-aware chunking with metadata
 4. Text chunks → Ollama batch embeddings API → f32 vectors (per-document locking)
 5. Embeddings + metadata → in-memory HashMap + disk persistence (model-specific `chunks_{model}.json`)
 6. Document SHA-256 hash stored to detect changes on next index

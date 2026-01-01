@@ -3,40 +3,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
 
-#[derive(Clone)]
-/// Represents a candidate chunk for reranking, containing metadata and initial retrieval score.
-pub struct RerankerCandidate {
-    /// Unique identifier for the chunk.
-    pub chunk_id: String,
-    /// Name or identifier of the source document.
-    pub document: String,
-    /// The text content of the chunk.
-    pub text: String,
-    /// The page number in the source document where the chunk is located.
-    pub page_number: usize,
-    /// The section name or identifier within the document, if available.
-    pub section: Option<String>,
-    /// Embedding similarity score from the first-stage retrieval.
-    pub initial_score: f32,
-}
-
-/// Represents the result of reranking a candidate chunk using an LLM.
-///
-/// The `relevance` field is the LLM-based reranking score (from 0.0 to 1.0),
-/// which differs from the embedding similarity score.
-pub struct RerankedResult {
-    /// The identifier of the chunk that was reranked.
-    pub chunk_id: String,
-    /// The LLM-based relevance score (0.0 to 1.0) assigned during reranking.
-    /// This is distinct from the embedding similarity score.
-    pub relevance: f32,
-    /// Log probability of "yes" token (for softmax scoring transparency)
-    #[allow(dead_code)] // Will be used by TUI display
-    pub yes_logprob: Option<f64>,
-    /// Log probability of "no" token (for softmax scoring transparency)
-    #[allow(dead_code)] // Will be used by TUI display
-    pub no_logprob: Option<f64>,
-}
+pub use rag_core::{RerankedResult, RerankerCandidate};
 
 /// Detailed score result including logprobs for transparency
 struct DetailedScore {
@@ -326,7 +293,7 @@ Answer:"#
         let phase1_elapsed = phase1_start.elapsed().as_millis();
 
         // DEBUG: Log the full prompt being sent
-        tracing::info!(
+        tracing::debug!(
             "\n=== RERANKER DEBUG [{}] ===\nQuery: {}\nDocument: {}\nPage: {}\n--- FULL PROMPT ---\n{}\n--- END PROMPT ---",
             &candidate.chunk_id[..8],
             query,
@@ -379,7 +346,7 @@ Answer:"#
         let phase4_elapsed = phase4_start.elapsed().as_millis();
 
         // DEBUG: Log the raw response and logprobs from Ollama
-        tracing::info!(
+        tracing::debug!(
             "\n=== RERANKER RESPONSE [{}] ===\nRaw response: '{}'\nLogprobs: {:?}\n--- END RESPONSE ---",
             &candidate.chunk_id[..8],
             payload.response,
@@ -418,7 +385,7 @@ Answer:"#
         let phase5_elapsed = phase5_start.elapsed().as_millis();
 
         // DEBUG: Log the parsed score
-        tracing::info!(
+        tracing::debug!(
             "=== RERANKER SCORE [{}] === Parsed score: {:.4} (yes_lp: {:?}, no_lp: {:?}) ===",
             &candidate.chunk_id[..8],
             detailed.score,
@@ -767,6 +734,18 @@ Answer:"#
 
         tracing::info!("✅ Rerank model '{}' verified", self.model);
         Ok(())
+    }
+}
+
+impl rag_core::Rerank for RerankerService {
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: &[RerankerCandidate],
+    ) -> std::result::Result<Vec<RerankedResult>, rag_core::RerankError> {
+        RerankerService::rerank(self, query, candidates)
+            .await
+            .map_err(|e| rag_core::RerankError::Error(e.to_string()))
     }
 }
 

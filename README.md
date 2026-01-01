@@ -16,6 +16,7 @@ A local RAG (Retrieval-Augmented Generation) system built in Rust that integrate
 *   **PDF Support**: Extracts text from PDFs (pure-Rust with fallback).
 *   **Semantic Search**: Vector-based similarity search using Ollama embeddings.
 *   **Reranking**: Optional LLM-based reranking for higher relevance.
+*   **Reusable Core Library**: Core chunking/search/persistence lives in `crates/rag-core` for reuse in other projects.
 *   **MCP Integration**: Seamless integration with Claude Desktop.
 
 ## License

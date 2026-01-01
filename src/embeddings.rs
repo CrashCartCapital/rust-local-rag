@@ -239,3 +239,28 @@ impl EmbeddingService {
         Ok(())
     }
 }
+
+impl rag_core::EmbeddingBackend for EmbeddingService {
+    fn model_id(&self) -> &str {
+        self.model_name()
+    }
+
+    async fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, rag_core::EmbeddingError> {
+        self.get_query_embedding(text)
+            .await
+            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+    }
+
+    async fn embed_batch(
+        &self,
+        texts: &[String],
+    ) -> std::result::Result<Vec<Vec<f32>>, rag_core::EmbeddingError> {
+        self.embed_texts(texts)
+            .await
+            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+    }
+
+    fn dimension(&self) -> usize {
+        0
+    }
+}

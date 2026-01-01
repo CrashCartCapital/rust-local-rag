@@ -60,7 +60,8 @@ make ollama-models          # Pull required models
 
 *   `src/main.rs`: Entrypoint; env + logging; initializes engine + job system.
 *   `src/mcp_server.rs`: MCP tool definitions + HTTP server.
-*   `src/rag_engine.rs`: Core logic: chunking, retrieval, scoring.
+*   `crates/rag-core/src/*`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.

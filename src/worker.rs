@@ -1,7 +1,7 @@
 use crate::job_manager::{JobManager, JobStatus};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
@@ -109,6 +109,17 @@ pub enum JobRequest {
         job_id: String,
         documents_dir: String,
     },
+}
+
+async fn save_engine_to_disk(rag_engine: &Arc<RwLock<RagEngine>>) -> Result<()> {
+    let rag_engine = Arc::clone(rag_engine);
+    tokio::task::spawn_blocking(move || {
+        let engine = rag_engine.blocking_read();
+        engine.save_to_disk_sync()
+    })
+    .await
+    .context("save_to_disk task failed")??;
+    Ok(())
 }
 
 /// Background worker supervisor for processing async reindex jobs.
@@ -387,7 +398,8 @@ impl WorkerSupervisor {
                 total_docs
             );
 
-            // Add document with brief write lock (minutes per document, not hours total)
+            // Embed under a read lock (does not block search), then apply changes under a brief
+            // write lock.
             // Create batch progress callback
             let logger_clone = progress_logger.clone();
             let filename_clone = filename.to_string();
@@ -395,11 +407,6 @@ impl WorkerSupervisor {
             let current_idx = idx;
 
             let result = {
-                // Use instrumented lock guard for timing visibility
-                let mut engine =
-                    TimedWriteLockGuard::acquire(&rag_engine, format!("add_document:{filename}"))
-                        .await;
-
                 // Define batch callback
                 let mut batch_callback =
                     |batch_idx: usize,
@@ -433,9 +440,30 @@ impl WorkerSupervisor {
                         }
                     };
 
-                engine
-                    .add_document(filename, &data, Some(&mut batch_callback))
-                    .await
+                let prepared = {
+                    let engine = rag_engine.read().await;
+                    engine
+                        .prepare_document(filename, &data, Some(&mut batch_callback))
+                        .await
+                };
+
+                match prepared {
+                    Ok(None) => Ok(0),
+                    Ok(Some(prepared)) => {
+                        let chunk_count = {
+                            let mut engine = TimedWriteLockGuard::acquire(
+                                &rag_engine,
+                                format!("apply_document:{filename}"),
+                            )
+                            .await;
+                            engine.apply_prepared_document(prepared).await?
+                        };
+
+                        save_engine_to_disk(&rag_engine).await?;
+                        Ok(chunk_count)
+                    }
+                    Err(e) => Err(e),
+                }
             };
 
             // Clear batch progress after document completes
@@ -526,6 +554,7 @@ impl WorkerSupervisor {
             let mut engine = TimedWriteLockGuard::acquire(&rag_engine, "finalize_reindex").await;
             engine.finalize_reindex().await?;
         }
+        save_engine_to_disk(&rag_engine).await?;
 
         // Log completion
         if let Some(ref logger) = progress_logger {

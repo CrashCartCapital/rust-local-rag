@@ -1,8 +1,8 @@
 use rust_local_rag::rag_engine::RagEngine;
+use serial_test::serial;
 use std::io::Write;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use serial_test::serial;
 
 async fn setup_mock_ollama() -> MockServer {
     let mock_server = MockServer::start().await;
@@ -34,7 +34,7 @@ async fn test_recover_from_corrupt_index() {
 
     // We need to use the sanitization logic to match the filename
     // "nomic-embed-text" -> "nomic-embed-text"
-    let index_filename = format!("chunks_{}.json", model_name);
+    let index_filename = format!("chunks_{model_name}.json");
     let index_path = temp_dir.path().join(index_filename);
 
     let mut file = std::fs::File::create(&index_path).unwrap();
@@ -46,12 +46,21 @@ async fn test_recover_from_corrupt_index() {
     let engine = RagEngine::new(data_dir).await;
 
     // 3. Verify
-    assert!(engine.is_ok(), "RagEngine should recover from corrupt index");
+    assert!(
+        engine.is_ok(),
+        "RagEngine should recover from corrupt index"
+    );
     let engine = engine.unwrap();
 
     // It should have marked itself for reindex
-    assert!(engine.needs_reindex(), "Should mark for reindex after corruption");
-    assert!(engine.list_documents().is_empty(), "Should have empty state");
+    assert!(
+        engine.needs_reindex(),
+        "Should mark for reindex after corruption"
+    );
+    assert!(
+        engine.list_documents().is_empty(),
+        "Should have empty state"
+    );
 }
 
 #[tokio::test]
@@ -67,7 +76,7 @@ async fn test_load_existing_valid_index() {
     }
 
     // 1. Create a valid index file manually
-    let index_path = temp_dir.path().join(format!("chunks_{}.json", model_name));
+    let index_path = temp_dir.path().join(format!("chunks_{model_name}.json"));
     let valid_json = serde_json::json!({
         "version": 2,
         "model": model_name,
@@ -93,7 +102,9 @@ async fn test_load_existing_valid_index() {
     std::fs::write(&index_path, serde_json::to_string(&valid_json).unwrap()).unwrap();
 
     // 2. Initialize RagEngine
-    let engine = RagEngine::new(data_dir).await.expect("Failed to load valid index");
+    let engine = RagEngine::new(data_dir)
+        .await
+        .expect("Failed to load valid index");
 
     // 3. Verify loaded data
     assert!(!engine.needs_reindex(), "Should not need reindex");

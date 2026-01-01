@@ -1,11 +1,11 @@
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use lopdf::content::{Content, Operation};
+use lopdf::{Dictionary, Document, Object, Stream};
 use rust_local_rag::rag_engine::RagEngine;
+use serial_test::serial;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use lopdf::{Document, Object, Dictionary, Stream};
-use lopdf::content::{Content, Operation};
-use serial_test::serial;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn create_valid_pdf() -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
@@ -15,9 +15,10 @@ fn create_valid_pdf() -> Vec<u8> {
         ("Subtype", "Type1".into()),
         ("BaseFont", "Courier".into()),
     ]));
-    let resources_id = doc.add_object(Dictionary::from_iter(vec![
-        ("Font", Dictionary::from_iter(vec![("F1", font_id.into())]).into()),
-    ]));
+    let resources_id = doc.add_object(Dictionary::from_iter(vec![(
+        "Font",
+        Dictionary::from_iter(vec![("F1", font_id.into())]).into(),
+    )]));
     let content = Content {
         operations: vec![
             Operation::new("BT", vec![]),
@@ -33,7 +34,10 @@ fn create_valid_pdf() -> Vec<u8> {
         ("Parent", pages_id.into()),
         ("Contents", content_id.into()),
         ("Resources", resources_id.into()),
-        ("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()].into()),
+        (
+            "MediaBox",
+            vec![0.into(), 0.into(), 595.into(), 842.into()].into(),
+        ),
     ]));
     let pages = Dictionary::from_iter(vec![
         ("Type", "Pages".into()),
@@ -159,7 +163,10 @@ async fn test_reranker_fallback_on_failure() {
 
     // 3. Add Document
     let pdf_bytes = create_valid_pdf();
-    engine.add_document("test.pdf", &pdf_bytes, None).await.unwrap();
+    engine
+        .add_document("test.pdf", &pdf_bytes, None)
+        .await
+        .unwrap();
 
     // 4. Search
     let results = engine

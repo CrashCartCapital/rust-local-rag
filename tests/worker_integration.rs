@@ -1,12 +1,12 @@
-use rust_local_rag::{JobManager, RagEngine, WorkerSupervisor, JobRequest};
+use lopdf::content::{Content, Operation};
+use lopdf::{Dictionary, Document, Object, Stream};
 use rust_local_rag::job_manager::{JobStatus, JobType};
+use rust_local_rag::{JobManager, JobRequest, RagEngine, WorkerSupervisor};
+use serial_test::serial;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use lopdf::{Document, Object, Dictionary, Stream};
-use lopdf::content::{Content, Operation};
-use serial_test::serial;
 
 fn create_valid_pdf() -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
@@ -16,9 +16,10 @@ fn create_valid_pdf() -> Vec<u8> {
         ("Subtype", "Type1".into()),
         ("BaseFont", "Courier".into()),
     ]));
-    let resources_id = doc.add_object(Dictionary::from_iter(vec![
-        ("Font", Dictionary::from_iter(vec![("F1", font_id.into())]).into()),
-    ]));
+    let resources_id = doc.add_object(Dictionary::from_iter(vec![(
+        "Font",
+        Dictionary::from_iter(vec![("F1", font_id.into())]).into(),
+    )]));
     let content = Content {
         operations: vec![
             Operation::new("BT", vec![]),
@@ -34,7 +35,10 @@ fn create_valid_pdf() -> Vec<u8> {
         ("Parent", pages_id.into()),
         ("Contents", content_id.into()),
         ("Resources", resources_id.into()),
-        ("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()].into()),
+        (
+            "MediaBox",
+            vec![0.into(), 0.into(), 595.into(), 842.into()].into(),
+        ),
     ]));
     let pages = Dictionary::from_iter(vec![
         ("Type", "Pages".into()),
@@ -99,7 +103,9 @@ async fn test_worker_completes_job() {
     // 3. Initialize Components
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
-    let rag_engine = Arc::new(RwLock::new(RagEngine::new(data_dir.to_str().unwrap()).await.unwrap()));
+    let rag_engine = Arc::new(RwLock::new(
+        RagEngine::new(data_dir.to_str().unwrap()).await.unwrap(),
+    ));
     let (job_tx, job_rx) = mpsc::channel(10);
 
     // 4. Start Worker
@@ -111,12 +117,18 @@ async fn test_worker_completes_job() {
     // 5. Create Job
     // Ideally we use the method that creates and sends, but we are testing worker integration
     // so we manually create job in DB and send request.
-    let job = job_manager.create_job(JobType::Reindex, None, 0).await.unwrap();
+    let job = job_manager
+        .create_job(JobType::Reindex, None, 0)
+        .await
+        .unwrap();
 
-    job_tx.send(JobRequest::StartReindex {
-        job_id: job.job_id.clone(),
-        documents_dir: docs_dir.to_str().unwrap().to_string(),
-    }).await.unwrap();
+    job_tx
+        .send(JobRequest::StartReindex {
+            job_id: job.job_id.clone(),
+            documents_dir: docs_dir.to_str().unwrap().to_string(),
+        })
+        .await
+        .unwrap();
 
     // 6. Wait for Completion
     let mut attempts = 0;
@@ -132,7 +144,8 @@ async fn test_worker_completes_job() {
         }
 
         attempts += 1;
-        if attempts > 150 { // 15 seconds timeout
+        if attempts > 150 {
+            // 15 seconds timeout
             panic!("Job timed out. Status: {:?}", current_job.status);
         }
     }

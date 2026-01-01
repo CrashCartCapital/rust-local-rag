@@ -25,10 +25,11 @@
 ## Core Components
 
 1.  **MCP Server (`src/mcp_server.rs`)**: Handles communication with Claude Desktop. Exposes tools like `search_documents`.
-2.  **RAG Engine (`src/rag_engine.rs`)**: The brain. Handles chunking, embedding generation, storage, and retrieval.
-3.  **Job System (`src/job_manager.rs`, `src/worker.rs`)**: Handles long-running tasks (like indexing) in the background to avoid blocking the MCP server.
-4.  **Embedding Service (`src/embeddings.rs`)**: Interfaces with Ollama to generate vector embeddings.
-5.  **Reranker (`src/reranker.rs`)**: Optional second-stage reranking using an LLM to improve search relevance.
+2.  **RAG Core (`crates/rag-core/src/*`)**: Reusable engine: chunking, search (cosine + MMR), and persistence format.
+3.  **RAG Server Wrapper (`src/rag_engine.rs`)**: Server-only glue: PDF extraction + env/config + calls into `rag-core`.
+4.  **Job System (`src/job_manager.rs`, `src/worker.rs`)**: Handles long-running tasks (like indexing) in the background to avoid blocking the MCP server.
+5.  **Embedding Service (`src/embeddings.rs`)**: Interfaces with Ollama to generate vector embeddings.
+6.  **Reranker (`src/reranker.rs`)**: Optional second-stage reranking using an LLM to improve search relevance.
 
 ## PDF Processing Pipeline
 

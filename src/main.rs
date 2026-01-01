@@ -88,13 +88,8 @@ async fn main() -> Result<()> {
     });
 
     // Start MCP Server
-    rust_local_rag::mcp_server::start_mcp_server(
-        rag_engine,
-        job_manager,
-        job_tx,
-        documents_dir,
-    )
-    .await?;
+    rust_local_rag::mcp_server::start_mcp_server(rag_engine, job_manager, job_tx, documents_dir)
+        .await?;
 
     Ok(())
 }
