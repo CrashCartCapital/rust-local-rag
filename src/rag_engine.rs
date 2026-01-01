@@ -250,9 +250,12 @@ impl RagEngine {
     /// 1. Try pure-Rust extraction (lopdf) first for deployment flexibility
     /// 2. Fall back to pdftotext binary if lopdf fails
     async fn extract_pdf_text(&self, data: Vec<u8>) -> Result<String> {
-        let data_for_fallback = data.clone();
+        // Use Arc to share data between fallback tasks without cloning the underlying buffer
+        let shared_data = std::sync::Arc::new(data);
+        let data_for_lopdf = std::sync::Arc::clone(&shared_data);
+        let data_for_fallback = std::sync::Arc::clone(&shared_data);
 
-        let lopdf_result = tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data))
+        let lopdf_result = tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data_for_lopdf))
             .await
             .context("lopdf extraction task failed")?;
 
