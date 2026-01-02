@@ -6,6 +6,7 @@ interface SearchResult {
   text: string
   score: number
   document: string
+  chunk_id: string
   page_number: number
   section?: string
   embedding_score?: number
@@ -86,7 +87,10 @@ export default function SearchPage() {
           </h2>
           <ul className="space-y-4">
             {data.results.map((result, idx) => (
-              <li key={idx} className="bg-white shadow overflow-hidden rounded-lg p-6 hover:shadow-md transition-shadow">
+              <li
+                key={result.chunk_id || `${result.document}-${result.page_number}-${idx}`}
+                className="bg-white shadow overflow-hidden rounded-lg p-6 hover:shadow-md transition-shadow"
+              >
                 <div className="flex justify-between items-start">
                   <h3 className="text-sm font-medium text-indigo-600 truncate">
                     {result.document}
@@ -99,9 +103,9 @@ export default function SearchPage() {
                       Score: {(result.score * 100).toFixed(0)}%
                     </span>
                     <div className="text-xs text-gray-400 mt-1 space-x-2">
-                       {result.embedding_score && <span>Sem: {result.embedding_score.toFixed(2)}</span>}
-                       {result.lexical_score && result.lexical_score > 0 && <span>Key: {result.lexical_score.toFixed(2)}</span>}
-                       {result.reranker_score && <span>Rerank: {result.reranker_score.toFixed(2)}</span>}
+                       {typeof result.embedding_score === 'number' && <span>Sem: {result.embedding_score.toFixed(2)}</span>}
+                       {typeof result.lexical_score === 'number' && result.lexical_score > 0 && <span>Key: {result.lexical_score.toFixed(2)}</span>}
+                       {typeof result.reranker_score === 'number' && <span>Rerank: {result.reranker_score.toFixed(2)}</span>}
                     </div>
                   </div>
                 </div>

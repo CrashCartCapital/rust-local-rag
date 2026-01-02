@@ -51,3 +51,7 @@ test_*.sh
 test_*.py
 cleanup_*.py
 frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/.env
+frontend/.env.*
