@@ -255,9 +255,10 @@ impl RagEngine {
         let data_for_lopdf = std::sync::Arc::clone(&shared_data);
         let data_for_fallback = std::sync::Arc::clone(&shared_data);
 
-        let lopdf_result = tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data_for_lopdf))
-            .await
-            .context("lopdf extraction task failed")?;
+        let lopdf_result =
+            tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data_for_lopdf))
+                .await
+                .context("lopdf extraction task failed")?;
 
         match lopdf_result {
             Ok(text) => {
