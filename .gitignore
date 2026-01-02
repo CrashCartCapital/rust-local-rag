@@ -50,3 +50,4 @@ start-server.sh
 test_*.sh
 test_*.py
 cleanup_*.py
+frontend/node_modules
