@@ -78,10 +78,12 @@ impl RagMcpServer {
     #[tool(
         description = "Search through uploaded documents using semantic similarity with optional MMR diversification and per-query weight customization"
     )]
+    #[tracing::instrument(skip(self), fields(query = %params.query, top_k = ?params.top_k))]
     async fn search_documents(
         &self,
         Parameters(params): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let start = std::time::Instant::now();
         let top_k = params.top_k.unwrap_or(5).min(MAX_TOP_K);
         let diversity_factor = params.diversity_factor.unwrap_or(0.3).clamp(0.0, 1.0);
         let query = params.query;
@@ -94,19 +96,25 @@ impl RagMcpServer {
         {
             Ok(results) => {
                 let count = results.len();
+                let duration = start.elapsed();
+                tracing::info!("Search completed in {:?} with {} results", duration, count);
                 let formatted_results = format_search_results(&results);
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Found {count} results for '{query}':\n\n{formatted_results}"
                 ))]))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Search error: {e}"
-            ))])),
+            Err(e) => {
+                tracing::error!("Search failed: {}", e);
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Search error: {e}"
+                ))]))
+            }
         }
     }
 
     #[tool(description = "List all uploaded documents")]
+    #[tracing::instrument(skip(self))]
     async fn list_documents(&self) -> Result<CallToolResult, McpError> {
         let engine = self.rag_state.read().await;
         let documents = engine.list_documents();
@@ -130,6 +138,7 @@ impl RagMcpServer {
     }
 
     #[tool(description = "Get RAG system statistics")]
+    #[tracing::instrument(skip(self))]
     async fn get_stats(&self) -> Result<CallToolResult, McpError> {
         let engine = self.rag_state.read().await;
         let stats = engine.get_stats();
@@ -143,7 +152,9 @@ impl RagMcpServer {
     }
 
     #[tool(description = "Start a background reindexing job and return immediately with job ID")]
+    #[tracing::instrument(skip(self))]
     async fn start_reindex(&self) -> Result<CallToolResult, McpError> {
+        tracing::info!("Starting reindex job");
         // Atomically create job if no active job exists (prevents race conditions)
         let job = match self
             .job_manager
@@ -186,6 +197,7 @@ impl RagMcpServer {
     }
 
     #[tool(description = "Get the status of a job (reindexing, etc.)")]
+    #[tracing::instrument(skip(self), fields(job_id = %params.job_id))]
     async fn get_job_status(
         &self,
         Parameters(params): Parameters<GetJobStatusRequest>,
@@ -220,6 +232,7 @@ impl RagMcpServer {
     #[tool(
         description = "Calibrate reranker timeout by measuring actual LLM latencies and computing p99 statistics"
     )]
+    #[tracing::instrument(skip(self), fields(query = %params.query, sample_size = ?params.sample_size))]
     async fn calibrate_reranker(
         &self,
         Parameters(params): Parameters<CalibrateRerankerRequest>,
@@ -365,10 +378,12 @@ struct HttpSearchResponse {
     results: Vec<crate::rag_engine::SearchResult>,
 }
 
+#[tracing::instrument(skip(app_state), fields(query = %request.query, top_k = request.top_k))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
 ) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
+    let start = std::time::Instant::now();
     let top_k = request.top_k.min(MAX_TOP_K);
     let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
     let engine = app_state.rag_state.read().await;
@@ -377,7 +392,14 @@ async fn http_search(
         .search_with_diversity(&request.query, top_k, diversity_factor, None)
         .await
     {
-        Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
+        Ok(results) => {
+            tracing::info!(
+                "HTTP search completed in {:?} with {} results",
+                start.elapsed(),
+                results.len()
+            );
+            Ok(axum::Json(HttpSearchResponse { results }))
+        }
         Err(e) => {
             tracing::error!("Search error: {}", e);
             Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -386,6 +408,7 @@ async fn http_search(
 }
 
 /// HTTP stats endpoint for evaluation framework
+#[tracing::instrument(skip(app_state))]
 async fn http_stats(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
@@ -420,9 +443,11 @@ struct HttpJobStatusResponse {
 }
 
 /// HTTP endpoint to trigger reindex
+#[tracing::instrument(skip(app_state))]
 async fn http_start_reindex(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<HttpReindexResponse>, (axum::http::StatusCode, String)> {
+    tracing::info!("Starting HTTP reindex job");
     // Atomically create job if no active job exists
     let job = match app_state
         .job_manager
@@ -468,6 +493,7 @@ async fn http_start_reindex(
 }
 
 /// HTTP endpoint to get job status
+#[tracing::instrument(skip(app_state), fields(job_id = %job_id))]
 async fn http_get_job_status(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Path(job_id): axum::extract::Path<String>,
@@ -495,6 +521,7 @@ async fn http_get_job_status(
 }
 
 /// HTTP endpoint to get active job (if any)
+#[tracing::instrument(skip(app_state))]
 async fn http_get_active_job(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<Option<HttpJobStatusResponse>>, (axum::http::StatusCode, String)> {

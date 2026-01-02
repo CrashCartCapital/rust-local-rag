@@ -137,6 +137,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         mut batch_callback: Option<&mut (dyn FnMut(usize, usize, usize, usize) + Send)>,
     ) -> Result<Option<PreparedDocument>> {
         if let Some(hash) = document_hash {
+            #[allow(clippy::collapsible_if)]
             if self.is_document_unchanged(document_name, hash) {
                 return Ok(None);
             }
@@ -471,14 +472,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .collect();
 
         let reranked: Vec<RerankedResult> = match &self.reranker {
-            Some(reranker) => match reranker.rerank(query, &reranker_inputs).await {
-                Ok(results) => results,
-                Err(_err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
-                    Vec::new()
+            Some(reranker) =>
+            {
+                #[allow(clippy::manual_unwrap_or_default)]
+                match reranker.rerank(query, &reranker_inputs).await {
+                    Ok(results) => results,
+                    Err(_err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
+                        Vec::new()
+                    }
                 }
-            },
+            }
             None => Vec::new(),
         };
 
@@ -581,6 +586,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         for chunk_id in &valid_chunk_ids {
             if let Some(chunk) = self.chunks.get(chunk_id) {
+                #[allow(clippy::collapsible_if)]
                 if !self.lexical_index.contains(chunk_id) {
                     #[cfg(feature = "tracing")]
                     tracing::debug!("Re-adding missing chunk {} to lexical index", chunk_id);
@@ -590,6 +596,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         if self.ann_index.is_none() && !self.chunks.is_empty() {
+            #[allow(clippy::collapsible_if)]
             if let Some(first_chunk) = self.chunks.values().next() {
                 let dim = first_chunk.embedding.len();
                 if dim > 0 {
@@ -603,6 +610,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
             for chunk_id in &valid_chunk_ids {
                 if let Some(chunk) = self.chunks.get(chunk_id) {
+                    #[allow(clippy::collapsible_if)]
                     if !ann_index.contains(chunk_id) {
                         #[cfg(feature = "tracing")]
                         tracing::debug!("Re-adding missing chunk {} to ANN index", chunk_id);
@@ -618,6 +626,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .map(|chunk| chunk.document_name.clone())
             .collect();
         self.document_hashes.retain(|doc_name, _| {
+            #[allow(clippy::needless_bool)]
             if valid_documents.contains(doc_name) {
                 true
             } else {
@@ -789,6 +798,7 @@ where
             } else if let Ok(legacy_chunks) =
                 serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
             {
+                #[allow(clippy::collapsible_if)]
                 if !legacy_chunks.is_empty() {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(

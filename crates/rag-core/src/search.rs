@@ -186,6 +186,7 @@ impl AnnIndex {
 
     pub(crate) fn remove(&mut self, id: &str) {
         if let Some(hash) = self.id_to_bucket.remove(id) {
+            #[allow(clippy::collapsible_if)]
             if let Some(bucket) = self.buckets.get_mut(&hash) {
                 bucket.retain(|stored| stored != id);
                 if bucket.is_empty() {

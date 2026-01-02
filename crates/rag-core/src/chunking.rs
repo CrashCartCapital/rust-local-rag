@@ -63,6 +63,7 @@ pub(crate) fn chunk_text(
     }
 
     if !window.is_empty() {
+        #[allow(clippy::collapsible_if)]
         if let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0) {
             fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
         }
