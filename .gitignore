@@ -40,6 +40,7 @@ mcp.db
 .archive/
 
 # Development artifacts (not for release)
+.jules/
 CODE_REVIEW_REPORT.md
 PRODUCTION_POLISHING_GUIDE.md
 analysis/
