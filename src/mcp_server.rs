@@ -368,7 +368,7 @@ struct HttpSearchResponse {
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
-) -> Result<axum::Json<HttpSearchResponse>, axum::http::StatusCode> {
+) -> Result<axum::Json<HttpSearchResponse>, (axum::http::StatusCode, String)> {
     let top_k = request.top_k.min(MAX_TOP_K);
     let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
     let engine = app_state.rag_state.read().await;
@@ -380,7 +380,10 @@ async fn http_search(
         Ok(results) => Ok(axum::Json(HttpSearchResponse { results })),
         Err(e) => {
             tracing::error!("Search error: {}", e);
-            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Search error: {e}"),
+            ))
         }
     }
 }
