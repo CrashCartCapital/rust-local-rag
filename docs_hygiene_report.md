@@ -1,130 +1,63 @@
-# Documentation Hygiene Report
+# Dependency Hygiene Report
 
-**Date**: 2025-12-31
-**Branch**: `chore/docs-hygiene-20251231`
-**Auditor**: Claude Code (Opus 4.5)
+## Security Audit
 
----
+### Vulnerabilities
 
-## Summary
+**CRITICAL ATTENTION REQUIRED**
 
-| Metric | Count |
-|--------|-------|
-| **Total Files Audited** | 13 |
-| **Files Kept** | 13 |
-| **Files Archived** | 0 |
-| **Files Deleted** | 0 |
-| **Files Updated** | 5 |
-| **Up-to-date** | 8 |
-| **Marked Historical** | 1 |
+1.  **Crate:** `rsa` (0.9.9)
+    *   **ID:** RUSTSEC-2023-0071
+    *   **Title:** Marvin Attack: potential key recovery through timing sidechannels
+    *   **Severity:** Medium (5.9)
+    *   **Status:** No fixed upgrade is available.
+    *   **Dependency Chain:** `sqlx-mysql` -> `sqlx` -> `rust-local-rag`
 
----
+2.  **Crate:** `tracing-subscriber` (0.3.19)
+    *   **ID:** RUSTSEC-2025-0055
+    *   **Title:** Logging user input may result in poisoning logs with ANSI escape sequences
+    *   **Solution:** Upgrade to >=0.3.20 (Available: 0.3.22)
 
-## Inventory & Decisions
+### Unmaintained / Yanked Packages
 
-| Path | Type | Last Modified | Decision | Status | Action | Rationale |
-|------|------|---------------|----------|--------|--------|-----------|
-| `README.md` | README | 2025-12-09 | KEEP | Updated | Updated | Added docs index grouping, added per_query_weights_prd link |
-| `CLAUDE.md` | AI Guidance | 2025-12-09 | KEEP | Updated | Updated | Fixed outdated reranker section (was Phi JSON, now Yes/No logprobs), added missing env vars |
-| `AGENTS.md` | AI Guidance | 2025-12-16 | KEEP | Up-to-date | None | Recent synthesis, correct references |
-| `docs/setup.md` | How-to | 2025-12-09 | KEEP | Updated | Updated | Added missing env vars: OLLAMA_RERANK_MODEL, PROMPTS_DIR, MCP_HTTP_BIND, MCP_HTTP_ENDPOINT |
-| `docs/how-to-use.md` | How-to | 2025-12-09 | KEEP | Updated | Updated | Added missing env vars |
-| `docs/RAG_EVALUATION_FRAMEWORK_SPEC.md` | Spec | 2025-12-08 | KEEP | Up-to-date | None | Comprehensive spec, accurate |
-| `docs/RERANKER_DEBUGGING_POSTMORTEM.md` | Historical | 2025-12-07 | KEEP | Historical | Updated | Added historical disclaimer - describes OLD Phi-4-Mini JSON approach |
-| `docs/per_query_weights_prd.md` | PRD | 2025-12-09 | KEEP | Up-to-date | None | Marked as implemented, accurate |
-| `eval/README.md` | README | 2025-12-08 | KEEP | Up-to-date | None | Eval framework docs, accurate |
-| `eval/ground_truth/README.md` | Dataset docs | 2025-12-08 | KEEP | Up-to-date | None | Ground truth schema, accurate |
-| `eval/reports/BASELINE_EVALUATION_SUMMARY.md` | Report | 2025-12-08 | KEEP | Up-to-date | None | Evaluation results, preserved |
-| `eval/reports/EXPERT_CORPUS_EVALUATION.md` | Report | 2025-12-08 | KEEP | Up-to-date | None | Expert evaluation, preserved |
-| `prompts/reranker.txt` | Prompt | 2025-12-09 | KEEP | Up-to-date | None | Current Yes/No prompt format |
+*   **dotenv (0.15.0):** Unmaintained since 2021 (RUSTSEC-2021-0141). Consider switching to `dotenvy`.
+*   **paste (1.0.15):** Unmaintained (RUSTSEC-2024-0436).
+*   **flate2 (1.1.7):** Version yanked from crates.io. `cargo update` suggests downgrading to 1.1.5 or upgrading if a newer version exists (checked: 1.1.7 is yanked, 1.1.5 is stable or check for newer).
 
----
+## Stale Dependencies
 
-## Staleness Reasons Identified
+Analysis performed using `cargo update --dry-run` and manual inspection (due to `cargo-outdated` installation constraints).
 
-1. **Reranker Architecture Change**: The reranker was migrated from Phi-4-Mini with JSON scoring to Qwen3-Reranker-style Yes/No with logprobs. CLAUDE.md still documented the old approach.
+### Major Version Updates Available
 
-2. **Missing Environment Variables**: Several env vars were added to the codebase but not documented:
-   - `PROMPTS_DIR` - Prompt template override directory
-   - `MCP_HTTP_BIND` - HTTP health endpoint address
-   - `MCP_HTTP_ENDPOINT` - HTTP MCP endpoint path
-   - `OLLAMA_RERANK_MODEL` - (was missing from some docs)
+*   **reqwest:** v0.12.x -> v0.13.1
 
-3. **Documentation Navigation**: README.md docs section lacked structure (no grouping, missing per_query_weights_prd.md link).
+### Notable Minor Updates
+
+*   **tracing-subscriber:** v0.3.19 -> v0.3.22 (Fixes security vulnerability)
+*   **flate2:** v1.1.7 -> v1.1.5 (Downgrade recommended due to yanked version)
 
 ---
 
-## Key Changes Made
+## Action Plan (Draft Issue)
 
-### 1. CLAUDE.md - Reranker Section Update
-**Before**: Described Phi-4-Mini JSON format with `<|user|>...<|end|><|assistant|>` tokens, JSON pre-fill, 0-100 scoring rubric
+**Title:** Security: Resolve vulnerabilities in `rsa` and `tracing-subscriber` and replace unmaintained crates
 
-**After**: Describes current Yes/No with logprobs approach:
-- Binary classification (Yes/No)
-- Softmax scoring from logprobs: `exp(yes_lp) / (exp(yes_lp) + exp(no_lp))`
-- Stop sequence `\n`, temperature 0.0, num_predict 3
+**Description:**
 
-### 2. RERANKER_DEBUGGING_POSTMORTEM.md - Historical Marker
-Added disclaimer:
-> **HISTORICAL DOCUMENT**: This postmortem documents the debugging process for a **previous** reranker implementation using Phi-4-Mini with JSON scoring (December 2025). The current production system uses **Yes/No binary classification with logprobs-based scoring** (Qwen3-Reranker style).
+A security audit revealed the following issues that require immediate attention:
 
-### 3. Environment Variable Documentation
-Added to CLAUDE.md, docs/setup.md, docs/how-to-use.md:
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `OLLAMA_RERANK_MODEL` | `llama3.1` | LLM for reranking |
-| `PROMPTS_DIR` | `./prompts` | Prompt template overrides |
-| `MCP_HTTP_BIND` | `127.0.0.1:3046` | Health endpoint |
-| `MCP_HTTP_ENDPOINT` | `/mcp` | MCP endpoint path |
+**Vulnerabilities:**
+*   `rsa` (via `sqlx`): "Marvin Attack" (RUSTSEC-2023-0071). No fix available in `rsa` yet. We should check if `sqlx` has an update that mitigates this or uses a different backend/version.
+*   `tracing-subscriber`: Log poisoning vulnerability (RUSTSEC-2025-0055). **Fix:** Update `tracing-subscriber` to `0.3.22`.
 
-### 4. README.md - Documentation Index
-Reorganized into sections:
-- **Getting Started**: setup.md, how-to-use.md
-- **Architecture & Internals**: per_query_weights_prd.md, RAG_EVALUATION_FRAMEWORK_SPEC.md
-- **Historical**: RERANKER_DEBUGGING_POSTMORTEM.md
+**Maintenance:**
+*   Replace `dotenv` with `dotenvy` (maintained fork).
+*   Investigate replacement for `paste` if necessary, or acknowledge unmaintained status.
+*   Fix `flate2` version (currently using yanked 1.1.7).
 
----
-
-## Verification Results
-
-```
-$ cargo check
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.18s
-
-$ cargo fmt --check
-(no output - formatting OK)
-
-$ cargo test
-test result: ok. 4 passed; 0 failed
-```
-
-All tests pass. No code changes required.
-
----
-
-## Follow-ups (Not Blocking)
-
-1. **TUI Environment Variables**: The TUI binary (`rag_tui`) has additional env vars (`RAG_TUI_*`, `RAG_*_WEIGHT`) that are not documented anywhere. Consider adding a TUI-specific docs section or separate TUI.md.
-
-2. **EMBEDDING_BATCH_SIZE / EMBEDDING_BATCH_COOLDOWN_MS**: These advanced tuning vars exist in code but are not documented. Low priority - internal optimization knobs.
-
-3. **eval/reports/**: Consider whether evaluation reports should be in .gitignore or preserved. Currently preserved as historical baselines.
-
-4. **docs/tracking/**: Unaudited directory (appears to be internal tracking, no .md files inside). May warrant cleanup in future.
-
----
-
-## Files Modified
-
-```
-M CLAUDE.md                              # Fixed reranker section, added env vars
-M README.md                              # Improved docs index
-M docs/RERANKER_DEBUGGING_POSTMORTEM.md  # Added historical disclaimer
-M docs/how-to-use.md                     # Added missing env vars
-M docs/setup.md                          # Added missing env vars
-A docs_hygiene_report.md                 # This report
-```
-
----
-
-**Report Complete**
+**Action Items:**
+1.  Run `cargo update -p tracing-subscriber` to get v0.3.22.
+2.  Run `cargo update -p flate2` to move off the yanked version.
+3.  Replace `dotenv` with `dotenvy` in `Cargo.toml`.
+4.  Investigate `sqlx` / `rsa` situation.
