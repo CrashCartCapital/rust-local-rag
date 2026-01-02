@@ -431,11 +431,11 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
         if initial_k < scores.len() {
             scores.select_nth_unstable_by(initial_k, |a, b| {
-                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                b.0.total_cmp(&a.0)
             });
             scores.truncate(initial_k);
         }
-        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.0.total_cmp(&a.0));
 
         let candidates: Vec<SearchCandidate> = scores
             .into_iter()
