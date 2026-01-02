@@ -62,10 +62,10 @@ pub(crate) fn chunk_text(
         }
     }
 
-    if !window.is_empty() {
-        if let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0) {
-            fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
-        }
+    if !window.is_empty()
+        && let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0)
+    {
+        fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
     }
 
     fragments

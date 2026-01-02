@@ -612,14 +612,17 @@ Answer:"#
             let duration_ms = duration.as_millis() as f64;
             durations_ms.push(duration_ms);
 
-            if result.is_ok() {
-                tracing::debug!("Calibration sample completed in {:.0}ms", duration_ms);
-            } else {
-                tracing::warn!(
-                    "Calibration sample failed in {:.0}ms: {:?}",
-                    duration_ms,
-                    result.unwrap_err()
-                );
+            match result {
+                Ok(_) => {
+                    tracing::debug!("Calibration sample completed in {:.0}ms", duration_ms);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Calibration sample failed in {:.0}ms: {:?}",
+                        duration_ms,
+                        err
+                    );
+                }
             }
 
             // Add next candidate if available

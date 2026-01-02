@@ -136,10 +136,10 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         document_hash: Option<&str>,
         mut batch_callback: Option<&mut (dyn FnMut(usize, usize, usize, usize) + Send)>,
     ) -> Result<Option<PreparedDocument>> {
-        if let Some(hash) = document_hash {
-            if self.is_document_unchanged(document_name, hash) {
-                return Ok(None);
-            }
+        if let Some(hash) = document_hash
+            && self.is_document_unchanged(document_name, hash)
+        {
+            return Ok(None);
         }
 
         let fragments = chunk_text(text, self.config.chunk_tokens, self.config.sentence_overlap);
@@ -580,21 +580,22 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         self.lexical_index.drop_stale(&valid_chunk_ids);
 
         for chunk_id in &valid_chunk_ids {
-            if let Some(chunk) = self.chunks.get(chunk_id) {
-                if !self.lexical_index.contains(chunk_id) {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!("Re-adding missing chunk {} to lexical index", chunk_id);
-                    self.lexical_index.add_chunk(chunk_id, &chunk.text);
-                }
+            if let Some(chunk) = self.chunks.get(chunk_id)
+                && !self.lexical_index.contains(chunk_id)
+            {
+                #[cfg(feature = "tracing")]
+                tracing::debug!("Re-adding missing chunk {} to lexical index", chunk_id);
+                self.lexical_index.add_chunk(chunk_id, &chunk.text);
             }
         }
 
-        if self.ann_index.is_none() && !self.chunks.is_empty() {
-            if let Some(first_chunk) = self.chunks.values().next() {
-                let dim = first_chunk.embedding.len();
-                if dim > 0 {
-                    self.ann_index = Some(AnnIndex::new(dim));
-                }
+        if self.ann_index.is_none()
+            && !self.chunks.is_empty()
+            && let Some(first_chunk) = self.chunks.values().next()
+        {
+            let dim = first_chunk.embedding.len();
+            if dim > 0 {
+                self.ann_index = Some(AnnIndex::new(dim));
             }
         }
 
@@ -602,12 +603,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             ann_index.drop_stale(&valid_chunk_ids);
 
             for chunk_id in &valid_chunk_ids {
-                if let Some(chunk) = self.chunks.get(chunk_id) {
-                    if !ann_index.contains(chunk_id) {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!("Re-adding missing chunk {} to ANN index", chunk_id);
-                        ann_index.insert(chunk_id, &chunk.embedding);
-                    }
+                if let Some(chunk) = self.chunks.get(chunk_id)
+                    && !ann_index.contains(chunk_id)
+                {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!("Re-adding missing chunk {} to ANN index", chunk_id);
+                    ann_index.insert(chunk_id, &chunk.embedding);
                 }
             }
         }
@@ -787,15 +788,14 @@ where
                 }
             } else if let Ok(legacy_chunks) =
                 serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
+                && !legacy_chunks.is_empty()
             {
-                if !legacy_chunks.is_empty() {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        "Found legacy chunks without model info. Reindex required for model '{}'.",
-                        current_model
-                    );
-                    self.needs_reindex = true;
-                }
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    "Found legacy chunks without model info. Reindex required for model '{}'.",
+                    current_model
+                );
+                self.needs_reindex = true;
             }
         }
 

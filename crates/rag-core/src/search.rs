@@ -185,12 +185,12 @@ impl AnnIndex {
     }
 
     pub(crate) fn remove(&mut self, id: &str) {
-        if let Some(hash) = self.id_to_bucket.remove(id) {
-            if let Some(bucket) = self.buckets.get_mut(&hash) {
-                bucket.retain(|stored| stored != id);
-                if bucket.is_empty() {
-                    self.buckets.remove(&hash);
-                }
+        if let Some(hash) = self.id_to_bucket.remove(id)
+            && let Some(bucket) = self.buckets.get_mut(&hash)
+        {
+            bucket.retain(|stored| stored != id);
+            if bucket.is_empty() {
+                self.buckets.remove(&hash);
             }
         }
     }
