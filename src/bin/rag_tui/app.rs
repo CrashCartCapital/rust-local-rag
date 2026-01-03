@@ -1086,7 +1086,7 @@ mod tests {
             chunks: 1247,
             status: "ready".to_string(),
             embedding_model: Some("nomic-embed-text".to_string()),
-            reranker_model: Some("phi4-mini".to_string()),
+            reranker_model: Some("dengcao/Qwen3-Reranker-4B:Q5_K_M".to_string()),
         };
 
         app.update_stats(stats);
@@ -1094,7 +1094,10 @@ mod tests {
         assert_eq!(app.chunk_count, 1247);
         assert_eq!(app.status, ServerStatus::Ready);
         assert_eq!(app.embedding_model, "nomic-embed-text");
-        assert_eq!(app.reranker_model, Some("phi4-mini".to_string()));
+        assert_eq!(
+            app.reranker_model,
+            Some("dengcao/Qwen3-Reranker-4B:Q5_K_M".to_string())
+        );
     }
 
     #[test]

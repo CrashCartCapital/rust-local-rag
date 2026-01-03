@@ -26,7 +26,7 @@ eval/
 ├── pyproject.toml           # Dependencies (uv/pip)
 │
 ├── configs/                 # Experiment configurations
-│   ├── baseline.yaml        # Production config (embed-light + phi4-mini)
+│   ├── baseline.yaml        # Production config (embed-light + Qwen3-Reranker-4B)
 │   └── embedding_only.yaml  # No reranking baseline
 │
 ├── ground_truth/            # Labeled evaluation data
@@ -57,7 +57,7 @@ python -m eval.run evaluate --config baseline -o reports/my_run.json
 
 | Config | Description | Use Case |
 |--------|-------------|----------|
-| `baseline` | embed-light + phi4-mini reranker | Production quality testing |
+| `baseline` | embed-light + Qwen3-Reranker-4B reranker | Production quality testing |
 | `embedding_only` | No reranking | Latency testing, ablation |
 
 ## Metrics
@@ -124,7 +124,7 @@ retrieval_top_k: 15         # Candidates before reranking
 
 # Model Settings
 embedding_model: "embed-light"
-reranker_model: "phi4-mini"
+reranker_model: "dengcao/Qwen3-Reranker-4B:Q5_K_M"
 reranker_enabled: true
 
 # Hybrid Search Weights
@@ -139,7 +139,7 @@ page_tolerance: 15          # Allow page variance in matching
 
 ## Latest Results
 
-**Baseline Evaluation (2025-12-08)**:
+**Baseline Evaluation (2025-12-08, historical phi4-mini run)**:
 
 | Metric | Value |
 |--------|-------|

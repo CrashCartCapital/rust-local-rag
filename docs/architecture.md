@@ -43,7 +43,7 @@
 ## Search & Retrieval
 
 1.  **Vector Search**: Finds top-k chunks with highest cosine similarity to the query embedding.
-2.  **Reranking (Optional)**: If enabled, an LLM (e.g., `llama3.1`) evaluates the relevance of the top candidates.
+2.  **Reranking (Optional)**: If enabled, a reranker model (e.g., `dengcao/Qwen3-Reranker-4B:Q5_K_M`) evaluates the relevance of the top candidates.
 3.  **Diversification**: Uses MMR (Maximal Marginal Relevance) to balance relevance with diversity in results.
 
 ## Job-Based Processing

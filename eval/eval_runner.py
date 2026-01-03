@@ -63,7 +63,7 @@ class EvalConfig:
     # Optional settings with defaults
     retrieval_top_k: int = 15
     embedding_model: str = "embed-light"
-    reranker_model: str = "phi4-mini"
+    reranker_model: str = "dengcao/Qwen3-Reranker-4B:Q5_K_M"
     reranker_enabled: bool = True
     page_tolerance: int = 1
 
@@ -83,7 +83,7 @@ class EvalConfig:
             metrics=data.get("metrics", ["hit_rate@5", "mrr@5", "latency_p95"]),
             retrieval_top_k=data.get("retrieval_top_k", 15),
             embedding_model=data.get("embedding_model", "embed-light"),
-            reranker_model=data.get("reranker_model", "phi4-mini"),
+            reranker_model=data.get("reranker_model", "dengcao/Qwen3-Reranker-4B:Q5_K_M"),
             reranker_enabled=data.get("reranker_enabled", True),
             page_tolerance=data.get("page_tolerance", 1),
         )

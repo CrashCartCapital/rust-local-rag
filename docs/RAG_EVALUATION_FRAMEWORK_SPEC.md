@@ -456,7 +456,7 @@ retrieval_top_k: 15  # Initial candidates before reranking
 
 # Model Settings
 embedding_model: "embed-light"  # Quantized qwen3-embed
-reranker_model: "phi4-mini"
+reranker_model: "dengcao/Qwen3-Reranker-4B:Q5_K_M"
 reranker_enabled: true
 
 # Hybrid Search Weights
@@ -684,7 +684,7 @@ def test_prompt_consistency(prompt_path: str, n_repeats: int = 5) -> dict:
 
 | Model | Size | Est. Speed | Notes |
 |-------|------|------------|-------|
-| `phi4-mini` | 3.8B | ~3s/chunk | Current, fast |
+| `dengcao/Qwen3-Reranker-4B:Q5_K_M` | 4B | ~2s/chunk | **Current production**, dedicated reranker |
 | `llama3.1:8b` | 8B | ~8s/chunk | More capable |
 | `mistral:7b` | 7B | ~6s/chunk | Good reasoning |
 | `gemma2:9b` | 9B | ~10s/chunk | Google quality |
@@ -708,17 +708,17 @@ Per Gemini review: dedicated cross-encoder models are typically 10x faster and o
 
 ```
 Priority 1 (MVP):
-- baseline: embed-light + phi4-mini (current production)
+- baseline: embed-light + Qwen3-Reranker-4B (current production)
 - embedding_only: embed-light + none
 
 Priority 2 (Embedding comparison):
 - embed-light vs embed-heavy (both already installed!)
 - Optional: mxbai-embed-large if results warrant
-- All with phi4-mini reranker
+- All with Qwen3-Reranker-4B reranker
 
 Priority 3 (Reranker comparison):
 - embed-light embedding (keep constant)
-- phi4-mini vs qwen2.5:7b vs llama3.1
+- Qwen3-Reranker-4B vs qwen2.5:7b vs llama3.1
 
 Priority 4 (Hybrid weights):
 - Dense:Sparse = 0.8:0.2, 0.7:0.3, 0.6:0.4, 0.5:0.5
@@ -857,7 +857,7 @@ All design questions have been resolved. Documenting decisions for reference:
 |----------|----------|-----------|
 | **Ground Truth Creation** | Claude + Ensemble with PDF context, manual curation | Avoid "poisoning the well" by not using RAG tools for query generation |
 | **Evaluation Frequency** | Manual only | Run on major changes (model swap, prompt change), not CI |
-| **Model Testing Scope** | `embed-light` vs `embed-heavy` first, keep `phi4-mini` reranker | Both already installed; start with what we have |
+| **Model Testing Scope** | `embed-light` vs `embed-heavy` first, keep `Qwen3-Reranker-4B` reranker | Both already installed; start with what we have |
 | **Success Thresholds** | Hit Rate@5 > 0.80, Latency p95 < 5s | Personal research use case, not production SLA |
 | **Rejection Testing** | Include 5-10 rejection queries | Finance context: false confidence worse than "I don't know" |
 
@@ -945,5 +945,5 @@ advanced = [
    - Cross-reference with web for domain accuracy
    - Manual curation of 20 golden + 30 synthetic + 5-10 rejection queries
 3. Implement MVP harness (Hit Rate@5, MRR@5, Latency p95)
-4. Run first baseline evaluation with `embed-light` + `phi4-mini`
+4. Run first baseline evaluation with `embed-light` + `Qwen3-Reranker-4B`
 5. Iterate based on results

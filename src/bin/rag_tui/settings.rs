@@ -222,7 +222,8 @@ impl Settings {
             Setting::new(
                 "OLLAMA_RERANK_MODEL",
                 "Reranker Model",
-                &std::env::var("OLLAMA_RERANK_MODEL").unwrap_or_else(|_| "phi4-mini".to_string()),
+                &std::env::var("OLLAMA_RERANK_MODEL")
+                    .unwrap_or_else(|_| "dengcao/Qwen3-Reranker-4B:Q5_K_M".to_string()),
                 "Model used for reranking search results",
                 true,
             ),

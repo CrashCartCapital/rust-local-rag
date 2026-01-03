@@ -41,7 +41,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `LOG_MAX_MB` | Max log file size in MB before truncation | `5` |
 | `OLLAMA_URL` | Base URL for the Ollama API | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model name (must be installed via `ollama pull`) | `nomic-embed-text` |
-| `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `llama3.1` |
+| `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `dengcao/Qwen3-Reranker-4B:Q5_K_M` |
 | `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
 | `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:3046` |
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |

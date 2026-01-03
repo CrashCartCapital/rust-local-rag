@@ -667,7 +667,7 @@ python -m eval.run evaluate --config baseline -v
 ```
 
 **Key Files:**
-- `eval/configs/baseline.yaml` - Production config (embed-light + phi4-mini)
+- `eval/configs/baseline.yaml` - Production config (embed-light + Qwen3-Reranker-4B)
 - `eval/ground_truth/queries.jsonl` - 50 labeled queries
 - `eval/reports/BASELINE_EVALUATION_SUMMARY.md` - Latest results
 
@@ -724,7 +724,7 @@ Configuration is loaded from environment variables and `.env` files:
 | `LOG_MAX_MB` | `5` | Max log size before truncation |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model to use |
-| `OLLAMA_RERANK_MODEL` | `llama3.1` | LLM model for reranking search results |
+| `OLLAMA_RERANK_MODEL` | `dengcao/Qwen3-Reranker-4B:Q5_K_M` | LLM model for reranking search results |
 | `PROMPTS_DIR` | `./prompts` | Directory for prompt template overrides |
 | `MCP_HTTP_BIND` | `127.0.0.1:3046` | HTTP health endpoint address |
 | `MCP_HTTP_ENDPOINT` | `/mcp` | HTTP MCP endpoint path |
@@ -938,7 +938,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
         "DATA_DIR": "/Users/username/Documents/data",
         "DOCUMENTS_DIR": "/Users/username/Documents/rag",
         "OLLAMA_EMBEDDING_MODEL": "nomic-embed-text",
-        "OLLAMA_RERANK_MODEL": "llama3.1"
+        "OLLAMA_RERANK_MODEL": "dengcao/Qwen3-Reranker-4B:Q5_K_M"
       }
     }
   }

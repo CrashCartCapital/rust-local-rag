@@ -94,7 +94,7 @@ impl RerankerService {
     ///
     /// The service is configured via environment variables:
     /// * `OLLAMA_URL` - The Ollama API endpoint (default: `http://localhost:11434`)
-    /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `llama3.1`)
+    /// * `OLLAMA_RERANK_MODEL` - The model to use for reranking (default: `dengcao/Qwen3-Reranker-4B:Q5_K_M`)
     ///
     /// # Errors
     ///
@@ -104,7 +104,8 @@ impl RerankerService {
     pub async fn new() -> Result<Self> {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("OLLAMA_RERANK_MODEL").unwrap_or_else(|_| "llama3.1".to_string());
+        let model = std::env::var("OLLAMA_RERANK_MODEL")
+            .unwrap_or_else(|_| "dengcao/Qwen3-Reranker-4B:Q5_K_M".to_string());
 
         // Load prompt template from file or use default
         let prompt_template = Self::load_prompt_template().await;

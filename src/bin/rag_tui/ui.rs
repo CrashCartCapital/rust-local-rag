@@ -1153,14 +1153,15 @@ mod tests {
     fn test_render_with_models() {
         let mut app = make_test_app();
         app.embedding_model = "nomic-embed-text".to_string();
-        app.reranker_model = Some("phi4-mini".to_string());
+        app.reranker_model = Some("dengcao/Qwen3-Reranker-4B:Q5_K_M".to_string());
 
         let buffer = render_to_buffer(&app, 80, 30);
 
         // Should show model names in compact status bar (truncated to fit)
         // "nomic-embed-text" (16 chars) gets truncated to "nomic-embed-te…" (15 chars)
         assert!(buffer_contains(&buffer, "nomic-embed"));
-        assert!(buffer_contains(&buffer, "phi4-mini"));
+        // Reranker model gets truncated; just assert a stable prefix is visible.
+        assert!(buffer_contains(&buffer, "dengcao"));
     }
 
     #[test]
