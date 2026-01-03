@@ -1076,7 +1076,7 @@ mod tests {
 
     /// Helper to create a test app with configurable state
     fn make_test_app() -> App {
-        App::new("http://localhost:3046".to_string())
+        App::new("http://localhost:8140".to_string())
     }
 
     fn make_test_result(doc: &str, score: f32, text: &str) -> SearchResult {

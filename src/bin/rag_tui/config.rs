@@ -34,7 +34,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             server_url: std::env::var("RAG_TUI_SERVER_URL")
-                .unwrap_or_else(|_| "http://localhost:3046".to_string()),
+                .unwrap_or_else(|_| "http://localhost:8140".to_string()),
             data_dir: std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string()),
             documents_dir: std::env::var("DOCUMENTS_DIR")
                 .unwrap_or_else(|_| "./documents".to_string()),
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn test_config_summary() {
         let config = Config {
-            server_url: "http://localhost:3046".to_string(),
+            server_url: "http://localhost:8140".to_string(),
             data_dir: "./data".to_string(),
             documents_dir: "./documents".to_string(),
             ollama_url: "localhost:11434".to_string(),

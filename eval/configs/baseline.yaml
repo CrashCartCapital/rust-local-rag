@@ -7,7 +7,7 @@ description: "Current production configuration - embed-light embeddings with Qwe
 # RAG Server Settings
 # Use HTTP mode for evaluation (JSON API on same port as MCP)
 # HTTP endpoints: POST /search, GET /stats, GET /readyz
-rag_endpoint: "http://localhost:3046"
+rag_endpoint: "http://localhost:8140"
 connection_mode: "http"
 
 # Retrieval Settings

@@ -6,7 +6,7 @@ description: "No reranking - pure vector similarity for speed comparison"
 
 # RAG Server Settings
 # Use HTTP mode for evaluation (JSON API on same port as MCP)
-rag_endpoint: "http://localhost:3046"
+rag_endpoint: "http://localhost:8140"
 connection_mode: "http"
 
 # Retrieval Settings

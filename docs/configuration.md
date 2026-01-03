@@ -43,7 +43,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model name (must be installed via `ollama pull`) | `nomic-embed-text` |
 | `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `dengcao/Qwen3-Reranker-4B:Q5_K_M` |
 | `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
-| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:3046` |
+| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:8140` |
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` or `DEV` | Prefer console logging (development friendly) | _unset_ |
 | `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |

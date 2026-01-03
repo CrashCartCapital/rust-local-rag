@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_app_initial_state() {
-        let app = App::new("http://localhost:3046".to_string());
+        let app = App::new("http://localhost:8140".to_string());
         assert!(!app.connected);
         assert!(!app.search_in_progress);
         assert_eq!(app.search_id, 0);
@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_input_handling() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         // Type characters
         app.input_char('h');
@@ -978,14 +978,14 @@ mod tests {
         assert_eq!(app.query_input, "hell");
 
         // Backspace on empty should not panic
-        let mut empty_app = App::new("http://localhost:3046".to_string());
+        let mut empty_app = App::new("http://localhost:8140".to_string());
         empty_app.input_backspace(); // Should not panic
         assert!(empty_app.query_input.is_empty());
     }
 
     #[test]
     fn test_search_id_tracking() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         app.query_input = "test query".to_string();
 
         // Start first search
@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn test_result_navigation() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         // Add some results
         app.results = vec![
@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_scroll_empty_results() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         // Empty results - scrolling should not panic
         app.scroll_down();
         app.scroll_up();
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_search_cancel() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         app.query_input = "test".to_string();
         app.start_search();
         assert!(app.search_in_progress);
@@ -1070,7 +1070,7 @@ mod tests {
 
     #[test]
     fn test_empty_query_start_search() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         app.query_input = "   ".to_string(); // Whitespace only
         app.start_search();
         assert_eq!(app.search_id, 0); // Should not increment
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_stats_update() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         let stats = Stats {
             documents: 15,
@@ -1102,7 +1102,7 @@ mod tests {
 
     #[test]
     fn test_connection_state() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         // Initial connection
         app.set_connected(true);
@@ -1122,7 +1122,7 @@ mod tests {
 
     #[test]
     fn test_error_handling() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         app.set_error(Some("Test error".to_string()));
         assert_eq!(app.last_error, Some("Test error".to_string()));
@@ -1133,7 +1133,7 @@ mod tests {
 
     #[test]
     fn test_unicode_input() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         // Unicode characters
         app.input_char('日');
@@ -1148,7 +1148,7 @@ mod tests {
     // Tests for Msg update pattern
     #[test]
     fn test_msg_quit() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         assert!(!app.should_quit);
         app.update(Msg::Quit);
         assert!(app.should_quit);
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_msg_navigation() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         app.results = vec![
             make_test_result("doc1.pdf", 0.9),
             make_test_result("doc2.pdf", 0.8),
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[test]
     fn test_msg_input() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
 
         app.update(Msg::InputChar('h'));
         app.update(Msg::InputChar('i'));
@@ -1192,7 +1192,7 @@ mod tests {
 
     #[test]
     fn test_msg_search_flow() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         app.query_input = "test query".to_string();
 
         // StartSearch returns true to signal async action needed
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn test_msg_mode_toggle() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         assert_eq!(app.mode, AppMode::Normal);
 
         app.update(Msg::ToggleHelp);
@@ -1231,7 +1231,7 @@ mod tests {
 
     #[test]
     fn test_msg_job_lifecycle() {
-        let mut app = App::new("http://localhost:3046".to_string());
+        let mut app = App::new("http://localhost:8140".to_string());
         assert!(!app.reindex_in_progress);
 
         app.update(Msg::ReindexStarted {

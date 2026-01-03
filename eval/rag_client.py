@@ -111,7 +111,7 @@ class RAGClient:
         """MCP via JSON-RPC over HTTP.
 
         Calls the search_documents MCP tool via the rmcp HTTP transport.
-        Endpoint should be the MCP HTTP endpoint (default: http://localhost:3046/mcp).
+        Endpoint should be the MCP HTTP endpoint (default: http://localhost:8140/mcp).
         """
         try:
             # MCP JSON-RPC request format

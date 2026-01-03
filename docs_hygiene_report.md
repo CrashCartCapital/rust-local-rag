@@ -74,7 +74,7 @@ Added to CLAUDE.md, docs/setup.md, docs/how-to-use.md:
 |----------|---------|---------|
 | `OLLAMA_RERANK_MODEL` | `llama3.1` | LLM for reranking |
 | `PROMPTS_DIR` | `./prompts` | Prompt template overrides |
-| `MCP_HTTP_BIND` | `127.0.0.1:3046` | Health endpoint |
+| `MCP_HTTP_BIND` | `127.0.0.1:8140` | Health endpoint |
 | `MCP_HTTP_ENDPOINT` | `/mcp` | MCP endpoint path |
 
 ### 4. README.md - Documentation Index

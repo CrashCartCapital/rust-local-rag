@@ -18,5 +18,4 @@ npm install
 npm run dev
 ```
 
-The dev server proxies `POST /search` to `http://127.0.0.1:3046/search`.
-
+The dev server proxies `POST /search` to `http://127.0.0.1:8140/search`.

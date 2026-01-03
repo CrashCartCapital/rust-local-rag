@@ -9,7 +9,7 @@ default:
 build:
     cargo build --bin rag-tui --release
 
-# Run the TUI (connects to default localhost:3046)
+# Run the TUI (connects to default localhost:8140)
 tui:
     cargo run --bin rag-tui --release
 
@@ -57,11 +57,11 @@ server-stop:
 
 # Check server health
 health:
-    @curl -s http://localhost:3046/healthz && echo " Server healthy" || echo "Server not responding"
+    @curl -s http://localhost:8140/healthz && echo " Server healthy" || echo "Server not responding"
 
 # Get server stats
 stats:
-    @curl -s http://localhost:3046/stats | jq .
+    @curl -s http://localhost:8140/stats | jq .
 
 # Run all TUI tests
 test:
@@ -73,13 +73,13 @@ test-verbose:
 
 # Quick search from command line (requires jq)
 search query:
-    @curl -s -X POST http://localhost:3046/search \
+    @curl -s -X POST http://localhost:8140/search \
         -H "Content-Type: application/json" \
         -d '{"query": "{{query}}", "top_k": 5}' | jq '.results[] | {doc: .document, score: .score, text: .text[:80]}'
 
 # Trigger reindex
 reindex:
-    @curl -s -X POST http://localhost:3046/reindex | jq .
+    @curl -s -X POST http://localhost:8140/reindex | jq .
 
 # Install TUI to ~/.cargo/bin
 install:

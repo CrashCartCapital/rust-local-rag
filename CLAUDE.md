@@ -726,7 +726,7 @@ Configuration is loaded from environment variables and `.env` files:
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model to use |
 | `OLLAMA_RERANK_MODEL` | `dengcao/Qwen3-Reranker-4B:Q5_K_M` | LLM model for reranking search results |
 | `PROMPTS_DIR` | `./prompts` | Directory for prompt template overrides |
-| `MCP_HTTP_BIND` | `127.0.0.1:3046` | HTTP health endpoint address |
+| `MCP_HTTP_BIND` | `127.0.0.1:8140` | HTTP health endpoint address |
 | `MCP_HTTP_ENDPOINT` | `/mcp` | HTTP MCP endpoint path |
 | `DEVELOPMENT` or `DEV` | unset | Forces console logging |
 | `CONSOLE_LOGS` | unset | Console logging without dev mode |

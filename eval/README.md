@@ -115,7 +115,7 @@ name: "config_name"
 description: "Human-readable description"
 
 # Server Connection
-rag_endpoint: "http://localhost:3046"
+rag_endpoint: "http://localhost:8140"
 connection_mode: "http"
 
 # Retrieval Settings

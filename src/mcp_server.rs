@@ -566,7 +566,7 @@ pub async fn start_mcp_server(
     };
 
     let bind: SocketAddr = std::env::var("MCP_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:3046".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:8140".to_string())
         .parse()?;
 
     let endpoint_path = std::env::var("MCP_HTTP_ENDPOINT").unwrap_or_else(|_| "/mcp".to_string());
