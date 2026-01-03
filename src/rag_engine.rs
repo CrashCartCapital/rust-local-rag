@@ -311,8 +311,10 @@ impl RagEngine {
         let doc = Document::load_mem(data)
             .map_err(|e| anyhow::anyhow!("lopdf failed to parse PDF: {}", e))?;
 
-        let mut all_text = String::new();
         let pages = doc.get_pages();
+        // OPTIMIZATION: Reserve memory to avoid reallocations
+        // Estimate 500 characters per page as a conservative average
+        let mut all_text = String::with_capacity(pages.len() * 500);
 
         for (page_num, _page_id) in pages {
             match doc.extract_text(&[page_num]) {
@@ -361,7 +363,10 @@ impl RagEngine {
 
         match output {
             Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                // OPTIMIZATION: Try to consume Vec<u8> directly to avoid allocation
+                let text = String::from_utf8(output.stdout)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).to_string());
+
                 if text.trim().is_empty() {
                     tracing::warn!("pdftotext extracted 0 characters");
                     Err(anyhow::anyhow!("pdftotext produced no text output"))
