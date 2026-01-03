@@ -312,8 +312,6 @@ impl RagEngine {
             .map_err(|e| anyhow::anyhow!("lopdf failed to parse PDF: {}", e))?;
 
         let pages = doc.get_pages();
-        // OPTIMIZATION: Reserve memory to avoid reallocations
-        // Estimate 500 characters per page as a conservative average
         let mut all_text = String::with_capacity(pages.len() * 500);
 
         for (page_num, _page_id) in pages {
@@ -363,7 +361,6 @@ impl RagEngine {
 
         match output {
             Ok(output) if output.status.success() => {
-                // OPTIMIZATION: Try to consume Vec<u8> directly to avoid allocation
                 let text = String::from_utf8(output.stdout)
                     .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).to_string());
 

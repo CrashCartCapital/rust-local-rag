@@ -638,7 +638,6 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
 
     let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() > 2).collect();
 
-    // Create regex for highlighting
     let highlight_re = if !terms.is_empty() {
         let pattern = terms
             .iter()
@@ -691,7 +690,6 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
                 String::new()
             };
 
-            // Highlight matches in text
             let text = if let Some(re) = &highlight_re {
                 re.replace_all(&result.text, "**$1**").to_string()
             } else {
@@ -764,7 +762,6 @@ mod tests {
         assert!(formatted.contains("**1. [85%] fox.pdf (page 1)**"));
         assert!(formatted.contains("*Section: Intro*"));
         assert!(formatted.contains("Scores: Semantic: 0.82 | Keyword: 0.65"));
-        // Check for highlighting
         assert!(formatted.contains("The quick brown **fox**"));
 
         assert!(formatted.contains("---\n\n"));
