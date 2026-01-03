@@ -644,7 +644,7 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
             .map(|t| regex::escape(t))
             .collect::<Vec<_>>()
             .join("|");
-        regex::RegexBuilder::new(&format!("(?i)({})", pattern))
+        regex::RegexBuilder::new(&format!("(?i)({pattern})"))
             .build()
             .ok()
     } else {
