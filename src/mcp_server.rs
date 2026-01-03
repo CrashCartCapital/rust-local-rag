@@ -94,7 +94,7 @@ impl RagMcpServer {
         {
             Ok(results) => {
                 let count = results.len();
-                let formatted_results = format_search_results(&results);
+                let formatted_results = format_search_results(&results, &query);
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Found {count} results for '{query}':\n\n{formatted_results}"
@@ -596,10 +596,26 @@ pub async fn start_mcp_server(
     Ok(())
 }
 
-fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String {
+fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &str) -> String {
     if results.is_empty() {
         return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`.".to_string();
     }
+
+    let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() > 2).collect();
+
+    // Create regex for highlighting
+    let highlight_re = if !terms.is_empty() {
+        let pattern = terms
+            .iter()
+            .map(|t| regex::escape(t))
+            .collect::<Vec<_>>()
+            .join("|");
+        regex::RegexBuilder::new(&format!("(?i)({})", pattern))
+            .build()
+            .ok()
+    } else {
+        None
+    };
 
     results
         .iter()
@@ -640,6 +656,13 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String 
                 String::new()
             };
 
+            // Highlight matches in text
+            let text = if let Some(re) = &highlight_re {
+                re.replace_all(&result.text, "**$1**").to_string()
+            } else {
+                result.text.clone()
+            };
+
             // Format: **1. [85%] document.pdf (page 5)**
             // *Section: Introduction*
             // *Scores: Semantic: 0.82 | Keyword: 0.65*
@@ -652,7 +675,7 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult]) -> String 
                 provenance,
                 section,
                 score_breakdown,
-                result.text
+                text
             )
         })
         .collect::<Vec<_>>()
@@ -699,14 +722,15 @@ mod tests {
             },
         ];
 
-        let formatted = format_search_results(&results);
+        let formatted = format_search_results(&results, "fox");
 
         // This confirms the NEW format logic works as expected.
         // **1. [85%] fox.pdf (page 1)**
         assert!(formatted.contains("**1. [85%] fox.pdf (page 1)**"));
         assert!(formatted.contains("*Section: Intro*"));
         assert!(formatted.contains("Scores: Semantic: 0.82 | Keyword: 0.65"));
-        assert!(formatted.contains("The quick brown fox"));
+        // Check for highlighting
+        assert!(formatted.contains("The quick brown **fox**"));
 
         assert!(formatted.contains("---\n\n"));
 
