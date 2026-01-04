@@ -561,10 +561,6 @@ pub async fn start_mcp_server(
     job_tx: mpsc::Sender<JobRequest>,
     documents_dir: String,
 ) -> Result<()> {
-    use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
-    };
-
     let bind: SocketAddr = std::env::var("MCP_HTTP_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8140".to_string())
         .parse()?;
@@ -577,6 +573,40 @@ pub async fn start_mcp_server(
         endpoint_path
     );
     tracing::info!("Health endpoints: /healthz (liveness), /readyz (readiness)");
+
+    let router = create_router(
+        rag_state,
+        job_manager,
+        job_tx,
+        documents_dir,
+        &endpoint_path,
+    );
+
+    tracing::info!(
+        "HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id"
+    );
+
+    let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
+
+    axum::serve(tcp_listener, router)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await?;
+
+    Ok(())
+}
+
+fn create_router(
+    rag_state: Arc<RwLock<RagEngine>>,
+    job_manager: Arc<JobManager>,
+    job_tx: mpsc::Sender<JobRequest>,
+    documents_dir: String,
+    endpoint_path: &str,
+) -> axum::Router {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpService, session::local::LocalSessionManager,
+    };
 
     let service = StreamableHttpService::new(
         {
@@ -605,7 +635,8 @@ pub async fn start_mcp_server(
         documents_dir: documents_dir.clone(),
     };
 
-    let router = axum::Router::new()
+    axum::Router::new()
+        .route("/health", axum::routing::get(healthz)) // Added alias for convention
         .route("/healthz", axum::routing::get(healthz))
         .route("/readyz", axum::routing::get(readyz))
         .route("/search", axum::routing::post(http_search))
@@ -613,22 +644,8 @@ pub async fn start_mcp_server(
         .route("/reindex", axum::routing::post(http_start_reindex))
         .route("/jobs/active", axum::routing::get(http_get_active_job))
         .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
-        .route(&endpoint_path, axum::routing::any_service(service))
-        .with_state(app_state);
-
-    tracing::info!(
-        "HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id"
-    );
-
-    let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
-
-    axum::serve(tcp_listener, router)
-        .with_graceful_shutdown(async {
-            tokio::signal::ctrl_c().await.ok();
-        })
-        .await?;
-
-    Ok(())
+        .route(endpoint_path, axum::routing::any_service(service))
+        .with_state(app_state)
 }
 
 fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &str) -> String {
@@ -768,5 +785,11 @@ mod tests {
 
         assert!(formatted.contains("**2. [73%] lorem.pdf (page 10)**"));
         assert!(formatted.contains("Scores: Semantic: 0.72 | Reranker: 0.95"));
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_handler() {
+        let status = healthz().await;
+        assert_eq!(status, axum::http::StatusCode::OK);
     }
 }
