@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -98,6 +99,7 @@ impl RagEngine {
 
     /// Adds a document to the index by extracting text, chunking, and generating embeddings.
     /// Returns the number of chunks created (0 if document unchanged via hash check).
+    #[instrument(skip(self, data, batch_callback), fields(filename = %filename))]
     pub async fn add_document(
         &mut self,
         filename: &str,
@@ -105,6 +107,7 @@ impl RagEngine {
         batch_callback: Option<&mut (dyn FnMut(usize, usize, usize, usize) + Send)>,
     ) -> Result<usize> {
         tracing::info!("Processing document: {}", filename);
+        let start = std::time::Instant::now();
 
         let prepared = self
             .prepare_document(filename, data, batch_callback)
@@ -117,14 +120,16 @@ impl RagEngine {
         self.save_to_disk_sync()?;
 
         tracing::info!(
-            "Successfully processed {} chunks for {}",
+            "Successfully processed {} chunks for {} in {:?}",
             chunk_count,
-            filename
+            filename,
+            start.elapsed()
         );
 
         Ok(chunk_count)
     }
 
+    #[instrument(skip(self, data, batch_callback), fields(filename = %filename))]
     pub async fn prepare_document(
         &self,
         filename: &str,
@@ -151,6 +156,7 @@ impl RagEngine {
             .map_err(anyhow::Error::new)
     }
 
+    #[instrument(skip(self, prepared), fields(doc = %prepared.document_name, chunks = prepared.chunks.len()))]
     pub async fn apply_prepared_document(&mut self, prepared: PreparedDocument) -> Result<usize> {
         let chunk_count = self
             .core
@@ -160,6 +166,7 @@ impl RagEngine {
         Ok(chunk_count)
     }
 
+    #[instrument(skip(self), fields(query = %query, count = count))]
     pub async fn get_embedding_candidates(
         &self,
         query: &str,
@@ -171,12 +178,14 @@ impl RagEngine {
             .map_err(anyhow::Error::new)
     }
 
+    #[instrument(skip(self, weights), fields(query = %query, top_k = top_k, ?weights))]
     pub async fn search(
         &self,
         query: &str,
         top_k: usize,
         weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
+        let start = std::time::Instant::now();
         let resolved = ResolvedWeights::from_query_weights(weights);
         let weights = rag_core::SearchWeights {
             embedding: resolved.embedding,
@@ -185,12 +194,21 @@ impl RagEngine {
             initial: resolved.initial,
         };
 
-        self.core
+        let results = self
+            .core
             .search(query, top_k, Some(weights))
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(anyhow::Error::new)?;
+
+        tracing::info!(
+            "Engine search completed in {:?} with {} results",
+            start.elapsed(),
+            results.len()
+        );
+        Ok(results)
     }
 
+    #[instrument(skip(self, weights), fields(query = %query, top_k = top_k, diversity = diversity_factor, ?weights))]
     pub async fn search_with_diversity(
         &self,
         query: &str,
@@ -198,6 +216,7 @@ impl RagEngine {
         diversity_factor: f32,
         weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
+        let start = std::time::Instant::now();
         let resolved = ResolvedWeights::from_query_weights(weights);
         let weights = rag_core::SearchWeights {
             embedding: resolved.embedding,
@@ -206,10 +225,18 @@ impl RagEngine {
             initial: resolved.initial,
         };
 
-        self.core
+        let results = self
+            .core
             .search_with_diversity(query, top_k, diversity_factor, Some(weights))
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(anyhow::Error::new)?;
+
+        tracing::info!(
+            "Engine search (w/ diversity) completed in {:?} with {} results",
+            start.elapsed(),
+            results.len()
+        );
+        Ok(results)
     }
 
     pub fn list_documents(&self) -> Vec<String> {
