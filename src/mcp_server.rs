@@ -4,7 +4,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{
     ErrorData as McpError, ServerHandler, model::*, schemars, tool, tool_handler, tool_router,
 };
-use std::net::SocketAddr;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -555,25 +554,35 @@ async fn http_get_active_job(
     }
 }
 
+fn create_api_router() -> axum::Router<AppState> {
+    axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz))
+        .route("/health", axum::routing::get(healthz))
+        .route("/readyz", axum::routing::get(readyz))
+        .route("/search", axum::routing::post(http_search))
+        .route("/stats", axum::routing::get(http_stats))
+        .route("/reindex", axum::routing::post(http_start_reindex))
+        .route("/jobs/active", axum::routing::get(http_get_active_job))
+        .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
+}
+
 pub async fn start_mcp_server(
     rag_state: Arc<RwLock<RagEngine>>,
     job_manager: Arc<JobManager>,
     job_tx: mpsc::Sender<JobRequest>,
     documents_dir: String,
+    tcp_listener: tokio::net::TcpListener,
 ) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
 
-    let bind: SocketAddr = std::env::var("MCP_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8140".to_string())
-        .parse()?;
-
     let endpoint_path = std::env::var("MCP_HTTP_ENDPOINT").unwrap_or_else(|_| "/mcp".to_string());
+    let local_addr = tcp_listener.local_addr()?;
 
     tracing::info!(
         "Starting MCP Streamable HTTP server on http://{}{}",
-        bind,
+        local_addr,
         endpoint_path
     );
     tracing::info!("Health endpoints: /healthz (liveness), /readyz (readiness)");
@@ -605,22 +614,13 @@ pub async fn start_mcp_server(
         documents_dir: documents_dir.clone(),
     };
 
-    let router = axum::Router::new()
-        .route("/healthz", axum::routing::get(healthz))
-        .route("/readyz", axum::routing::get(readyz))
-        .route("/search", axum::routing::post(http_search))
-        .route("/stats", axum::routing::get(http_stats))
-        .route("/reindex", axum::routing::post(http_start_reindex))
-        .route("/jobs/active", axum::routing::get(http_get_active_job))
-        .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
+    let router = create_api_router()
         .route(&endpoint_path, axum::routing::any_service(service))
         .with_state(app_state);
 
     tracing::info!(
         "HTTP evaluation endpoints: POST /search, GET /stats, POST /reindex, GET /jobs/active, GET /jobs/:id"
     );
-
-    let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
 
     axum::serve(tcp_listener, router)
         .with_graceful_shutdown(async {
@@ -768,5 +768,71 @@ mod tests {
 
         assert!(formatted.contains("**2. [73%] lorem.pdf (page 10)**"));
         assert!(formatted.contains("Scores: Semantic: 0.72 | Reranker: 0.95"));
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Setup Mock Ollama to prevent connection errors
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "name": "nomic-embed-text:latest" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // SAFETY: We need to set environment variables for the RagEngine to pick up the mock server.
+        // This is safe in this context as tests are run serially or in isolated processes,
+        // and we are setting them before RagEngine initialization.
+        unsafe {
+            std::env::set_var("OLLAMA_URL", mock_server.uri());
+            std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Create dummy dependencies
+        let rag_engine = RagEngine::new(temp_dir.path().to_str().unwrap())
+            .await
+            .expect("RagEngine init failed");
+        let rag_state = Arc::new(RwLock::new(rag_engine));
+
+        let job_manager = Arc::new(JobManager::new("sqlite::memory:").await.unwrap());
+        let (job_tx, _rx) = mpsc::channel(1);
+
+        let documents_dir = temp_dir.path().to_string_lossy().to_string();
+
+        // Bind to random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Spawn server in background
+        let server_handle = tokio::spawn(async move {
+            start_mcp_server(rag_state, job_manager, job_tx, documents_dir, listener)
+                .await
+                .unwrap();
+        });
+
+        // Give server a moment to start
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Make request
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // Abort server
+        server_handle.abort();
     }
 }
