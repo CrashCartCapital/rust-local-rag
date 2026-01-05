@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Sqlite, Type};
+use tracing::instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -56,6 +57,7 @@ pub struct JobManager {
 }
 
 impl JobManager {
+    #[instrument(skip(db_path))]
     pub async fn new(db_path: &str) -> Result<Self> {
         use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
         use std::str::FromStr;
@@ -97,6 +99,7 @@ impl JobManager {
     }
 
     #[allow(dead_code)]
+    #[instrument(skip(self, payload), fields(job_type = ?job_type))]
     pub async fn create_job(
         &self,
         job_type: JobType,
@@ -124,6 +127,7 @@ impl JobManager {
         Ok(job)
     }
 
+    #[instrument(skip(self))]
     pub async fn get_job(&self, job_id: &str) -> Result<Option<Job>> {
         let job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE job_id = ?")
             .bind(job_id)
@@ -132,6 +136,7 @@ impl JobManager {
         Ok(job)
     }
 
+    #[instrument(skip(self, error), fields(status = ?status))]
     pub async fn update_status(
         &self,
         job_id: &str,
@@ -150,6 +155,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn update_progress(&self, job_id: &str, progress: i64) -> Result<()> {
         let now = Utc::now().timestamp();
         sqlx::query("UPDATE jobs SET progress = ?, updated_at = ? WHERE job_id = ?")
@@ -161,6 +167,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn update_total(&self, job_id: &str, total: i64) -> Result<()> {
         let now = Utc::now().timestamp();
         sqlx::query("UPDATE jobs SET total = ?, updated_at = ? WHERE job_id = ?")
@@ -172,6 +179,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn find_resumable_jobs(&self) -> Result<Vec<Job>> {
         let jobs = sqlx::query_as::<_, Job>(
             "SELECT * FROM jobs WHERE status = 'inprogress' OR status = 'pending'",
@@ -182,6 +190,7 @@ impl JobManager {
     }
 
     #[allow(dead_code)]
+    #[instrument(skip(self))]
     pub async fn find_active_reindex_job(&self) -> Result<Option<Job>> {
         let job = sqlx::query_as::<_, Job>(
             "SELECT * FROM jobs WHERE job_type = 'reindex' AND (status = 'pending' OR status = 'inprogress')",
@@ -194,6 +203,7 @@ impl JobManager {
     /// Atomically create a reindex job if no active reindex job exists.
     /// Returns Ok(Some(job)) if created successfully, Ok(None) if job already exists.
     /// This prevents race conditions by performing check-and-create in a single transaction.
+    #[instrument(skip(self, payload))]
     pub async fn create_reindex_job_if_not_active(
         &self,
         payload: Option<String>,
