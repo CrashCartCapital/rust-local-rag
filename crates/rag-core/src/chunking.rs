@@ -117,7 +117,7 @@ fn finalize_chunk(
         .map(|s| s.index)
         .unwrap_or(start_index);
 
-    let chunk_text = normalize_whitespace(&text_parts.join(" "));
+    let chunk_text = normalize_from_parts(&text_parts);
 
     let mut metadata = ChunkMetadata {
         page_range: min_page.zip(max_page),
@@ -179,7 +179,7 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
                 continue;
             }
 
-            let normalized = normalize_whitespace(&paragraph_lines.join(" "));
+            let normalized = normalize_from_parts(&paragraph_lines);
             if normalized.is_empty() {
                 continue;
             }
@@ -230,7 +230,22 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
 }
 
 fn normalize_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    normalize_from_parts(std::iter::once(value))
+}
+
+fn normalize_from_parts<S: AsRef<str>, I: IntoIterator<Item = S>>(parts: I) -> String {
+    let mut result = String::new();
+    let mut first = true;
+    for part in parts {
+        for word in part.as_ref().split_whitespace() {
+            if !first {
+                result.push(' ');
+            }
+            result.push_str(word);
+            first = false;
+        }
+    }
+    result
 }
 
 fn is_heading(line: &str) -> bool {
@@ -273,10 +288,23 @@ fn approximate_token_count(value: &str) -> usize {
         return 0;
     }
 
-    let char_count = trimmed.chars().count();
-    let word_count = trimmed.split_whitespace().count();
+    let mut char_count: usize = 0;
+    let mut word_count = 0;
+    let mut in_word = false;
+
+    for c in trimmed.chars() {
+        char_count += 1;
+        if c.is_whitespace() {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            word_count += 1;
+        }
+    }
+
     let char_estimate = char_count.div_ceil(4);
-    let word_estimate = ((word_count as f32) * 0.9).ceil() as usize;
+    // (word_count * 0.9).ceil() is equivalent to (word_count * 9 + 9) / 10 in integer arithmetic
+    let word_estimate = (word_count * 9 + 9) / 10;
     char_estimate.max(word_estimate).max(1)
 }
 
@@ -341,5 +369,24 @@ mod tests {
             chunk_texts,
             vec!["Sentence one.".to_string(), "Sentence two.".to_string()]
         );
+    }
+
+    #[test]
+    fn test_perf_baseline_correctness() {
+        // Validation of behavior before optimization
+        assert_eq!(normalize_whitespace("  foo   bar  "), "foo bar");
+        assert_eq!(normalize_whitespace("foo\nbar"), "foo bar");
+
+        let parts = vec!["foo  ", "  bar"];
+        assert_eq!(normalize_whitespace(&parts.join(" ")), "foo bar");
+
+        // approximate_token_count
+        // "hello world" -> chars=11/4=3. words=2*0.9=1.8->2. max=3.
+        assert_eq!(approximate_token_count("hello world"), 3);
+        // "a b c d e" -> chars=9/4=3. words=5*0.9=4.5->5. max=5.
+        // Wait: chars=9 (5 chars + 4 spaces). 9/4 = 2.25 -> 3.
+        // words=5. 5*0.9 = 4.5 -> 5.
+        // max(3, 5) = 5.
+        assert_eq!(approximate_token_count("a b c d e"), 5);
     }
 }
