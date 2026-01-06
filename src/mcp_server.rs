@@ -718,6 +718,7 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embeddings::EmbeddingService;
     use crate::rag_engine::SearchResult;
 
     #[test]
@@ -788,17 +789,20 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // SAFETY: We need to set environment variables for the RagEngine to pick up the mock server.
-        // This is safe in this context as tests are run serially or in isolated processes,
-        // and we are setting them before RagEngine initialization.
-        unsafe {
-            std::env::set_var("OLLAMA_URL", mock_server.uri());
-            std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        }
-
         let temp_dir = tempfile::tempdir().unwrap();
+
+        let embedding_service = EmbeddingService::new_with_config(
+            mock_server.uri(),
+            "nomic-embed-text".to_string(),
+        )
+        .await
+        .expect("EmbeddingService init failed");
+
         // Create dummy dependencies
-        let rag_engine = RagEngine::new(temp_dir.path().to_str().unwrap())
+        let rag_engine = RagEngine::new_with_embedding_service(
+            temp_dir.path().to_str().unwrap(),
+            embedding_service,
+        )
             .await
             .expect("RagEngine init failed");
         let rag_state = Arc::new(RwLock::new(rag_engine));

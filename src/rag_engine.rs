@@ -34,7 +34,13 @@ pub struct RagEngine {
 impl RagEngine {
     pub async fn new(data_dir: &str) -> Result<Self> {
         let embedding_service = EmbeddingService::new().await?;
+        Self::new_with_embedding_service(data_dir, embedding_service).await
+    }
 
+    pub async fn new_with_embedding_service(
+        data_dir: &str,
+        embedding_service: EmbeddingService,
+    ) -> Result<Self> {
         // Try to initialize reranker, but don't fail if it's unavailable.
         let reranker = match RerankerService::new().await {
             Ok(service) => {
