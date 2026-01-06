@@ -304,6 +304,7 @@ fn approximate_token_count(value: &str) -> usize {
 
     let char_estimate = char_count.div_ceil(4);
     // (word_count * 0.9).ceil() is equivalent to (word_count * 9 + 9) / 10 in integer arithmetic
+    #[allow(clippy::manual_div_ceil)]
     let word_estimate = (word_count * 9 + 9) / 10;
     char_estimate.max(word_estimate).max(1)
 }

@@ -641,7 +641,14 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
     let highlight_re = if !terms.is_empty() {
         let pattern = terms
             .iter()
-            .map(|t| regex::escape(t))
+            .map(|t| {
+                let escaped = regex::escape(t);
+                if t.chars().next().is_some_and(|c| c.is_alphanumeric()) {
+                    format!("\\b{}", escaped)
+                } else {
+                    escaped
+                }
+            })
             .collect::<Vec<_>>()
             .join("|");
         regex::RegexBuilder::new(&format!("(?i)({pattern})"))
@@ -771,6 +778,48 @@ mod tests {
         assert!(formatted.contains("Scores: Semantic: 0.72 | Reranker: 0.95"));
     }
 
+    #[test]
+    fn test_format_search_results_boundary() {
+        let results = vec![SearchResult {
+            text: "The bobcat matches feline but should not highlight.".to_string(),
+            score: 0.8,
+            document: "cat.pdf".to_string(),
+            chunk_id: "id".to_string(),
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            embedding_score: None,
+            lexical_score: None,
+            initial_score: None,
+            reranker_score: None,
+            yes_logprob: None,
+            no_logprob: None,
+        }];
+
+        let formatted = format_search_results(&results, "cat");
+        assert!(!formatted.contains("**cat**"));
+        assert!(formatted.contains("The bobcat matches"));
+
+        let results_match = vec![SearchResult {
+            text: "My cat is nice.".to_string(),
+            score: 0.8,
+            document: "cat.pdf".to_string(),
+            chunk_id: "id".to_string(),
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            embedding_score: None,
+            lexical_score: None,
+            initial_score: None,
+            reranker_score: None,
+            yes_logprob: None,
+            no_logprob: None,
+        }];
+
+        let formatted_match = format_search_results(&results_match, "cat");
+        assert!(formatted_match.contains("My **cat** is nice"));
+    }
+
     #[tokio::test]
     async fn test_health_endpoint() {
         use wiremock::matchers::{method, path};
@@ -791,20 +840,18 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let embedding_service = EmbeddingService::new_with_config(
-            mock_server.uri(),
-            "nomic-embed-text".to_string(),
-        )
-        .await
-        .expect("EmbeddingService init failed");
+        let embedding_service =
+            EmbeddingService::new_with_config(mock_server.uri(), "nomic-embed-text".to_string())
+                .await
+                .expect("EmbeddingService init failed");
 
         // Create dummy dependencies
         let rag_engine = RagEngine::new_with_embedding_service(
             temp_dir.path().to_str().unwrap(),
             embedding_service,
         )
-            .await
-            .expect("RagEngine init failed");
+        .await
+        .expect("RagEngine init failed");
         let rag_state = Arc::new(RwLock::new(rag_engine));
 
         let job_manager = Arc::new(JobManager::new("sqlite::memory:").await.unwrap());
