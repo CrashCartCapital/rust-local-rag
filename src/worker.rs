@@ -6,8 +6,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
-use tracing::instrument;
 use tracing::Instrument;
+use tracing::instrument;
 
 /// Maximum allowed write lock duration in milliseconds.
 /// This is an enforced design contract - locks held longer indicate
