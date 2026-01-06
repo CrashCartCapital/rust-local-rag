@@ -230,11 +230,17 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
 }
 
 fn normalize_whitespace(value: &str) -> String {
-    normalize_from_parts(std::iter::once(value))
+    normalize_from_parts(&[value])
 }
 
-fn normalize_from_parts<S: AsRef<str>, I: IntoIterator<Item = S>>(parts: I) -> String {
-    let mut result = String::new();
+fn normalize_from_parts<S: AsRef<str>>(parts: &[S]) -> String {
+    // Optimization: Pre-calculate total length to avoid reallocations.
+    // We add parts.len() to account for spaces between parts, although split_whitespace
+    // might result in fewer chars, it's a safe upper bound for initial capacity.
+    let total_len: usize = parts.iter().map(|s| s.as_ref().len()).sum();
+    let estimated_len = total_len + parts.len();
+
+    let mut result = String::with_capacity(estimated_len);
     let mut first = true;
     for part in parts {
         for word in part.as_ref().split_whitespace() {
