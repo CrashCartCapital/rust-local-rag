@@ -35,6 +35,10 @@ impl EmbeddingService {
         let model = std::env::var("OLLAMA_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "nomic-embed-text".to_string());
 
+        Self::new_with_config(ollama_url, model).await
+    }
+
+    pub async fn new_with_config(ollama_url: String, model: String) -> Result<Self> {
         tracing::info!("Ollama URL: {}", ollama_url);
         tracing::info!("Ollama Model: {}", model);
 
