@@ -6,6 +6,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
+use tracing::instrument;
+use tracing::Instrument;
 
 /// Maximum allowed write lock duration in milliseconds.
 /// This is an enforced design contract - locks held longer indicate
@@ -149,6 +151,7 @@ impl WorkerSupervisor {
         }
     }
 
+    #[instrument(skip(self), name = "worker_supervisor_run")]
     pub async fn run(mut self) {
         // Resume any in-progress or pending jobs from DB
         if let Ok(jobs) = self.job_manager.find_resumable_jobs().await {
@@ -177,6 +180,7 @@ impl WorkerSupervisor {
         }
     }
 
+    #[instrument(skip(self), fields(job_id = %job_id))]
     async fn spawn_reindex_worker(&self, job_id: String, documents_dir: String) {
         let job_manager = self.job_manager.clone();
         let rag_engine = self.rag_engine.clone();
@@ -287,6 +291,7 @@ impl WorkerSupervisor {
         });
     }
 
+    #[instrument(skip(rag_engine, job_manager, progress_logger), fields(job_id = %job_id, documents_dir = %documents_dir))]
     async fn reindex_documents(
         rag_engine: Arc<RwLock<RagEngine>>,
         documents_dir: &str,
@@ -373,21 +378,25 @@ impl WorkerSupervisor {
 
         // Step 2: Process each document with brief locks per document
         for (idx, path) in pdf_paths.iter().enumerate() {
-            // Handle potential file path issues gracefully
-            let filename = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name,
-                None => {
-                    tracing::warn!("Skipping file with invalid path: {:?}", path);
-                    continue;
-                }
-            };
+            // Create a span for this document iteration
+            let span = tracing::info_span!("process_document", ?path, idx);
+
+            async {
+                // Handle potential file path issues gracefully
+                let filename = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!("Skipping file with invalid path: {:?}", path);
+                        return Ok(());
+                    }
+                };
 
             // Read file (async, no lock)
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
                 Err(e) => {
                     tracing::error!("Failed to read {}: {}", filename, e);
-                    continue;
+                    return Ok(());
                 }
             };
 
@@ -516,25 +525,30 @@ impl WorkerSupervisor {
                 }
             }
 
-            // Update progress
-            let progress = (idx + 1) as i64;
-            progress_state.done_docs = progress;
-            progress_state.last_doc = Some(filename.to_string());
+                // Update progress
+                let progress = (idx + 1) as i64;
+                progress_state.done_docs = progress;
+                progress_state.last_doc = Some(filename.to_string());
 
-            if let Err(e) = job_manager.update_progress(job_id, progress).await {
-                tracing::error!("Failed to update job progress: {}", e);
-            }
-
-            // Log progress
-            #[allow(clippy::collapsible_if)]
-            if let Some(ref logger) = progress_logger {
-                if let Err(e) = logger
-                    .emit(&progress_state, "progress", Some(&progress_note))
-                    .await
-                {
-                    tracing::error!("Failed to log progress: {}", e);
+                if let Err(e) = job_manager.update_progress(job_id, progress).await {
+                    tracing::error!("Failed to update job progress: {}", e);
                 }
+
+                // Log progress
+                #[allow(clippy::collapsible_if)]
+                if let Some(ref logger) = progress_logger {
+                    if let Err(e) = logger
+                        .emit(&progress_state, "progress", Some(&progress_note))
+                        .await
+                    {
+                        tracing::error!("Failed to log progress: {}", e);
+                    }
+                }
+                // Return Ok for the async block
+                Ok::<(), anyhow::Error>(())
             }
+            .instrument(span)
+            .await?;
         }
 
         // Finalize reindex
