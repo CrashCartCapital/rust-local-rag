@@ -381,11 +381,22 @@ struct HttpSearchResponse {
     results: Vec<crate::rag_engine::SearchResult>,
 }
 
+fn api_error(
+    code: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    (
+        code,
+        axum::Json(serde_json::json!({ "error": message.into() })),
+    )
+}
+
 #[instrument(skip(app_state), fields(query = %request.query, top_k = %request.top_k, diversity = %request.diversity_factor))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
-) -> Result<axum::Json<HttpSearchResponse>, (axum::http::StatusCode, String)> {
+) -> Result<axum::Json<HttpSearchResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
+{
     let start = std::time::Instant::now();
     let top_k = request.top_k.min(MAX_TOP_K);
     let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
@@ -406,7 +417,7 @@ async fn http_search(
         }
         Err(e) => {
             tracing::error!("Search error: {}", e);
-            Err((
+            Err(api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Search error: {e}"),
             ))
@@ -453,7 +464,8 @@ struct HttpJobStatusResponse {
 #[instrument(skip(app_state))]
 async fn http_start_reindex(
     axum::extract::State(app_state): axum::extract::State<AppState>,
-) -> Result<axum::Json<HttpReindexResponse>, (axum::http::StatusCode, String)> {
+) -> Result<axum::Json<HttpReindexResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
+{
     tracing::info!("HTTP request to start reindex job");
     // Atomically create job if no active job exists
     let job = match app_state
@@ -464,14 +476,14 @@ async fn http_start_reindex(
         Ok(Some(job)) => job,
         Ok(None) => {
             tracing::warn!("Reindex job already in progress");
-            return Err((
+            return Err(api_error(
                 axum::http::StatusCode::CONFLICT,
-                "A reindex job is already in progress".to_string(),
+                "A reindex job is already in progress",
             ));
         }
         Err(e) => {
             tracing::error!("Failed to create reindex job: {e}");
-            return Err((
+            return Err(api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to create job: {e}"),
             ));
@@ -488,7 +500,7 @@ async fn http_start_reindex(
         .await
     {
         tracing::error!("Failed to send job request: {e}");
-        return Err((
+        return Err(api_error(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to start job: {e}"),
         ));
@@ -507,7 +519,10 @@ async fn http_start_reindex(
 async fn http_get_job_status(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Path(job_id): axum::extract::Path<String>,
-) -> Result<axum::Json<HttpJobStatusResponse>, (axum::http::StatusCode, String)> {
+) -> Result<
+    axum::Json<HttpJobStatusResponse>,
+    (axum::http::StatusCode, axum::Json<serde_json::Value>),
+> {
     match app_state.job_manager.get_job(&job_id).await {
         Ok(Some(job)) => Ok(axum::Json(HttpJobStatusResponse {
             job_id: job.job_id,
@@ -516,13 +531,13 @@ async fn http_get_job_status(
             total: job.total,
             error: job.error,
         })),
-        Ok(None) => Err((
+        Ok(None) => Err(api_error(
             axum::http::StatusCode::NOT_FOUND,
             format!("Job {job_id} not found"),
         )),
         Err(e) => {
             tracing::error!("Failed to get job status: {e}");
-            Err((
+            Err(api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to get job: {e}"),
             ))
@@ -534,7 +549,10 @@ async fn http_get_job_status(
 #[instrument(skip(app_state))]
 async fn http_get_active_job(
     axum::extract::State(app_state): axum::extract::State<AppState>,
-) -> Result<axum::Json<Option<HttpJobStatusResponse>>, (axum::http::StatusCode, String)> {
+) -> Result<
+    axum::Json<Option<HttpJobStatusResponse>>,
+    (axum::http::StatusCode, axum::Json<serde_json::Value>),
+> {
     match app_state.job_manager.find_active_reindex_job().await {
         Ok(Some(job)) => Ok(axum::Json(Some(HttpJobStatusResponse {
             job_id: job.job_id,
@@ -546,7 +564,7 @@ async fn http_get_active_job(
         Ok(None) => Ok(axum::Json(None)),
         Err(e) => {
             tracing::error!("Failed to get active job: {e}");
-            Err((
+            Err(api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to get active job: {e}"),
             ))
