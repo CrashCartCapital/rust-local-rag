@@ -7,7 +7,8 @@ use rmcp::{
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::instrument;
+use tracing::{Instrument, instrument};
+use uuid::Uuid;
 
 use crate::job_manager::JobManager;
 use crate::rag_engine::RagEngine;
@@ -334,11 +335,13 @@ impl ServerHandler for RagMcpServer {
 }
 
 /// Liveness probe handler - always returns 200 OK if process is alive
+#[instrument]
 async fn healthz() -> axum::http::StatusCode {
     axum::http::StatusCode::OK
 }
 
 /// Readiness probe handler - returns 200 when server is ready to serve requests
+#[instrument(skip(app_state))]
 async fn readyz(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> axum::http::StatusCode {
@@ -554,6 +557,29 @@ async fn http_get_active_job(
     }
 }
 
+async fn trace_request(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let request_id = Uuid::new_v4().to_string();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
+    let span = tracing::info_span!("http_request", %request_id, %method, %uri);
+
+    async move {
+        tracing::info!("Request started");
+        let start = std::time::Instant::now();
+        let response = next.run(req).await;
+        let duration = start.elapsed();
+        let status = response.status();
+        tracing::info!(%status, ?duration, "Request completed");
+        response
+    }
+    .instrument(span)
+    .await
+}
+
 fn create_api_router() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
@@ -564,6 +590,7 @@ fn create_api_router() -> axum::Router<AppState> {
         .route("/reindex", axum::routing::post(http_start_reindex))
         .route("/jobs/active", axum::routing::get(http_get_active_job))
         .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
+        .layer(axum::middleware::from_fn(trace_request))
 }
 
 pub async fn start_mcp_server(
