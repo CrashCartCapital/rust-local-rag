@@ -16,6 +16,7 @@ use crate::worker::JobRequest;
 use tokio::sync::mpsc;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct SearchRequest {
     #[schemars(description = "The search query")]
     pub query: String,
@@ -32,12 +33,14 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct GetJobStatusRequest {
     #[schemars(description = "Job ID to query")]
     pub job_id: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct CalibrateRerankerRequest {
     #[schemars(description = "Sample query to use for calibration")]
     pub query: String,
@@ -47,6 +50,7 @@ pub struct CalibrateRerankerRequest {
 
 // Empty param structs for tools with no parameters
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 #[allow(dead_code)]
 pub struct EmptyParams {}
 
