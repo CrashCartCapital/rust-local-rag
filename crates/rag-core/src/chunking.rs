@@ -316,13 +316,26 @@ fn approximate_token_count(value: &str) -> usize {
     let mut word_count = 0;
     let mut in_word = false;
 
-    for c in trimmed.chars() {
-        char_count += 1;
-        if c.is_whitespace() {
-            in_word = false;
-        } else if !in_word {
-            in_word = true;
-            word_count += 1;
+    if trimmed.is_ascii() {
+        let bytes = trimmed.as_bytes();
+        char_count = bytes.len();
+        for &b in bytes {
+            if b.is_ascii_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                word_count += 1;
+            }
+        }
+    } else {
+        for c in trimmed.chars() {
+            char_count += 1;
+            if c.is_whitespace() {
+                in_word = false;
+            } else if !in_word {
+                in_word = true;
+                word_count += 1;
+            }
         }
     }
 
@@ -414,4 +427,5 @@ mod tests {
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
     }
+
 }
