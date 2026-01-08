@@ -2,6 +2,8 @@ use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::OnceLock;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 #[derive(Debug, Clone)]
 struct SentenceInfo {
@@ -31,6 +33,7 @@ impl ChunkFragment {
     }
 }
 
+#[cfg_attr(feature = "tracing", instrument(skip(text)))]
 pub(crate) fn chunk_text(
     text: &str,
     chunk_tokens: usize,
@@ -38,6 +41,8 @@ pub(crate) fn chunk_text(
 ) -> Vec<ChunkFragment> {
     let sentences = extract_sentences(text);
     if sentences.is_empty() {
+        #[cfg(feature = "tracing")]
+        tracing::debug!("No sentences extracted from text");
         return Vec::new();
     }
 
@@ -67,6 +72,13 @@ pub(crate) fn chunk_text(
     {
         fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
     }
+
+    #[cfg(feature = "tracing")]
+    tracing::debug!(
+        "Chunking complete. Created {} fragments from {} sentences.",
+        fragments.len(),
+        sentences.len()
+    );
 
     fragments
 }
@@ -141,6 +153,7 @@ fn finalize_chunk(
     Some((chunk_text, metadata))
 }
 
+#[cfg_attr(feature = "tracing", instrument(skip(text)))]
 fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     let splitter = sentence_splitter();
     let mut sentences: Vec<SentenceInfo> = Vec::new();
@@ -216,6 +229,8 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     if sentences.is_empty() {
         let normalized = normalize_whitespace(text);
         if !normalized.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Fallback: treating entire text as single sentence");
             sentences.push(SentenceInfo {
                 text: normalized.clone(),
                 tokens: approximate_token_count(&normalized),
@@ -225,6 +240,9 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
             });
         }
     }
+
+    #[cfg(feature = "tracing")]
+    tracing::trace!("Extracted {} sentences", sentences.len());
 
     sentences
 }

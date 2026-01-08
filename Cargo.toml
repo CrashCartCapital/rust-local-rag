@@ -53,7 +53,7 @@ urlencoding = "2.1"
 lopdf = "0.34"
 arboard = "3"  # Clipboard support for TUI
 tracing-appender = "0.2.4"
-rag-core = { path = "crates/rag-core", features = ["persistence"] }
+rag-core = { path = "crates/rag-core", features = ["persistence", "tracing"] }
 
 [dev-dependencies]
 lopdf = "0.34"
