@@ -427,5 +427,4 @@ mod tests {
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
     }
-
 }

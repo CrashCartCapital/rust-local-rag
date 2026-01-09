@@ -3,6 +3,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -38,6 +39,7 @@ impl EmbeddingService {
         Self::new_with_config(ollama_url, model).await
     }
 
+    #[instrument(skip(ollama_url))]
     pub async fn new_with_config(ollama_url: String, model: String) -> Result<Self> {
         tracing::info!("Ollama URL: {}", ollama_url);
         tracing::info!("Ollama Model: {}", model);
@@ -61,7 +63,9 @@ impl EmbeddingService {
         &self.model
     }
 
+    #[instrument(skip(self, text), fields(text_len = text.len()))]
     pub async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        let start = std::time::Instant::now();
         let request = OllamaEmbeddingRequest::Single {
             model: &self.model,
             input: text,
@@ -80,6 +84,9 @@ impl EmbeddingService {
             ));
         }
         let embedding_response: OllamaEmbeddingResponse = response.json().await?;
+
+        tracing::debug!("Ollama embedding generated in {:?}", start.elapsed());
+
         if let Some(embedding) = embedding_response.embedding {
             Ok(embedding)
         } else if let Some(embeddings) = embedding_response.embeddings {
@@ -92,11 +99,14 @@ impl EmbeddingService {
         }
     }
 
+    #[instrument(skip(self, text), fields(text_len = text.len()))]
     pub async fn get_query_embedding(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(cached) = self.query_cache.write().await.get(text) {
+            tracing::debug!("Query embedding cache hit");
             return Ok(cached.clone());
         }
 
+        tracing::debug!("Query embedding cache miss");
         let embedding = self.get_embedding(text).await?;
         self.query_cache
             .write()
@@ -105,7 +115,9 @@ impl EmbeddingService {
         Ok(embedding)
     }
 
+    #[instrument(skip(self, texts), fields(count = texts.len()))]
     pub async fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let start = std::time::Instant::now();
         if texts.is_empty() {
             return Ok(vec![]);
         }
@@ -177,14 +189,17 @@ impl EmbeddingService {
                 let embedding = self.get_embedding(text).await?;
                 result.push(embedding);
             }
+            tracing::info!("Batch embedding completed in {:?}", start.elapsed());
             return Ok(result);
         }
 
         // Single text - use standard single embedding request
         let embedding = self.get_embedding(&texts[0]).await?;
+        tracing::info!("Batch embedding completed in {:?}", start.elapsed());
         Ok(vec![embedding])
     }
 
+    #[instrument(skip(self))]
     async fn test_connection(&self) -> Result<()> {
         let response = self
             .client
@@ -203,6 +218,7 @@ impl EmbeddingService {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn verify_model(&self) -> Result<()> {
         let response = self
             .client
