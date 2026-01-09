@@ -92,7 +92,7 @@ fn finalize_chunk(
         return None;
     }
 
-    let mut text_parts: Vec<String> = Vec::with_capacity(sentence_indices.len());
+    let mut text_parts: Vec<&str> = Vec::with_capacity(sentence_indices.len());
     let mut min_page: Option<usize> = None;
     let mut max_page: Option<usize> = None;
     let mut section_title: Option<String> = None;
@@ -100,7 +100,7 @@ fn finalize_chunk(
 
     for &idx in sentence_indices {
         let sentence = sentences.get(idx)?;
-        text_parts.push(sentence.text.clone());
+        text_parts.push(&sentence.text);
         token_sum += sentence.tokens;
 
         min_page = Some(match min_page {
