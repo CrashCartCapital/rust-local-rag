@@ -35,9 +35,7 @@ fn search_request_schema_has_no_dangling_refs() {
     for r in refs {
         if let Some(name) = r.strip_prefix("#/definitions/") {
             assert!(
-                definitions
-                    .and_then(|d| d.get(name))
-                    .is_some(),
+                definitions.and_then(|d| d.get(name)).is_some(),
                 "Schema has dangling $ref {r}; missing definitions.{name}"
             );
         } else if let Some(name) = r.strip_prefix("#/$defs/") {
@@ -48,4 +46,3 @@ fn search_request_schema_has_no_dangling_refs() {
         }
     }
 }
-
