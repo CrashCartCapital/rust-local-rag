@@ -685,7 +685,7 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
         return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`.".to_string();
     }
 
-    let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() > 2).collect();
+    let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
 
     let highlight_re = if !terms.is_empty() {
         let pattern = terms
@@ -867,6 +867,30 @@ mod tests {
 
         let formatted_match = format_search_results(&results_match, "cat");
         assert!(formatted_match.contains("My **cat** is nice"));
+    }
+
+    #[test]
+    fn test_format_search_results_short_terms() {
+        let results = vec![SearchResult {
+            text: "The AI is coming.".to_string(),
+            score: 0.8,
+            document: "ai.pdf".to_string(),
+            chunk_id: "id".to_string(),
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            embedding_score: None,
+            lexical_score: None,
+            initial_score: None,
+            reranker_score: None,
+            yes_logprob: None,
+            no_logprob: None,
+        }];
+
+        let formatted = format_search_results(&results, "AI");
+        // "AI" is 2 chars, so currently it should NOT match
+        // But we WANT it to match, so we assert it DOES (expecting failure first)
+        assert!(formatted.contains("The **AI** is coming"));
     }
 
     #[tokio::test]
