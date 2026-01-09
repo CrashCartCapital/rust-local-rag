@@ -685,7 +685,20 @@ fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &st
         return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`.".to_string();
     }
 
-    let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
+    let terms: Vec<&str> = query
+        .split_whitespace()
+        .filter(|t| {
+            if t.len() > 2 {
+                true
+            } else if t.len() == 2 {
+                // Reduce highlight noise from common 2-letter stopwords in natural-language queries,
+                // while still allowing short acronyms like "AI" / "ML".
+                !matches!(*t, "as" | "at" | "by" | "if" | "in" | "is" | "it" | "of" | "on" | "or" | "to")
+            } else {
+                false
+            }
+        })
+        .collect();
 
     let highlight_re = if !terms.is_empty() {
         let pattern = terms
@@ -888,9 +901,30 @@ mod tests {
         }];
 
         let formatted = format_search_results(&results, "AI");
-        // "AI" is 2 chars, so currently it should NOT match
-        // But we WANT it to match, so we assert it DOES (expecting failure first)
+        // "AI" is 2 chars, but we still want acronyms to be highlighted.
         assert!(formatted.contains("The **AI** is coming"));
+    }
+
+    #[test]
+    fn test_format_search_results_does_not_highlight_two_letter_stopwords() {
+        let results = vec![SearchResult {
+            text: "This is a test.".to_string(),
+            score: 0.8,
+            document: "stopwords.pdf".to_string(),
+            chunk_id: "id".to_string(),
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            embedding_score: None,
+            lexical_score: None,
+            initial_score: None,
+            reranker_score: None,
+            yes_logprob: None,
+            no_logprob: None,
+        }];
+
+        let formatted = format_search_results(&results, "is");
+        assert!(!formatted.contains("**is**"));
     }
 
     #[tokio::test]
