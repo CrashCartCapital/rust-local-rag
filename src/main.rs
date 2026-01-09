@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use rust_local_rag::{JobManager, RagEngine, WorkerSupervisor};
+use rust_local_rag::{Config, JobManager, RagEngine, WorkerSupervisor};
 use tokio::sync::mpsc;
 
 fn get_data_dir() -> String {
@@ -71,12 +71,15 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&documents_dir)?;
 
+    let config = Config::from_env()?;
+    config.log_active();
+
     // Initialize Job Manager (SQLite)
     let db_path = format!("sqlite:{data_dir}/jobs.db");
     let job_manager = Arc::new(JobManager::new(&db_path).await?);
 
     // Initialize RagEngine (Chunks + Index)
-    let rag_engine = Arc::new(RwLock::new(RagEngine::new(&data_dir).await?));
+    let rag_engine = Arc::new(RwLock::new(RagEngine::new(&data_dir, &config).await?));
 
     // Create channel for job requests
     let (job_tx, job_rx) = mpsc::channel(100);

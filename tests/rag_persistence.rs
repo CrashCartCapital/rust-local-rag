@@ -1,4 +1,5 @@
 use rust_local_rag::rag_engine::RagEngine;
+use rust_local_rag::Config;
 use serial_test::serial;
 use std::io::Write;
 use wiremock::matchers::{method, path};
@@ -43,7 +44,7 @@ async fn test_recover_from_corrupt_index() {
 
     // 2. Initialize RagEngine
     // This should log a warning but NOT panic
-    let engine = RagEngine::new(data_dir).await;
+    let engine = RagEngine::new(data_dir, &Config::default()).await;
 
     // 3. Verify
     assert!(
@@ -102,7 +103,7 @@ async fn test_load_existing_valid_index() {
     std::fs::write(&index_path, serde_json::to_string(&valid_json).unwrap()).unwrap();
 
     // 2. Initialize RagEngine
-    let engine = RagEngine::new(data_dir)
+    let engine = RagEngine::new(data_dir, &Config::default())
         .await
         .expect("Failed to load valid index");
 

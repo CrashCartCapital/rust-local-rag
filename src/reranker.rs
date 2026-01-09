@@ -3,6 +3,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
 
+use crate::config::Config;
+
 pub use rag_core::{RerankedResult, RerankerCandidate};
 
 /// Detailed score result including logprobs for transparency
@@ -82,6 +84,9 @@ pub struct RerankerService {
     ollama_url: String,
     model: String,
     prompt_template: String,
+    timeout_duration: Duration,
+    concurrency_limit: usize,
+    default_logprob_fallback: f64,
 }
 
 impl RerankerService {
@@ -101,7 +106,7 @@ impl RerankerService {
     /// Returns an error if:
     /// * Cannot connect to Ollama at the configured URL
     /// * The specified model is not available (not pulled)
-    pub async fn new() -> Result<Self> {
+    pub async fn new(config: &Config) -> Result<Self> {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
         let model = std::env::var("OLLAMA_RERANK_MODEL")
@@ -116,7 +121,7 @@ impl RerankerService {
             .pool_max_idle_per_host(10) // Keep up to 10 idle connections per host
             .pool_idle_timeout(Some(Duration::from_secs(300))) // Keep connections alive for 5 minutes
             .tcp_keepalive(Some(Duration::from_secs(30))) // TCP keepalive every 30s
-            .timeout(Duration::from_secs(120)) // 2-minute timeout for reranking requests
+            .timeout(config.reranker_timeout)
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -125,6 +130,9 @@ impl RerankerService {
             ollama_url,
             model,
             prompt_template,
+            timeout_duration: config.reranker_timeout,
+            concurrency_limit: config.reranker_concurrency.get(),
+            default_logprob_fallback: config.default_logprob_fallback,
         };
 
         service.test_connection().await?;
@@ -136,6 +144,14 @@ impl RerankerService {
     /// Returns the name of the reranking model being used.
     pub fn model_name(&self) -> &str {
         &self.model
+    }
+
+    pub fn timeout_duration(&self) -> Duration {
+        self.timeout_duration
+    }
+
+    pub fn concurrency_limit(&self) -> usize {
+        self.concurrency_limit
     }
 
     /// Load prompt template from external file or fall back to default
@@ -198,11 +214,8 @@ Answer:"#
         query: &str,
         candidates: &[RerankerCandidate],
     ) -> Result<Vec<RerankedResult>> {
-        // Use sequential processing to avoid memory saturation
-        // M2 Max memory-bound: concurrent requests cause KV cache contention
-        let concurrency_limit = 1;
-        // 60s timeout to handle p99 latency (36s observed) with 66% buffer
-        let timeout_duration = Duration::from_secs(60);
+        let concurrency_limit = self.concurrency_limit.max(1);
+        let timeout_duration = self.timeout_duration;
 
         let mut futures = FuturesUnordered::new();
         let mut results = Vec::with_capacity(candidates.len());
@@ -325,7 +338,7 @@ Answer:"#
         let response = self
             .client
             .post(format!("{}/api/generate", self.ollama_url))
-            .timeout(Duration::from_secs(60))
+            .timeout(self.timeout_duration)
             .json(&request)
             .send()
             .await
@@ -532,8 +545,8 @@ Answer:"#
         }
 
         // Need both yes and no logprobs to compute softmax
-        let yes_lp = yes_logprob.unwrap_or(-10.0); // Default to very unlikely if not found
-        let no_lp = no_logprob.unwrap_or(-10.0); // Default to very unlikely if not found
+        let yes_lp = yes_logprob.unwrap_or(self.default_logprob_fallback);
+        let no_lp = no_logprob.unwrap_or(self.default_logprob_fallback);
 
         // Compute softmax: score = exp(yes) / (exp(yes) + exp(no))
         let yes_exp = yes_lp.exp();
@@ -591,7 +604,13 @@ Answer:"#
         if warmup_count > 0 {
             tracing::debug!("Running {} warm-up requests...", warmup_count);
             for candidate in candidates.iter().take(warmup_count) {
-                let _ = self.score_candidate(query, candidate).await;
+                if let Err(e) = self.score_candidate(query, candidate).await {
+                    tracing::debug!(
+                        error = %e,
+                        chunk_id = %candidate.chunk_id,
+                        "Reranker warm-up request failed"
+                    );
+                }
             }
         }
 

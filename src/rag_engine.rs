@@ -5,6 +5,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::{
+    config::Config,
     embeddings::EmbeddingService,
     reranker::{RerankerCandidate, RerankerService},
 };
@@ -33,17 +34,18 @@ pub struct RagEngine {
 }
 
 impl RagEngine {
-    pub async fn new(data_dir: &str) -> Result<Self> {
-        let embedding_service = EmbeddingService::new().await?;
-        Self::new_with_embedding_service(data_dir, embedding_service).await
+    pub async fn new(data_dir: &str, config: &Config) -> Result<Self> {
+        let embedding_service = EmbeddingService::new(config).await?;
+        Self::new_with_embedding_service(data_dir, embedding_service, config).await
     }
 
     pub async fn new_with_embedding_service(
         data_dir: &str,
         embedding_service: EmbeddingService,
+        config: &Config,
     ) -> Result<Self> {
         // Try to initialize reranker, but don't fail if it's unavailable.
-        let reranker = match RerankerService::new().await {
+        let reranker = match RerankerService::new(config).await {
             Ok(service) => {
                 tracing::info!("Reranker service initialized successfully");
                 Some(service)
@@ -390,7 +392,13 @@ impl RagEngine {
             .arg(&temp_file)
             .arg("-")
             .output();
-        let _ = std::fs::remove_file(&temp_file);
+        if let Err(e) = std::fs::remove_file(&temp_file) {
+            tracing::debug!(
+                error = %e,
+                path = %temp_file.display(),
+                "Failed to remove temp file after pdftotext"
+            );
+        }
 
         match output {
             Ok(output) if output.status.success() => {

@@ -2,12 +2,33 @@ use crate::job_manager::{JobManager, JobStatus};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
 use tracing::Instrument;
 use tracing::instrument;
+
+struct ReindexOutcome {
+    total_docs: i64,
+    failed_documents: Vec<String>,
+}
+
+impl ReindexOutcome {
+    fn failure_summary(&self) -> Option<String> {
+        if self.failed_documents.is_empty() {
+            return None;
+        }
+
+        Some(format!(
+            "Job completed with {} failures out of {} documents. Failed documents:\n{}",
+            self.failed_documents.len(),
+            self.total_docs,
+            self.failed_documents.join("\n")
+        ))
+    }
+}
 
 /// Maximum allowed write lock duration in milliseconds.
 /// This is an enforced design contract - locks held longer indicate
@@ -260,11 +281,9 @@ impl WorkerSupervisor {
             .await;
 
             match result {
-                Ok(_) => {
-                    if let Err(e) = job_manager
-                        .update_status(&job_id, JobStatus::Completed, None)
-                        .await
-                    {
+                Ok(outcome) => {
+                    let error = outcome.failure_summary();
+                    if let Err(e) = job_manager.update_status(&job_id, JobStatus::Completed, error).await {
                         tracing::error!("Failed to mark job {} as completed: {}", job_id, e);
                     } else {
                         tracing::info!(
@@ -291,18 +310,20 @@ impl WorkerSupervisor {
         });
     }
 
-    #[instrument(skip(rag_engine, job_manager, progress_logger), fields(job_id = %job_id, documents_dir = %documents_dir))]
-    async fn reindex_documents(
-        rag_engine: Arc<RwLock<RagEngine>>,
-        documents_dir: &str,
-        job_manager: Arc<JobManager>,
-        job_id: &str,
-        progress_logger: Option<ProgressLogger>,
-    ) -> Result<()> {
+    #[instrument(skip(job_manager), fields(job_id = %job_id, total_docs = total_docs))]
+    async fn init_job_tracking(job_manager: &JobManager, job_id: &str, total_docs: i64) {
+        if let Err(e) = job_manager.update_total(job_id, total_docs).await {
+            tracing::error!("Failed to set job total: {}", e);
+        }
+        if let Err(e) = job_manager.update_progress(job_id, 0).await {
+            tracing::error!("Failed to initialize job progress: {}", e);
+        }
+    }
+
+    async fn discover_pdf_paths(documents_dir: &str) -> Result<Vec<PathBuf>> {
         use walkdir::WalkDir;
 
-        // Step 1: Discover PDF files (blocking operation, no lock needed)
-        let pdf_paths: Vec<_> = tokio::task::spawn_blocking({
+        tokio::task::spawn_blocking({
             let dir = documents_dir.to_string();
             move || {
                 WalkDir::new(&dir)
@@ -313,38 +334,156 @@ impl WorkerSupervisor {
                     .collect::<Vec<_>>()
             }
         })
-        .await?;
+        .await
+        .context("discover_pdf_paths task failed")
+    }
 
+    async fn emit_logger(
+        progress_logger: &Option<ProgressLogger>,
+        progress_state: &ProgressState,
+        kind: &str,
+        note: Option<&str>,
+    ) {
+        #[allow(clippy::collapsible_if)]
+        if let Some(logger) = progress_logger.as_ref() {
+            if let Err(e) = logger.emit(progress_state, kind, note).await {
+                tracing::error!("Failed to log progress: {}", e);
+            }
+        }
+    }
+
+    async fn finalize_reindex(
+        rag_engine: &Arc<RwLock<RagEngine>>,
+        progress_logger: &Option<ProgressLogger>,
+        progress_state: &mut ProgressState,
+    ) -> Result<()> {
+        progress_state.stage = Stage::Finalize;
+        Self::emit_logger(progress_logger, progress_state, "stage", Some("finalizing reindex"))
+            .await;
+
+        {
+            let mut engine = TimedWriteLockGuard::acquire(rag_engine, "finalize_reindex").await;
+            engine.finalize_reindex().await?;
+        }
+        save_engine_to_disk(rag_engine).await?;
+        Ok(())
+    }
+
+    async fn try_process_single_pdf(
+        rag_engine: &Arc<RwLock<RagEngine>>,
+        progress_logger: &Option<ProgressLogger>,
+        progress_state: &ProgressState,
+        path: &Path,
+        idx: usize,
+        total_docs: i64,
+    ) -> Result<Option<(String, Result<usize>)>> {
+        let span = tracing::info_span!("process_document", ?path, idx);
+
+        async move {
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => {
+                    tracing::warn!("Skipping file with invalid path: {:?}", path);
+                    return Ok(None);
+                }
+            };
+
+            let data = match tokio::fs::read(path).await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!("Failed to read {}: {}", filename, e);
+                    return Ok(None);
+                }
+            };
+
+            tracing::info!(
+                "Processing document {} ({}/{})",
+                filename,
+                idx + 1,
+                total_docs
+            );
+
+            let logger_clone = progress_logger.clone();
+            let filename_clone = filename.clone();
+            let mut progress_state_clone = progress_state.clone();
+            let current_idx = idx;
+
+            let mut batch_callback =
+                |batch_idx: usize, batch_count: usize, total_chunks: usize, chunks_in_batch: usize| {
+                    progress_state_clone.current_batch = Some(batch_idx);
+                    progress_state_clone.total_batches = Some(batch_count);
+                    progress_state_clone.current_chunks = Some(total_chunks);
+                    progress_state_clone.last_doc = Some(filename_clone.clone());
+                    progress_state_clone.done_docs = (current_idx + 1) as i64;
+
+                    if let Some(ref logger) = logger_clone {
+                        let batch_progress = crate::progress_logger::BatchProgress {
+                            document_name: filename_clone.clone(),
+                            batch_index: batch_idx,
+                            batch_count,
+                            chunks_in_batch,
+                            total_chunks,
+                        };
+                        let logger = logger.clone();
+                        let state = progress_state_clone.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
+                                tracing::error!("Failed to log batch progress: {}", e);
+                            }
+                        });
+                    }
+                };
+
+            let prepared = {
+                let engine = rag_engine.read().await;
+                engine
+                    .prepare_document(&filename, &data, Some(&mut batch_callback))
+                    .await
+            };
+
+            let result = match prepared {
+                Ok(None) => Ok(0),
+                Ok(Some(prepared)) => {
+                    let chunk_count = {
+                        let mut engine = TimedWriteLockGuard::acquire(
+                            rag_engine,
+                            format!("apply_document:{filename}"),
+                        )
+                        .await;
+                        engine.apply_prepared_document(prepared).await?
+                    };
+
+                    save_engine_to_disk(rag_engine).await?;
+                    Ok(chunk_count)
+                }
+                Err(e) => Err(e),
+            };
+
+            Ok(Some((filename, result)))
+        }
+        .instrument(span)
+        .await
+    }
+
+    #[instrument(skip(rag_engine, job_manager, progress_logger), fields(job_id = %job_id, documents_dir = %documents_dir))]
+    async fn reindex_documents(
+        rag_engine: Arc<RwLock<RagEngine>>,
+        documents_dir: &str,
+        job_manager: Arc<JobManager>,
+        job_id: &str,
+        progress_logger: Option<ProgressLogger>,
+    ) -> Result<ReindexOutcome> {
+        let pdf_paths = Self::discover_pdf_paths(documents_dir).await?;
         let total_docs = pdf_paths.len() as i64;
         tracing::info!("Found {} PDF files to process", total_docs);
 
-        // Update job total and progress in JobManager
-        if let Err(e) = job_manager.update_total(job_id, total_docs).await {
-            tracing::error!("Failed to set job total: {}", e);
-        }
-        if let Err(e) = job_manager.update_progress(job_id, 0).await {
-            tracing::error!("Failed to initialize job progress: {}", e);
-        }
+        Self::init_job_tracking(&job_manager, job_id, total_docs).await;
 
-        // Initialize progress state
         let mut progress_state = ProgressState::new(job_id.to_string(), total_docs);
+        let discovery_note = format!("discovered {total_docs} PDFs");
+        Self::emit_logger(&progress_logger, &progress_state, "stage", Some(discovery_note.as_str()))
+            .await;
 
-        // Log discovery stage completion
-        #[allow(clippy::collapsible_if)]
-        if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger
-                .emit(
-                    &progress_state,
-                    "stage",
-                    Some(&format!("discovered {total_docs} PDFs")),
-                )
-                .await
-            {
-                tracing::error!("Failed to log discovery stage: {}", e);
-            }
-        }
-
-        // Update job total
         {
             let engine = rag_engine.read().await;
             if engine.needs_reindex() {
@@ -356,131 +495,36 @@ impl WorkerSupervisor {
             }
         }
 
-        // Track failed documents for poison pill handling
         let mut failed_documents = Vec::new();
-        let mut successful_count = 0;
+        let mut successful_docs = 0i64;
 
-        // Change to embedding stage
         progress_state.stage = Stage::Embedding;
-        #[allow(clippy::collapsible_if)]
-        if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger
-                .emit(
-                    &progress_state,
-                    "stage",
-                    Some("starting document embedding"),
-                )
-                .await
-            {
-                tracing::error!("Failed to log embedding stage: {}", e);
-            }
-        }
+        Self::emit_logger(
+            &progress_logger,
+            &progress_state,
+            "stage",
+            Some("starting document embedding"),
+        )
+        .await;
 
-        // Step 2: Process each document with brief locks per document
         for (idx, path) in pdf_paths.iter().enumerate() {
-            // Create a span for this document iteration
-            let span = tracing::info_span!("process_document", ?path, idx);
-
-            async {
-                // Handle potential file path issues gracefully
-                let filename = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(name) => name,
-                    None => {
-                        tracing::warn!("Skipping file with invalid path: {:?}", path);
-                        return Ok(());
-                    }
-                };
-
-            // Read file (async, no lock)
-            let data = match tokio::fs::read(&path).await {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::error!("Failed to read {}: {}", filename, e);
-                    return Ok(());
-                }
+            let Some((filename, result)) = Self::try_process_single_pdf(
+                &rag_engine,
+                &progress_logger,
+                &progress_state,
+                path,
+                idx,
+                total_docs,
+            )
+            .await?
+            else {
+                continue;
             };
 
-            tracing::info!(
-                "Processing document {} ({}/{})",
-                filename,
-                idx + 1,
-                total_docs
-            );
-
-            // Embed under a read lock (does not block search), then apply changes under a brief
-            // write lock.
-            // Create batch progress callback
-            let logger_clone = progress_logger.clone();
-            let filename_clone = filename.to_string();
-            let mut progress_state_clone = progress_state.clone();
-            let current_idx = idx;
-
-            let result = {
-                // Define batch callback
-                let mut batch_callback =
-                    |batch_idx: usize,
-                     batch_count: usize,
-                     total_chunks: usize,
-                     chunks_in_batch: usize| {
-                        // Update state with batch progress and current document position
-                        progress_state_clone.current_batch = Some(batch_idx);
-                        progress_state_clone.total_batches = Some(batch_count);
-                        progress_state_clone.current_chunks = Some(total_chunks);
-                        progress_state_clone.last_doc = Some(filename_clone.clone());
-                        // Update done_docs to show monotonic progress during batch embedding
-                        progress_state_clone.done_docs = (current_idx + 1) as i64;
-
-                        // Emit batch progress asynchronously (spawn to avoid blocking)
-                        if let Some(ref logger) = logger_clone {
-                            let batch_progress = crate::progress_logger::BatchProgress {
-                                document_name: filename_clone.clone(),
-                                batch_index: batch_idx,
-                                batch_count,
-                                chunks_in_batch,
-                                total_chunks,
-                            };
-                            let logger = logger.clone();
-                            let state = progress_state_clone.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
-                                    tracing::error!("Failed to log batch progress: {}", e);
-                                }
-                            });
-                        }
-                    };
-
-                let prepared = {
-                    let engine = rag_engine.read().await;
-                    engine
-                        .prepare_document(filename, &data, Some(&mut batch_callback))
-                        .await
-                };
-
-                match prepared {
-                    Ok(None) => Ok(0),
-                    Ok(Some(prepared)) => {
-                        let chunk_count = {
-                            let mut engine = TimedWriteLockGuard::acquire(
-                                &rag_engine,
-                                format!("apply_document:{filename}"),
-                            )
-                            .await;
-                            engine.apply_prepared_document(prepared).await?
-                        };
-
-                        save_engine_to_disk(&rag_engine).await?;
-                        Ok(chunk_count)
-                    }
-                    Err(e) => Err(e),
-                }
-            };
-
-            // Clear batch progress after document completes
             progress_state.current_batch = None;
             progress_state.total_batches = None;
             progress_state.current_chunks = None;
 
-            // Capture progress note before consuming result
             let progress_note = match &result {
                 Ok(chunk_count) => format!("{chunk_count} chunks"),
                 Err(_) => "failed".to_string(),
@@ -488,10 +532,9 @@ impl WorkerSupervisor {
 
             match result {
                 Ok(chunk_count) => {
-                    successful_count += 1;
+                    successful_docs += 1;
                     progress_state.success_docs += 1;
 
-                    // Track skipped vs embedded separately
                     if chunk_count > 0 {
                         progress_state.embedded_docs += 1;
                         tracing::info!(
@@ -513,7 +556,7 @@ impl WorkerSupervisor {
                 }
                 Err(e) => {
                     let error_msg = format!("{filename}: {e}");
-                    failed_documents.push(error_msg.clone());
+                    failed_documents.push(error_msg);
                     progress_state.failed_docs += 1;
                     tracing::warn!(
                         "Failed to process {} ({}/{}): {}. Continuing with remaining documents.",
@@ -525,53 +568,26 @@ impl WorkerSupervisor {
                 }
             }
 
-                // Update progress
-                let progress = (idx + 1) as i64;
-                progress_state.done_docs = progress;
-                progress_state.last_doc = Some(filename.to_string());
+            let progress = (idx + 1) as i64;
+            progress_state.done_docs = progress;
+            progress_state.last_doc = Some(filename);
 
-                if let Err(e) = job_manager.update_progress(job_id, progress).await {
-                    tracing::error!("Failed to update job progress: {}", e);
-                }
-
-                // Log progress
-                #[allow(clippy::collapsible_if)]
-                if let Some(ref logger) = progress_logger {
-                    if let Err(e) = logger
-                        .emit(&progress_state, "progress", Some(&progress_note))
-                        .await
-                    {
-                        tracing::error!("Failed to log progress: {}", e);
-                    }
-                }
-                // Return Ok for the async block
-                Ok::<(), anyhow::Error>(())
+            if let Err(e) = job_manager.update_progress(job_id, progress).await {
+                tracing::error!("Failed to update job progress: {}", e);
             }
-            .instrument(span)
-            .await?;
+
+            Self::emit_logger(
+                &progress_logger,
+                &progress_state,
+                "progress",
+                Some(progress_note.as_str()),
+            )
+            .await;
         }
 
-        // Finalize reindex
-        progress_state.stage = Stage::Finalize;
-        #[allow(clippy::collapsible_if)]
-        if let Some(ref logger) = progress_logger {
-            if let Err(e) = logger
-                .emit(&progress_state, "stage", Some("finalizing reindex"))
-                .await
-            {
-                tracing::error!("Failed to log finalize stage: {}", e);
-            }
-        }
+        Self::finalize_reindex(&rag_engine, &progress_logger, &mut progress_state).await?;
 
-        {
-            // Use instrumented lock guard for timing visibility
-            let mut engine = TimedWriteLockGuard::acquire(&rag_engine, "finalize_reindex").await;
-            engine.finalize_reindex().await?;
-        }
-        save_engine_to_disk(&rag_engine).await?;
-
-        // Log completion
-        if let Some(ref logger) = progress_logger {
+        if let Some(logger) = progress_logger.as_ref() {
             let completion_note = if failed_documents.is_empty() {
                 format!("completed successfully - {total_docs} docs")
             } else {
@@ -584,38 +600,24 @@ impl WorkerSupervisor {
                 .emit(&progress_state, "done", Some(&completion_note))
                 .await
             {
-                tracing::error!("Failed to log completion: {}", e);
+                tracing::error!("Failed to log completion: {e}");
             }
         }
 
-        // Report poison pill documents if any
-        if !failed_documents.is_empty() {
-            let failure_summary = format!(
-                "Job completed with {} failures out of {} documents. Failed documents:\n{}",
-                failed_documents.len(),
-                total_docs,
-                failed_documents.join("\n")
-            );
-            tracing::warn!("{}", failure_summary);
-
-            // Update job with partial failure status
-            if let Err(e) = job_manager
-                .update_status(job_id, JobStatus::Completed, Some(failure_summary))
-                .await
-            {
-                tracing::error!("Failed to update job with failure summary: {}", e);
-            }
-
+        if failed_documents.is_empty() {
+            tracing::info!("All {} documents processed successfully", total_docs);
+        } else {
             tracing::info!(
                 "Successfully processed {}/{} documents",
-                successful_count,
+                successful_docs,
                 total_docs
             );
-        } else {
-            tracing::info!("All {} documents processed successfully", total_docs);
         }
 
-        Ok(())
+        Ok(ReindexOutcome {
+            total_docs,
+            failed_documents,
+        })
     }
 }
 

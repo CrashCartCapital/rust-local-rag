@@ -1,7 +1,9 @@
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream};
 use rust_local_rag::rag_engine::RagEngine;
+use rust_local_rag::Config;
 use serial_test::serial;
+use std::time::Duration;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use wiremock::matchers::{method, path};
@@ -87,7 +89,7 @@ async fn test_e2e_indexing_and_search() {
         std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
     }
 
-    let engine = RagEngine::new(temp_dir.path().to_str().unwrap())
+    let engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &Config::default())
         .await
         .expect("Failed to create RagEngine");
 
@@ -155,7 +157,7 @@ async fn test_reranker_fallback_on_failure() {
         std::env::set_var("OLLAMA_RERANK_MODEL", "my-reranker");
     }
 
-    let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap())
+    let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &Config::default())
         .await
         .expect("Failed to create RagEngine");
 
@@ -182,5 +184,75 @@ async fn test_reranker_fallback_on_failure() {
     // RerankedResult { ..., relevance: initial_score, ... }
     // And RagEngine uses this relevance for reranker_score.
     // So we just check that we got a result.
+    assert!(results[0].score > 0.0, "Should have a positive score");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_reranker_timeout_fallback() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                { "name": "nomic-embed-text:latest" },
+                { "name": "my-reranker:latest" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Deliberately slow reranker response to trigger client timeout.
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(1000))
+                .set_body_json(serde_json::json!({
+                    "response": "Yes",
+                    "logprobs": []
+                })),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        std::env::set_var("OLLAMA_RERANK_MODEL", "my-reranker");
+        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+    }
+
+    let mut config = Config::default();
+    config.reranker_timeout = Duration::from_millis(200);
+
+    let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)
+        .await
+        .expect("Failed to create RagEngine");
+
+    assert!(engine.has_reranker(), "Reranker should be enabled");
+
+    let pdf_bytes = create_valid_pdf();
+    engine
+        .add_document("test.pdf", &pdf_bytes, None)
+        .await
+        .unwrap();
+
+    let results = engine
+        .search("Hello", 1, None)
+        .await
+        .expect("Search should succeed despite reranker timeout");
+
+    assert!(!results.is_empty(), "Should return results");
     assert!(results[0].score > 0.0, "Should have a positive score");
 }

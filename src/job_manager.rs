@@ -494,8 +494,14 @@ mod tests {
 
         // Cleanup: Remove temp database file
         let db_file = temp_db.strip_prefix("sqlite:").unwrap_or(&temp_db);
-        let _ = std::fs::remove_file(db_file);
-        let _ = std::fs::remove_file(format!("{db_file}-shm")); // WAL shared memory
-        let _ = std::fs::remove_file(format!("{db_file}-wal")); // WAL file
+        if let Err(e) = std::fs::remove_file(db_file) {
+            eprintln!("Cleanup failed (db): {e}");
+        }
+        if let Err(e) = std::fs::remove_file(format!("{db_file}-shm")) {
+            eprintln!("Cleanup failed (db-shm): {e}");
+        }
+        if let Err(e) = std::fs::remove_file(format!("{db_file}-wal")) {
+            eprintln!("Cleanup failed (db-wal): {e}");
+        }
     }
 }

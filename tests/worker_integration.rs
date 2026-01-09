@@ -1,7 +1,7 @@
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream};
 use rust_local_rag::job_manager::{JobStatus, JobType};
-use rust_local_rag::{JobManager, JobRequest, RagEngine, WorkerSupervisor};
+use rust_local_rag::{Config, JobManager, JobRequest, RagEngine, WorkerSupervisor};
 use serial_test::serial;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
@@ -104,7 +104,9 @@ async fn test_worker_completes_job() {
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap()).await.unwrap(),
+        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+            .await
+            .unwrap(),
     ));
     let (job_tx, job_rx) = mpsc::channel(10);
 
@@ -154,5 +156,101 @@ async fn test_worker_completes_job() {
     let engine = rag_engine.read().await;
     let docs = engine.list_documents();
     assert_eq!(docs.len(), 1, "Should have indexed 1 document");
+    assert_eq!(docs[0], "test.pdf");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_worker_completes_job_with_corrupt_pdf() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{ "name": "nomic-embed-text:latest" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let docs_dir = temp_dir.path().join("docs");
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+
+    unsafe {
+        std::env::set_var("LOG_DIR", log_dir.to_str().unwrap());
+    }
+
+    std::fs::write(docs_dir.join("test.pdf"), create_valid_pdf()).unwrap();
+    std::fs::write(docs_dir.join("corrupt.pdf"), b"not a pdf").unwrap();
+
+    let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
+    let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let rag_engine = Arc::new(RwLock::new(
+        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+            .await
+            .unwrap(),
+    ));
+    let (job_tx, job_rx) = mpsc::channel(10);
+
+    let supervisor = WorkerSupervisor::new(job_manager.clone(), rag_engine.clone(), job_rx);
+    tokio::spawn(async move {
+        supervisor.run().await;
+    });
+
+    let job = job_manager
+        .create_job(JobType::Reindex, None, 0)
+        .await
+        .unwrap();
+
+    job_tx
+        .send(JobRequest::StartReindex {
+            job_id: job.job_id.clone(),
+            documents_dir: docs_dir.to_str().unwrap().to_string(),
+        })
+        .await
+        .unwrap();
+
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let current_job = job_manager.get_job(&job.job_id).await.unwrap().unwrap();
+
+        if current_job.status == JobStatus::Completed {
+            assert!(
+                current_job.error.as_deref().unwrap_or("").contains("corrupt.pdf"),
+                "Expected job error summary to mention corrupt.pdf"
+            );
+            break;
+        }
+        if current_job.status == JobStatus::Failed {
+            panic!("Job failed: {:?}", current_job.error);
+        }
+
+        attempts += 1;
+        if attempts > 200 {
+            panic!("Job timed out. Status: {:?}", current_job.status);
+        }
+    }
+
+    let engine = rag_engine.read().await;
+    let docs = engine.list_documents();
+    assert_eq!(docs.len(), 1, "Should have indexed only the valid document");
     assert_eq!(docs[0], "test.pdf");
 }

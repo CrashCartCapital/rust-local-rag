@@ -2,8 +2,11 @@ use anyhow::Result;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::instrument;
+
+use crate::config::Config;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -27,30 +30,44 @@ pub struct EmbeddingService {
     ollama_url: String,
     model: String,
     query_cache: RwLock<LruCache<String, Vec<f32>>>,
+    embedding_timeout: Duration,
 }
 
 impl EmbeddingService {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(config: &Config) -> Result<Self> {
         let ollama_url =
             std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
         let model = std::env::var("OLLAMA_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "nomic-embed-text".to_string());
 
-        Self::new_with_config(ollama_url, model).await
+        Self::new_with_settings(ollama_url, model, config).await
     }
 
     #[instrument(skip(ollama_url))]
     pub async fn new_with_config(ollama_url: String, model: String) -> Result<Self> {
+        Self::new_with_settings(ollama_url, model, &Config::default()).await
+    }
+
+    #[instrument(skip(ollama_url, config))]
+    pub async fn new_with_settings(
+        ollama_url: String,
+        model: String,
+        config: &Config,
+    ) -> Result<Self> {
         tracing::info!("Ollama URL: {}", ollama_url);
         tracing::info!("Ollama Model: {}", model);
 
         let service = Self {
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(1200)) // 20 minutes per batch for large documents
+                .timeout(config.embedding_timeout) // per-batch for large documents
                 .build()?,
             ollama_url,
             model,
-            query_cache: RwLock::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
+            query_cache: RwLock::new(LruCache::new(NonZeroUsize::new(
+                config.embedding_cache_size.get(),
+            )
+            .expect("embedding_cache_size is non-zero"))),
+            embedding_timeout: config.embedding_timeout,
         };
 
         service.test_connection().await?;
@@ -131,25 +148,19 @@ impl EmbeddingService {
 
             // HARD TIMEOUT: Wrap request in tokio::time::timeout to prevent indefinite hangs
             // This creates an external "stopwatch" that will cancel the operation if it takes too long
-            const BATCH_TIMEOUT_SECS: u64 = 1200; // 20 minutes per batch
             let request_future = self
                 .client
                 .post(format!("{}/api/embed", self.ollama_url))
                 .json(&request)
                 .send();
 
-            let response = match tokio::time::timeout(
-                tokio::time::Duration::from_secs(BATCH_TIMEOUT_SECS),
-                request_future,
-            )
-            .await
-            {
+            let response = match tokio::time::timeout(self.embedding_timeout, request_future).await {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_) => {
                     return Err(anyhow::anyhow!(
                         "Batch embedding request timed out after {} seconds for {} texts. The Ollama server may be overloaded.",
-                        BATCH_TIMEOUT_SECS,
+                        self.embedding_timeout.as_secs(),
                         texts.len()
                     ));
                 }
@@ -243,7 +254,11 @@ impl EmbeddingService {
 
         let exists = models
             .iter()
-            .any(|m| m["name"].as_str().unwrap_or("").starts_with(&self.model));
+            .any(|m| {
+                m.get("name")
+                    .and_then(|n| n.as_str())
+                    .map_or(false, |s| s.starts_with(&self.model))
+            });
 
         if !exists {
             let available: Vec<_> = models.iter().filter_map(|m| m["name"].as_str()).collect();

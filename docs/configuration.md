@@ -47,6 +47,11 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` or `DEV` | Prefer console logging (development friendly) | _unset_ |
 | `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |
+| `RAG_EMBEDDING_TIMEOUT_SECS` | Ollama embedding request timeout (seconds) | `1200` |
+| `RAG_EMBEDDING_CACHE_SIZE` | LRU cache size for query embeddings | `1000` |
+| `RAG_RERANKER_TIMEOUT_SECS` | Ollama reranker request timeout (seconds) | `60` |
+| `RAG_RERANKER_CONCURRENCY` | Max concurrent reranker requests | `1` |
+| `RAG_DEFAULT_LOGPROB` | Fallback logprob when missing (used for softmax scoring) | `-10.0` |
 
 > 💡 **Tip**: Set `OLLAMA_EMBEDDING_MODEL` to any embedding model you've installed. The server verifies your choice at startup.
 

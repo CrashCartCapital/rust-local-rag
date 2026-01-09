@@ -567,7 +567,7 @@ crash({step_number: 1, purpose: "analysis", thought: "..."})
 - **rag-core (`crates/rag-core/src/*`)**: Core RAG logic - chunking, retrieval/scoring, reranking traits, persistence, and document fingerprinting
 - **rag_engine.rs**: Server wrapper - PDF extraction + env/config + calls into `rag-core`
 - **embeddings.rs**: Ollama API client for generating embeddings with LRU caching (1000 entries) for query embeddings and batch embedding support
-- **reranker.rs**: LLM-based relevance reranking service using Ollama with Phi-4-mini, performs concurrent second-stage scoring of search candidates using JSON-structured prompts with Phi chat template
+- **reranker.rs**: LLM-based relevance reranking service using Ollama with `OLLAMA_RERANK_MODEL` (default: Qwen3-Reranker-4B). Uses Yes/No binary classification with logprobs-based scoring for second-stage relevance assessment.
 
 ### Key Design Patterns
 
