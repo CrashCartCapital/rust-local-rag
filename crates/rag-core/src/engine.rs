@@ -7,6 +7,8 @@ use crate::types::{
     SearchWeights,
 };
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 use uuid::Uuid;
 
 pub struct RagEngine<B: EmbeddingBackend, R = ()> {
@@ -129,6 +131,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(removed_ids.len())
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, text, batch_callback)))]
     pub async fn prepare_document(
         &self,
         document_name: &str,
@@ -212,6 +215,13 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             });
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            "Prepared document {} with {} chunks",
+            document_name,
+            chunks.len()
+        );
+
         Ok(Some(PreparedDocument {
             document_name: document_name.to_string(),
             document_hash: document_hash.map(ToString::to_string),
@@ -219,6 +229,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }))
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, prepared), fields(doc = %prepared.document_name, chunks = prepared.chunks.len())))]
     pub fn upsert_prepared_document(&mut self, prepared: PreparedDocument) -> Result<usize> {
         // Remove existing chunks even if we end up with zero usable chunks.
         let _ = self.remove_document(&prepared.document_name);
@@ -253,6 +264,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(chunk_count)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, text)))]
     pub async fn upsert_document(
         &mut self,
         document_name: &str,
@@ -268,6 +280,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         self.upsert_prepared_document(prepared)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn search(
         &self,
         query: &str,
@@ -279,9 +292,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     {
         let resolved = weights.unwrap_or(self.config.weights);
         let results = self.search_internal(query, top_k, resolved).await?;
+        #[cfg(feature = "tracing")]
+        tracing::debug!("Search returned {} results", results.len());
         Ok(results.into_iter().map(|r| r.result).collect())
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn search_with_diversity(
         &self,
         query: &str,
@@ -305,16 +321,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .await?;
 
         if candidates_with_embeddings.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("MMR search: no candidates found");
             return Ok(vec![]);
         }
 
-        Ok(mmr_diversify(
-            candidates_with_embeddings,
-            top_k,
-            diversity_factor,
-        ))
+        let results = mmr_diversify(candidates_with_embeddings, top_k, diversity_factor);
+        #[cfg(feature = "tracing")]
+        tracing::debug!("MMR search returned {} results", results.len());
+        Ok(results)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn embedding_candidates(
         &self,
         query: &str,
@@ -360,9 +378,13 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!("Found {} embedding candidates", candidates.len());
+
         Ok(candidates)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     async fn search_internal(
         &self,
         query: &str,
@@ -373,6 +395,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         R: Rerank,
     {
         if self.chunks.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Search internal: index empty");
             return Ok(vec![]);
         }
 
@@ -575,9 +599,16 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             }
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            "Search internal finished with {} results",
+            ordered_results.len()
+        );
+
         Ok(ordered_results)
     }
 
+    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     fn validate_index_sync(&mut self) -> Result<()> {
         let valid_chunk_ids: HashSet<String> = self.chunks.keys().cloned().collect();
 
