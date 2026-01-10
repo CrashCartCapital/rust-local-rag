@@ -6,8 +6,8 @@ use tokio::sync::RwLock;
 use tracing::{Instrument, instrument};
 use uuid::Uuid;
 
-use super::responses::{JobStatusResponse, ReindexResponse};
 use super::MAX_TOP_K;
+use super::responses::{JobStatusResponse, ReindexResponse};
 use tokio::sync::mpsc;
 
 /// Shared application state for HTTP handlers
@@ -58,8 +58,15 @@ fn default_diversity_factor() -> f32 {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct HttpSearchResult {
+    #[serde(flatten)]
+    pub result: crate::rag_engine::SearchResult,
+    pub highlighted_text: String,
+}
+
+#[derive(Debug, serde::Serialize)]
 struct HttpSearchResponse {
-    results: Vec<crate::rag_engine::SearchResult>,
+    results: Vec<HttpSearchResult>,
 }
 
 fn api_error(
@@ -93,7 +100,26 @@ async fn http_search(
                 duration,
                 results.len()
             );
-            Ok(axum::Json(HttpSearchResponse { results }))
+
+            let highlight_re = super::formatting::get_highlight_regex(&request.query);
+            let formatted_results = results
+                .into_iter()
+                .map(|result| {
+                    let highlighted_text = if let Some(re) = &highlight_re {
+                        re.replace_all(&result.text, "**$1**").to_string()
+                    } else {
+                        result.text.clone()
+                    };
+                    HttpSearchResult {
+                        result,
+                        highlighted_text,
+                    }
+                })
+                .collect();
+
+            Ok(axum::Json(HttpSearchResponse {
+                results: formatted_results,
+            }))
         }
         Err(e) => {
             tracing::error!("Search error: {}", e);
@@ -116,8 +142,7 @@ async fn http_stats(
 #[instrument(skip(app_state))]
 async fn http_start_reindex(
     axum::extract::State(app_state): axum::extract::State<AppState>,
-) -> Result<axum::Json<ReindexResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
-{
+) -> Result<axum::Json<ReindexResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
     tracing::info!("HTTP request to start reindex job");
     let job = match app_state
         .job_manager
@@ -243,4 +268,3 @@ pub(crate) fn create_api_router() -> axum::Router<AppState> {
         .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
         .layer(axum::middleware::from_fn(trace_request))
 }
-

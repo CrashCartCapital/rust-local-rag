@@ -63,10 +63,10 @@ impl EmbeddingService {
                 .build()?,
             ollama_url,
             model,
-            query_cache: RwLock::new(LruCache::new(NonZeroUsize::new(
-                config.embedding_cache_size.get(),
-            )
-            .expect("embedding_cache_size is non-zero"))),
+            query_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(config.embedding_cache_size.get())
+                    .expect("embedding_cache_size is non-zero"),
+            )),
             embedding_timeout: config.embedding_timeout,
         };
 
@@ -154,7 +154,8 @@ impl EmbeddingService {
                 .json(&request)
                 .send();
 
-            let response = match tokio::time::timeout(self.embedding_timeout, request_future).await {
+            let response = match tokio::time::timeout(self.embedding_timeout, request_future).await
+            {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_) => {
@@ -252,13 +253,11 @@ impl EmbeddingService {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Cannot list models"))?;
 
-        let exists = models
-            .iter()
-            .any(|m| {
-                m.get("name")
-                    .and_then(|n| n.as_str())
-                    .map_or(false, |s| s.starts_with(&self.model))
-            });
+        let exists = models.iter().any(|m| {
+            m.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|s| s.starts_with(&self.model))
+        });
 
         if !exists {
             let available: Vec<_> = models.iter().filter_map(|m| m["name"].as_str()).collect();
