@@ -1,9 +1,4 @@
-pub(crate) fn format_search_results(results: &[crate::rag_engine::SearchResult], query: &str) -> String {
-    if results.is_empty() {
-        return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`."
-            .to_string();
-    }
-
+pub(crate) fn get_highlight_regex(query: &str) -> Option<regex::Regex> {
     let terms: Vec<&str> = query
         .split_whitespace()
         .filter(|t| {
@@ -20,7 +15,7 @@ pub(crate) fn format_search_results(results: &[crate::rag_engine::SearchResult],
         })
         .collect();
 
-    let highlight_re = if !terms.is_empty() {
+    if !terms.is_empty() {
         let pattern = terms
             .iter()
             .map(|t| {
@@ -38,7 +33,19 @@ pub(crate) fn format_search_results(results: &[crate::rag_engine::SearchResult],
             .ok()
     } else {
         None
-    };
+    }
+}
+
+pub(crate) fn format_search_results(
+    results: &[crate::rag_engine::SearchResult],
+    query: &str,
+) -> String {
+    if results.is_empty() {
+        return "No results found. Try broader keywords or check if documents are uploaded with `list_documents`."
+            .to_string();
+    }
+
+    let highlight_re = get_highlight_regex(query);
 
     results
         .iter()
@@ -96,4 +103,3 @@ pub(crate) fn format_search_results(results: &[crate::rag_engine::SearchResult],
         .collect::<Vec<_>>()
         .join("\n---\n\n")
 }
-
