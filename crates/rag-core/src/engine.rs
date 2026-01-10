@@ -280,7 +280,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         self.upsert_prepared_document(prepared)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn search(
         &self,
         query: &str,
@@ -297,7 +297,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(results.into_iter().map(|r| r.result).collect())
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn search_with_diversity(
         &self,
         query: &str,
@@ -332,7 +332,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(results)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     pub async fn embedding_candidates(
         &self,
         query: &str,
@@ -384,7 +384,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
     async fn search_internal(
         &self,
         query: &str,
