@@ -31,6 +31,7 @@ fn get_batch_size() -> usize {
 pub struct RagEngine {
     data_dir: String,
     core: rag_core::RagEngine<EmbeddingService, RerankerService>,
+    start_time: std::time::Instant,
 }
 
 impl RagEngine {
@@ -74,6 +75,7 @@ impl RagEngine {
         Ok(Self {
             data_dir: data_dir.to_string(),
             core,
+            start_time: std::time::Instant::now(),
         })
     }
 
@@ -268,7 +270,9 @@ impl RagEngine {
             "chunks": chunk_count,
             "status": status,
             "embedding_model": self.embedding_model(),
-            "reranker_model": reranker_model
+            "reranker_model": reranker_model,
+            "uptime_seconds": self.start_time.elapsed().as_secs(),
+            "version": env!("CARGO_PKG_VERSION")
         })
     }
 
