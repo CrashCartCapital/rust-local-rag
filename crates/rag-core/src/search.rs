@@ -431,10 +431,17 @@ impl LexicalIndex {
         }
 
         let mut results: Vec<(String, f32)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Optimization: Use select_nth_unstable to find top-k in O(N) time
+        // instead of sorting the whole vector in O(N log N).
         if limit > 0 && results.len() > limit {
+            results.select_nth_unstable_by(limit, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
             results.truncate(limit);
         }
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
     }
 
