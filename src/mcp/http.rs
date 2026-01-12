@@ -140,6 +140,14 @@ async fn http_stats(
 }
 
 #[instrument(skip(app_state))]
+async fn http_list_documents(
+    axum::extract::State(app_state): axum::extract::State<AppState>,
+) -> axum::Json<Vec<String>> {
+    let engine = app_state.rag_state.read().await;
+    axum::Json(engine.list_documents())
+}
+
+#[instrument(skip(app_state))]
 async fn http_start_reindex(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<ReindexResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
@@ -263,6 +271,7 @@ pub(crate) fn create_api_router() -> axum::Router<AppState> {
         .route("/readyz", axum::routing::get(readyz))
         .route("/search", axum::routing::post(http_search))
         .route("/stats", axum::routing::get(http_stats))
+        .route("/documents", axum::routing::get(http_list_documents))
         .route("/reindex", axum::routing::post(http_start_reindex))
         .route("/jobs/active", axum::routing::get(http_get_active_job))
         .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
