@@ -403,7 +403,7 @@ impl LexicalIndex {
 
         let k1 = 1.5_f32;
         let b = 0.75_f32;
-        let mut scores: HashMap<String, f32> = HashMap::new();
+        let mut scores: HashMap<&String, f32> = HashMap::new();
 
         for term in unique_terms {
             if let Some(postings) = self.term_postings.get(&term) {
@@ -425,12 +425,16 @@ impl LexicalIndex {
                     }
 
                     let score = idf * (tf * (k1 + 1.0)) / denom;
-                    *scores.entry(doc_id.clone()).or_insert(0.0) += score;
+                    *scores.entry(doc_id).or_insert(0.0) += score;
                 }
             }
         }
 
-        let mut results: Vec<(String, f32)> = scores.into_iter().collect();
+        let mut results: Vec<(String, f32)> = scores
+            .into_iter()
+            // Optimization: Clone keys only once at the end instead of during the loop
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
 
         // Optimization: Use select_nth_unstable to find top-k in O(N) time
         // instead of sorting the whole vector in O(N log N).
