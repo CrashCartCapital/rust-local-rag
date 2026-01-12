@@ -202,3 +202,67 @@ async fn test_health_endpoint() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     server_handle.abort();
 }
+
+#[tokio::test]
+#[serial]
+async fn test_documents_endpoint() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                { "name": "nomic-embed-text:latest" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let embedding_service =
+        EmbeddingService::new_with_config(mock_server.uri(), "nomic-embed-text".to_string())
+            .await
+            .expect("EmbeddingService init failed");
+
+    let rag_engine = RagEngine::new_with_embedding_service(
+        temp_dir.path().to_str().unwrap(),
+        embedding_service,
+        &crate::config::Config::default(),
+    )
+    .await
+    .expect("RagEngine init failed");
+    let rag_state = Arc::new(RwLock::new(rag_engine));
+
+    let job_manager = Arc::new(JobManager::new("sqlite::memory:").await.unwrap());
+    let (job_tx, _rx) = mpsc::channel(1);
+
+    let documents_dir = temp_dir.path().to_string_lossy().to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = tokio::spawn(async move {
+        super::start_mcp_server(rag_state, job_manager, job_tx, documents_dir, listener)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://127.0.0.1:{}/documents", port))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let docs: Vec<String> = response.json().await.unwrap();
+    assert!(docs.is_empty()); // Initally empty
+
+    server_handle.abort();
+}
