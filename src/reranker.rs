@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout};
+use tracing::instrument;
 
 use crate::config::Config;
 
@@ -209,6 +210,7 @@ Answer:"#
     /// # Returns
     ///
     /// A vector of reranked results sorted by relevance score in descending order
+    #[instrument(skip(self, candidates), fields(count = candidates.len()))]
     pub async fn rerank(
         &self,
         query: &str,
@@ -248,6 +250,7 @@ Answer:"#
         Ok(results)
     }
 
+    #[instrument(skip(self, candidate), fields(chunk_id = %candidate.chunk_id))]
     async fn score_with_timeout(
         &self,
         query: &str,
@@ -294,6 +297,7 @@ Answer:"#
         }
     }
 
+    #[instrument(skip(self, candidate), fields(chunk_id = %candidate.chunk_id, query = truncate_query(query)))]
     async fn score_candidate(
         &self,
         query: &str,
@@ -583,6 +587,7 @@ Answer:"#
     ///
     /// For reliable p99 estimation, use at least 50-100 samples. Smaller
     /// samples will produce unstable estimates sensitive to outliers.
+    #[instrument(skip(self, candidates), fields(sample_size = sample_size))]
     pub async fn calibrate_timeout(
         &self,
         query: &str,
@@ -702,6 +707,7 @@ Answer:"#
         (duration, result)
     }
 
+    #[instrument(skip(self))]
     async fn test_connection(&self) -> Result<()> {
         let response = self
             .client
@@ -719,6 +725,7 @@ Answer:"#
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn verify_model(&self) -> Result<()> {
         let response = self
             .client
@@ -757,6 +764,14 @@ Answer:"#
 
         tracing::info!("✅ Rerank model '{}' verified", self.model);
         Ok(())
+    }
+}
+
+fn truncate_query(query: &str) -> String {
+    if query.chars().count() > 50 {
+        query.chars().take(47).collect::<String>() + "..."
+    } else {
+        query.to_string()
     }
 }
 
