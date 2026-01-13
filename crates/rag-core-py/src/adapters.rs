@@ -83,6 +83,9 @@ struct AdapterInner {
 /// Safety: Python calls are always made with the GIL held.
 struct BackendRef(Py<PyAny>);
 
+/// SAFETY: This struct holds a Python object. It is marked Send/Sync because all access to the
+/// underlying object is strictly guarded by `Python::with_gil()`. The object is never accessed
+/// raw across threads without the GIL.
 unsafe impl Send for BackendRef {}
 unsafe impl Sync for BackendRef {}
 
