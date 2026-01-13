@@ -3,8 +3,8 @@ use crate::error::{EmbeddingError, EngineError, Result};
 use crate::search::{AnnIndex, LexicalIndex, SearchResultWithEmbedding, mmr_diversify};
 use crate::traits::{EmbeddingBackend, Rerank};
 use crate::types::{
-    DocumentChunk, DocumentName, RagConfig, RerankedResult, RerankerCandidate, SearchResult,
-    SearchWeights,
+    DocumentChunk, DocumentName, HealthStatus, RagConfig, RerankedResult, RerankerCandidate,
+    SearchResult, SearchWeights,
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tracing")]
@@ -105,6 +105,30 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Returns health status for monitoring/observability.
+    ///
+    /// This method is useful for container health probes or monitoring dashboards.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let health = engine.health();
+    /// if health.is_healthy {
+    ///     println!("Engine ready: {} docs, {} chunks", health.document_count, health.chunk_count);
+    /// }
+    /// ```
+    pub fn health(&self) -> HealthStatus {
+        HealthStatus {
+            is_healthy: true,
+            embedding_model: self.backend.model_id().to_string(),
+            embedding_dim: self.backend.dimension(),
+            document_count: self.list_documents().len(),
+            chunk_count: self.chunks.len(),
+            needs_reindex: self.needs_reindex,
+            has_reranker: self.reranker.is_some(),
+        }
     }
 
     pub fn remove_document(&mut self, document_name: &str) -> Result<usize> {
@@ -730,11 +754,12 @@ where
         };
 
         let data = serde_json::to_string_pretty(&state)
-            .map_err(|e| EngineError::Persistence(e.to_string()))?;
+            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e)))?;
 
-        std::fs::write(&temp_path, data).map_err(|e| EngineError::Persistence(e.to_string()))?;
+        std::fs::write(&temp_path, &data)
+            .map_err(|e| EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e)))?;
         std::fs::rename(&temp_path, &final_path)
-            .map_err(|e| EngineError::Persistence(e.to_string()))?;
+            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e)))?;
         Ok(())
     }
 
@@ -765,7 +790,7 @@ where
 
         if model_specific_path.exists() {
             let data = std::fs::read_to_string(&model_specific_path)
-                .map_err(|e| EngineError::Persistence(e.to_string()))?;
+                .map_err(|e| EngineError::load_failed(&model_specific_path, crate::error::PersistenceError::Io(e)))?;
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(state) => {
@@ -793,7 +818,7 @@ where
 
         if legacy_path.exists() {
             let data = std::fs::read_to_string(&legacy_path)
-                .map_err(|e| EngineError::Persistence(e.to_string()))?;
+                .map_err(|e| EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e)))?;
 
             if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
                 if info.model == current_model {

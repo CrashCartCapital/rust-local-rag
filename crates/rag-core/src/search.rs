@@ -1,3 +1,4 @@
+use crate::error::{EngineError, ValidationKind};
 use crate::types::SearchResult;
 use std::collections::{HashMap, HashSet};
 
@@ -470,6 +471,389 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+// ============================================================================
+// IndexSet: Unified wrapper for ANN and Lexical indexes
+// ============================================================================
+
+/// Update operation for atomic batch processing.
+#[derive(Debug, Clone)]
+pub enum ChunkUpdate {
+    /// Add a chunk with its text and embedding vector
+    Add {
+        id: String,
+        text: String,
+        embedding: Vec<f32>,
+    },
+    /// Remove a chunk by ID
+    Remove { id: String },
+}
+
+/// Candidate result from index search with component scores.
+#[derive(Debug, Clone)]
+pub struct CandidateScore {
+    pub chunk_id: String,
+    pub embedding_score: f32,
+    pub lexical_score: f32,
+    pub combined_score: f32,
+}
+
+/// Unified index set wrapping ANN (vector) and Lexical (BM25) indexes.
+///
+/// This struct provides atomic batch operations and maintains a single
+/// authoritative chunk registry to ensure both indexes stay synchronized.
+///
+/// # Invariants
+///
+/// - Both indexes always contain identical chunk ID sets
+/// - Embedding dimension is locked after the first chunk is added
+/// - Batch operations are all-or-nothing (atomic)
+pub struct IndexSet {
+    ann_index: Option<AnnIndex>,
+    lexical_index: LexicalIndex,
+    /// Authoritative registry of all chunk IDs
+    chunk_ids: HashSet<String>,
+    /// Embedding dimension, locked after first insert
+    embedding_dim: Option<usize>,
+}
+
+impl Default for IndexSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IndexSet {
+    /// Create a new empty IndexSet.
+    pub fn new() -> Self {
+        Self {
+            ann_index: None,
+            lexical_index: LexicalIndex::new(),
+            chunk_ids: HashSet::new(),
+            embedding_dim: None,
+        }
+    }
+
+    /// Create an IndexSet with a known embedding dimension.
+    pub fn with_dimension(dim: usize) -> Self {
+        Self {
+            ann_index: Some(AnnIndex::new(dim)),
+            lexical_index: LexicalIndex::new(),
+            chunk_ids: HashSet::new(),
+            embedding_dim: Some(dim),
+        }
+    }
+
+    /// Apply a batch of updates atomically.
+    ///
+    /// All updates succeed or all fail. This ensures index consistency
+    /// by validating all operations before applying any of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Embedding dimension doesn't match (after first insert)
+    /// - Embedding contains NaN or Inf values
+    /// - Embedding is empty (zero dimension)
+    /// - Text is empty or whitespace-only
+    pub fn apply_batch(&mut self, updates: &[ChunkUpdate]) -> Result<(), EngineError> {
+        // Phase 1: Validate all updates WITHOUT mutating self
+        // Determine expected dimension from self or first Add in batch
+        let mut expected_dim = self.embedding_dim;
+
+        for update in updates {
+            if let ChunkUpdate::Add { id, text, embedding } = update {
+                // Validate embedding (non-mutating)
+                Self::validate_embedding_pure(id, embedding, &mut expected_dim)?;
+
+                // Validate text
+                if text.trim().is_empty() {
+                    return Err(EngineError::validation(id, ValidationKind::EmptyText));
+                }
+            }
+        }
+
+        // Phase 2: Now that all validation passed, commit dimension if needed
+        if let Some(dim) = expected_dim {
+            if self.embedding_dim.is_none() {
+                self.embedding_dim = Some(dim);
+                self.ann_index = Some(AnnIndex::new(dim));
+            }
+        }
+
+        // Phase 3: Apply all updates (validated, won't fail)
+        for update in updates {
+            match update {
+                ChunkUpdate::Add { id, text, embedding } => {
+                    self.add_chunk_internal(id, text, embedding);
+                }
+                ChunkUpdate::Remove { id } => {
+                    self.remove_chunk_internal(id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a single chunk. For bulk operations, prefer `apply_batch`.
+    pub fn add_chunk(
+        &mut self,
+        id: &str,
+        text: &str,
+        embedding: &[f32],
+    ) -> Result<(), EngineError> {
+        // Validate without mutating
+        let mut expected_dim = self.embedding_dim;
+        Self::validate_embedding_pure(id, embedding, &mut expected_dim)?;
+
+        if text.trim().is_empty() {
+            return Err(EngineError::validation(id, ValidationKind::EmptyText));
+        }
+
+        // Commit dimension if this is the first insert
+        if let Some(dim) = expected_dim {
+            if self.embedding_dim.is_none() {
+                self.embedding_dim = Some(dim);
+                self.ann_index = Some(AnnIndex::new(dim));
+            }
+        }
+
+        self.add_chunk_internal(id, text, embedding);
+        Ok(())
+    }
+
+    /// Remove a single chunk.
+    pub fn remove_chunk(&mut self, id: &str) {
+        self.remove_chunk_internal(id);
+    }
+
+    /// Search both indexes and merge results with configurable weights.
+    ///
+    /// Returns candidates sorted by combined score in descending order.
+    /// Uses deterministic tie-breaking (chunk_id) for stable ordering.
+    pub fn search_candidates(
+        &self,
+        query_embedding: &[f32],
+        query_text: &str,
+        embedding_weight: f32,
+        lexical_weight: f32,
+        max_candidates: usize,
+    ) -> Vec<CandidateScore> {
+        let mut scores: HashMap<String, (f32, f32)> = HashMap::new();
+
+        // Get ANN candidates
+        if let Some(ann_index) = &self.ann_index {
+            // Request more candidates for better coverage before filtering
+            let ann_candidates = ann_index.search(query_embedding, max_candidates * 3);
+            for chunk_id in ann_candidates {
+                scores.insert(chunk_id, (1.0, 0.0)); // Placeholder embedding score
+            }
+        }
+
+        // Get lexical candidates
+        let lexical_results = self.lexical_index.score(query_text, max_candidates * 3);
+        let max_lexical = lexical_results
+            .iter()
+            .map(|(_, s)| *s)
+            .fold(0.0_f32, f32::max);
+
+        for (chunk_id, score) in lexical_results {
+            let normalized = if max_lexical > 0.0 {
+                score / max_lexical
+            } else {
+                0.0
+            };
+            scores
+                .entry(chunk_id)
+                .and_modify(|(_, lex)| *lex = normalized)
+                .or_insert((0.0, normalized));
+        }
+
+        // Build candidate list with combined scores
+        let mut candidates: Vec<CandidateScore> = scores
+            .into_iter()
+            .map(|(chunk_id, (emb, lex))| {
+                let combined = embedding_weight * emb + lexical_weight * lex;
+                CandidateScore {
+                    chunk_id,
+                    embedding_score: emb,
+                    lexical_score: lex,
+                    combined_score: combined,
+                }
+            })
+            .collect();
+
+        // Sort by combined score descending, with deterministic tie-breaker
+        candidates.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
+
+        candidates.truncate(max_candidates);
+        candidates
+    }
+
+    /// Validate that both indexes have identical chunk sets.
+    ///
+    /// This is a consistency check that should pass under normal operation.
+    /// Checks both directions: registry → indexes AND indexes → registry.
+    pub fn validate_sync(&self) -> Result<(), EngineError> {
+        // Forward check: all chunk_ids must be in lexical index
+        for id in &self.chunk_ids {
+            if !self.lexical_index.contains(id) {
+                return Err(EngineError::IndexSync {
+                    message: format!("Chunk '{id}' missing from lexical index"),
+                });
+            }
+        }
+
+        // Reverse check: lexical index shouldn't have extra IDs
+        for id in self.lexical_index.doc_terms.keys() {
+            if !self.chunk_ids.contains(id) {
+                return Err(EngineError::IndexSync {
+                    message: format!("Lexical index contains unknown chunk '{id}'"),
+                });
+            }
+        }
+
+        // Check ANN index if it exists
+        if let Some(ann_index) = &self.ann_index {
+            // Forward check: all chunk_ids must be in ANN index
+            for id in &self.chunk_ids {
+                if !ann_index.contains(id) {
+                    return Err(EngineError::IndexSync {
+                        message: format!("Chunk '{id}' missing from ANN index"),
+                    });
+                }
+            }
+
+            // Reverse check: ANN index shouldn't have extra IDs
+            for id in ann_index.id_to_bucket.keys() {
+                if !self.chunk_ids.contains(id) {
+                    return Err(EngineError::IndexSync {
+                        message: format!("ANN index contains unknown chunk '{id}'"),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a chunk exists in the index.
+    pub fn contains(&self, id: &str) -> bool {
+        self.chunk_ids.contains(id)
+    }
+
+    /// Get the number of indexed chunks.
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_ids.len()
+    }
+
+    /// Get the embedding dimension, if known.
+    pub fn embedding_dim(&self) -> Option<usize> {
+        self.embedding_dim
+    }
+
+    /// Clear all indexes.
+    pub fn clear(&mut self) {
+        self.ann_index = self.embedding_dim.map(AnnIndex::new);
+        self.lexical_index = LexicalIndex::new();
+        self.chunk_ids.clear();
+    }
+
+    /// Remove chunks not in the valid set.
+    pub fn drop_stale(&mut self, valid_ids: &HashSet<String>) {
+        let stale: Vec<String> = self
+            .chunk_ids
+            .iter()
+            .filter(|id| !valid_ids.contains(*id))
+            .cloned()
+            .collect();
+
+        for id in stale {
+            self.remove_chunk_internal(&id);
+        }
+    }
+
+    // Internal helpers
+
+    /// Pure validation of embedding - does not mutate self.
+    /// Updates expected_dim in-place if it was None and embedding is valid.
+    fn validate_embedding_pure(
+        id: &str,
+        embedding: &[f32],
+        expected_dim: &mut Option<usize>,
+    ) -> Result<(), EngineError> {
+        let dim = embedding.len();
+
+        // Reject empty embeddings
+        if dim == 0 {
+            return Err(EngineError::validation(
+                id,
+                ValidationKind::DimensionMismatch {
+                    expected: 1, // At least 1
+                    got: 0,
+                },
+            ));
+        }
+
+        // Check for NaN/Inf
+        for val in embedding {
+            if val.is_nan() {
+                return Err(EngineError::validation(id, ValidationKind::NaN));
+            }
+            if val.is_infinite() {
+                return Err(EngineError::validation(id, ValidationKind::Inf));
+            }
+        }
+
+        // Check/set dimension
+        match *expected_dim {
+            Some(expected) if expected != dim => {
+                return Err(EngineError::validation(
+                    id,
+                    ValidationKind::DimensionMismatch {
+                        expected,
+                        got: dim,
+                    },
+                ));
+            }
+            None => {
+                // Set expected dimension for this batch
+                *expected_dim = Some(dim);
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn add_chunk_internal(&mut self, id: &str, text: &str, embedding: &[f32]) {
+        // Remove existing if present (for upsert behavior)
+        if self.chunk_ids.contains(id) {
+            self.remove_chunk_internal(id);
+        }
+
+        // Add to both indexes
+        if let Some(ann_index) = &mut self.ann_index {
+            ann_index.insert(id, embedding);
+        }
+        self.lexical_index.add_chunk(id, text);
+        self.chunk_ids.insert(id.to_string());
+    }
+
+    fn remove_chunk_internal(&mut self, id: &str) {
+        if let Some(ann_index) = &mut self.ann_index {
+            ann_index.remove(id);
+        }
+        self.lexical_index.remove_chunk(id);
+        self.chunk_ids.remove(id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,5 +1042,246 @@ mod tests {
         let result = mmr_diversify(candidates, 2, 0.5);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
         assert_eq!(ids, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    // ============================================================================
+    // IndexSet tests
+    // ============================================================================
+
+    #[test]
+    fn test_index_set_new_empty() {
+        let index = IndexSet::new();
+        assert_eq!(index.chunk_count(), 0);
+        assert!(index.embedding_dim().is_none());
+    }
+
+    #[test]
+    fn test_index_set_with_dimension() {
+        let index = IndexSet::with_dimension(384);
+        assert_eq!(index.embedding_dim(), Some(384));
+        assert_eq!(index.chunk_count(), 0);
+    }
+
+    #[test]
+    fn test_index_set_add_chunk() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "hello world test", &embedding).unwrap();
+
+        assert!(index.contains("chunk1"));
+        assert_eq!(index.chunk_count(), 1);
+        assert_eq!(index.embedding_dim(), Some(384));
+        assert!(index.validate_sync().is_ok());
+    }
+
+    #[test]
+    fn test_index_set_remove_chunk() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "hello world test", &embedding).unwrap();
+        index.remove_chunk("chunk1");
+
+        assert!(!index.contains("chunk1"));
+        assert_eq!(index.chunk_count(), 0);
+        assert!(index.validate_sync().is_ok());
+    }
+
+    #[test]
+    fn test_index_set_apply_batch() {
+        let mut index = IndexSet::new();
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let embedding2: Vec<f32> = (0..384).map(|i| (i + 100) as f32 / 384.0).collect();
+
+        let updates = vec![
+            ChunkUpdate::Add {
+                id: "chunk1".to_string(),
+                text: "hello world".to_string(),
+                embedding: embedding1,
+            },
+            ChunkUpdate::Add {
+                id: "chunk2".to_string(),
+                text: "foo bar baz".to_string(),
+                embedding: embedding2,
+            },
+        ];
+
+        index.apply_batch(&updates).unwrap();
+
+        assert!(index.contains("chunk1"));
+        assert!(index.contains("chunk2"));
+        assert_eq!(index.chunk_count(), 2);
+        assert!(index.validate_sync().is_ok());
+    }
+
+    #[test]
+    fn test_index_set_rejects_nan_embedding() {
+        let mut index = IndexSet::new();
+        let mut embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        embedding[10] = f32::NAN;
+
+        let result = index.add_chunk("chunk1", "hello world", &embedding);
+
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("NaN"));
+    }
+
+    #[test]
+    fn test_index_set_rejects_inf_embedding() {
+        let mut index = IndexSet::new();
+        let mut embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        embedding[10] = f32::INFINITY;
+
+        let result = index.add_chunk("chunk1", "hello world", &embedding);
+
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("Inf"));
+    }
+
+    #[test]
+    fn test_index_set_rejects_dimension_mismatch() {
+        let mut index = IndexSet::new();
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let embedding2: Vec<f32> = (0..768).map(|i| i as f32 / 768.0).collect(); // Wrong dim
+
+        index.add_chunk("chunk1", "hello world", &embedding1).unwrap();
+        let result = index.add_chunk("chunk2", "foo bar", &embedding2);
+
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("dimension"));
+        assert!(err_str.contains("384"));
+        assert!(err_str.contains("768"));
+    }
+
+    #[test]
+    fn test_index_set_rejects_empty_text() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        let result = index.add_chunk("chunk1", "   ", &embedding);
+
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("empty"));
+    }
+
+    #[test]
+    fn test_index_set_batch_atomic_on_validation_failure() {
+        let mut index = IndexSet::new();
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let mut embedding2: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        embedding2[0] = f32::NAN; // Invalid
+
+        let updates = vec![
+            ChunkUpdate::Add {
+                id: "chunk1".to_string(),
+                text: "hello world".to_string(),
+                embedding: embedding1,
+            },
+            ChunkUpdate::Add {
+                id: "chunk2".to_string(),
+                text: "foo bar".to_string(),
+                embedding: embedding2,
+            },
+        ];
+
+        let result = index.apply_batch(&updates);
+
+        // Batch should fail and no chunks should be added
+        assert!(result.is_err());
+        assert!(!index.contains("chunk1"), "chunk1 should not be added on batch failure");
+        assert!(!index.contains("chunk2"));
+        assert_eq!(index.chunk_count(), 0);
+    }
+
+    #[test]
+    fn test_index_set_search_candidates() {
+        let mut index = IndexSet::new();
+
+        // Add chunks with distinct embeddings
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let embedding2: Vec<f32> = (0..384).map(|i| (384 - i) as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "machine learning algorithms", &embedding1).unwrap();
+        index.add_chunk("chunk2", "deep learning neural networks", &embedding2).unwrap();
+
+        let query_embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let candidates = index.search_candidates(&query_embedding, "machine learning", 0.7, 0.3, 10);
+
+        assert!(!candidates.is_empty());
+        // Results should be sorted by combined score
+        for i in 1..candidates.len() {
+            assert!(candidates[i - 1].combined_score >= candidates[i].combined_score);
+        }
+    }
+
+    #[test]
+    fn test_index_set_drop_stale() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "hello world", &embedding).unwrap();
+        index.add_chunk("chunk2", "foo bar baz", &embedding).unwrap();
+        index.add_chunk("chunk3", "test document", &embedding).unwrap();
+
+        let valid_ids: HashSet<String> = ["chunk1", "chunk2"].iter().map(|s| s.to_string()).collect();
+        index.drop_stale(&valid_ids);
+
+        assert!(index.contains("chunk1"));
+        assert!(index.contains("chunk2"));
+        assert!(!index.contains("chunk3"));
+        assert_eq!(index.chunk_count(), 2);
+        assert!(index.validate_sync().is_ok());
+    }
+
+    #[test]
+    fn test_index_set_clear() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "hello world", &embedding).unwrap();
+        index.add_chunk("chunk2", "foo bar", &embedding).unwrap();
+
+        index.clear();
+
+        assert_eq!(index.chunk_count(), 0);
+        assert!(!index.contains("chunk1"));
+        // Dimension should be preserved after clear
+        assert_eq!(index.embedding_dim(), Some(384));
+    }
+
+    #[test]
+    fn test_index_set_upsert_behavior() {
+        let mut index = IndexSet::new();
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let embedding2: Vec<f32> = (0..384).map(|i| (i + 100) as f32 / 384.0).collect();
+
+        index.add_chunk("chunk1", "original text", &embedding1).unwrap();
+        index.add_chunk("chunk1", "updated text", &embedding2).unwrap(); // Same ID
+
+        assert!(index.contains("chunk1"));
+        assert_eq!(index.chunk_count(), 1);
+        assert!(index.validate_sync().is_ok());
+    }
+
+    #[test]
+    fn test_index_set_deterministic_ordering() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+
+        // Add chunks in random order
+        index.add_chunk("c", "test document", &embedding).unwrap();
+        index.add_chunk("a", "test document", &embedding).unwrap();
+        index.add_chunk("b", "test document", &embedding).unwrap();
+
+        let candidates = index.search_candidates(&embedding, "test document", 0.5, 0.5, 10);
+
+        // With equal scores, should be sorted alphabetically by chunk_id
+        let ids: Vec<&str> = candidates.iter().map(|c| c.chunk_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }

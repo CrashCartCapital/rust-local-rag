@@ -74,11 +74,70 @@ pub struct SearchResult {
     pub no_logprob: Option<f64>,
 }
 
+/// Weights for hybrid search scoring.
+///
+/// rag-core uses a two-stage retrieval process:
+///
+/// ## Stage 1: Initial Retrieval
+///
+/// Combines embedding similarity and lexical matching:
+/// ```text
+/// initial_score = (embedding * embedding_score) + (lexical * lexical_score)
+/// ```
+///
+/// - **`embedding`**: Weight for semantic similarity (cosine distance). Higher values
+///   favor documents with similar meaning even if words differ.
+/// - **`lexical`**: Weight for keyword matching (BM25-style). Higher values favor
+///   documents containing the exact query terms.
+///
+/// ## Stage 2: Reranking (if enabled)
+///
+/// Blends initial scores with reranker judgments:
+/// ```text
+/// final_score = (initial * initial_score) + (reranker * reranker_score)
+/// ```
+///
+/// - **`initial`**: Weight for the Stage 1 score.
+/// - **`reranker`**: Weight for LLM-based relevance scoring.
+///
+/// ## Tuning Guidelines
+///
+/// | Scenario | Recommended Weights |
+/// |----------|---------------------|
+/// | General search | `embedding: 0.7, lexical: 0.3` (default) |
+/// | Exact term matching (code, IDs) | `embedding: 0.3, lexical: 0.7` |
+/// | Semantic-only (concepts) | `embedding: 1.0, lexical: 0.0` |
+/// | Trust reranker fully | `reranker: 1.0, initial: 0.0` |
+/// | Skip reranking | `reranker: 0.0, initial: 1.0` |
+///
+/// ## Example
+///
+/// ```rust,ignore
+/// use rag_core::SearchWeights;
+///
+/// // Favor exact keyword matches for code search
+/// let code_weights = SearchWeights {
+///     embedding: 0.3,
+///     lexical: 0.7,
+///     ..Default::default()
+/// };
+///
+/// // Semantic-only for conceptual queries
+/// let semantic_weights = SearchWeights {
+///     embedding: 1.0,
+///     lexical: 0.0,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct SearchWeights {
+    /// Weight for embedding (semantic) similarity in Stage 1. Default: 0.7
     pub embedding: f32,
+    /// Weight for lexical (keyword) matching in Stage 1. Default: 0.3
     pub lexical: f32,
+    /// Weight for reranker score in Stage 2. Default: 0.7
     pub reranker: f32,
+    /// Weight for initial score in Stage 2. Default: 0.3
     pub initial: f32,
 }
 
@@ -128,6 +187,28 @@ pub struct RerankedResult {
     pub relevance: f32,
     pub yes_logprob: Option<f64>,
     pub no_logprob: Option<f64>,
+}
+
+/// Health status for monitoring and observability.
+///
+/// Returned by [`RagEngine::health()`](crate::RagEngine::health) for container
+/// health probes or monitoring dashboards.
+#[derive(Debug, Clone)]
+pub struct HealthStatus {
+    /// Whether the engine is healthy and ready to serve requests
+    pub is_healthy: bool,
+    /// The embedding model identifier
+    pub embedding_model: String,
+    /// The embedding dimension
+    pub embedding_dim: usize,
+    /// Number of indexed documents
+    pub document_count: usize,
+    /// Number of indexed chunks
+    pub chunk_count: usize,
+    /// Whether a reindex is needed (e.g., after model change)
+    pub needs_reindex: bool,
+    /// Whether a reranker is configured
+    pub has_reranker: bool,
 }
 
 #[cfg(feature = "persistence")]
