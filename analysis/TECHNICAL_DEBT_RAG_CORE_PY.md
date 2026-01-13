@@ -101,12 +101,41 @@ This document tracks technical debt identified during implementation of rag-core
 
 ---
 
+## Phase 2: Core Engine Bindings
+
+**Start Date:** 2025-01-13
+
+### TD-7: EmbeddingBackend Trait Not Object-Safe
+| Field | Value |
+|-------|-------|
+| **ID** | TD-7 |
+| **Area** | Trait object design |
+| **Files** | `crates/rag-core/src/traits.rs`, `crates/rag-core-py/src/adapters.rs` |
+| **Priority** | High |
+| **Status** | Open |
+
+**Issue:** The `EmbeddingBackend` trait in rag-core uses RPITIT (`impl Future<Output = ...>`) for the `embed()` method, which makes it non-object-safe. This prevents using `Arc<dyn EmbeddingBackend>` directly.
+
+**Impact:** Cannot create a single `PyRagEngine` type that works with arbitrary Python embedding backends without resolving object-safety.
+
+**Recommendation Options:**
+1. Add `#[async_trait]` to rag-core traits (additive but changes impl signature)
+2. Create object-safe bridge traits in rag-core-py using `BoxFuture`
+3. Use newtype wrapper pattern with internal `Arc<dyn DynBackend>`
+
+**Current Workaround:** Phase 2 uses concrete `MockEmbeddingBackend` type. Full Python backend integration deferred to Phase 3.
+
+**PRD Reference:** PRD Section 2.2.1 assumes trait objects will work; needs update.
+
+---
+
 ## Summary
 
 | Phase | Open | Resolved | Total |
 |-------|------|----------|-------|
 | Phase 1 | 5 | 1 | 6 |
-| **Total** | **5** | **1** | **6** |
+| Phase 2 | 1 | 0 | 1 |
+| **Total** | **6** | **1** | **7** |
 
 ---
 
@@ -114,3 +143,4 @@ This document tracks technical debt identified during implementation of rag-core
 
 - **2025-01-13:** Phase 1 gate review - 6 items identified (TD-1 through TD-6)
 - **2025-01-13:** TD-6 resolved - Updated .gitignore for Python artifacts
+- **2025-01-13:** Phase 2 start - TD-7 identified (RPITIT object-safety issue)

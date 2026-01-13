@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 
+mod conversions;
 mod engine;
 mod errors;
 mod mock_backend;
