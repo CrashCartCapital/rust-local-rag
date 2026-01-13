@@ -241,7 +241,7 @@ class TestAsyncPythonBackend:
     Technical debt: TD-11 tracks implementing proper async Python backend support.
     """
 
-    @pytest.mark.skip(reason="Async Python backends require asyncio event loop - see TD-11")
+    # @pytest.mark.skip(reason="Async Python backends require asyncio event loop - see TD-11")
     def test_async_embedder(self, tmp_path):
         """Test async Python embedder."""
         from ragcore import RagEngine
@@ -268,7 +268,7 @@ class TestAsyncPythonBackend:
         results = engine.search("testing", top_k=5)
         assert len(results) > 0
 
-    @pytest.mark.skip(reason="Async Python backends require asyncio event loop - see TD-11")
+    # @pytest.mark.skip(reason="Async Python backends require asyncio event loop - see TD-11")
     def test_async_reranker(self, tmp_path):
         """Test async Python reranker."""
         from ragcore import RagEngine

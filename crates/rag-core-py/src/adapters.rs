@@ -168,9 +168,17 @@ impl PyEmbeddingBackendAdapter {
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                // Convert coroutine to future (only once, no re-call)
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(EmbedCallResult::Async(Box::pin(future)))
+                let asyncio = py.import("asyncio")?;
+                if asyncio.call_method0("get_running_loop").is_ok() {
+                    // Loop is running, use it
+                    let future = pyo3_async_runtimes::tokio::into_future(result)?;
+                    Ok(EmbedCallResult::Async(Box::pin(future)))
+                } else {
+                    // No running loop, run synchronously
+                    let loop_obj = get_or_create_event_loop(py)?;
+                    let resolved = loop_obj.call_method1("run_until_complete", (result,))?;
+                    Ok(EmbedCallResult::Sync(extract_embedding(&resolved)?))
+                }
             } else {
                 // Sync result - extract directly
                 Ok(EmbedCallResult::Sync(extract_embedding(&result)?))
@@ -210,8 +218,15 @@ impl PyEmbeddingBackendAdapter {
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(EmbedBatchCallResult::Async(Box::pin(future)))
+                let asyncio = py.import("asyncio")?;
+                if asyncio.call_method0("get_running_loop").is_ok() {
+                    let future = pyo3_async_runtimes::tokio::into_future(result)?;
+                    Ok(EmbedBatchCallResult::Async(Box::pin(future)))
+                } else {
+                    let loop_obj = get_or_create_event_loop(py)?;
+                    let resolved = loop_obj.call_method1("run_until_complete", (result,))?;
+                    Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(&resolved)?))
+                }
             } else {
                 Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(&result)?))
             }
@@ -264,6 +279,22 @@ impl EmbeddingBackend for PyEmbeddingBackendAdapter {
 
     fn dimension(&self) -> usize {
         self.inner.dimension
+    }
+}
+
+/// Get or create an asyncio event loop for the current thread.
+fn get_or_create_event_loop(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let asyncio = py.import("asyncio")?;
+
+    // Try to get event loop
+    match asyncio.call_method0("get_event_loop") {
+        Ok(loop_obj) => Ok(loop_obj),
+        Err(_) => {
+            // No loop set, create and set a new one
+            let loop_obj = asyncio.call_method0("new_event_loop")?;
+            asyncio.call_method1("set_event_loop", (&loop_obj,))?;
+            Ok(loop_obj)
+        }
     }
 }
 
@@ -425,8 +456,15 @@ impl PyRerankerAdapter {
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(RerankCallResult::Async(Box::pin(future)))
+                let asyncio = py.import("asyncio")?;
+                if asyncio.call_method0("get_running_loop").is_ok() {
+                    let future = pyo3_async_runtimes::tokio::into_future(result)?;
+                    Ok(RerankCallResult::Async(Box::pin(future)))
+                } else {
+                    let loop_obj = get_or_create_event_loop(py)?;
+                    let resolved = loop_obj.call_method1("run_until_complete", (result,))?;
+                    Ok(RerankCallResult::Sync(extract_rerank_results(py, &resolved)?))
+                }
             } else {
                 Ok(RerankCallResult::Sync(extract_rerank_results(py, &result)?))
             }
