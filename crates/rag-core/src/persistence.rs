@@ -544,7 +544,7 @@ mod tests {
             let backend = JsonFileBackend::new(temp_dir.path(), "test-model");
 
             // Use precise floating point values
-            let precise_embedding = vec![0.123456789f32, -0.987654321f32, 0.000001f32];
+            let precise_embedding = vec![0.123_456_79_f32, -0.987_654_3_f32, 0.000001f32];
 
             let mut state = EngineState::new("test-model", 3);
             state.chunks.insert(

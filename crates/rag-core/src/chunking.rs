@@ -61,7 +61,9 @@ pub(crate) fn chunk_text(
                 fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
             }
 
-            let overlap_start = window.len().saturating_sub(sentence_overlap);
+            // Ensure we always advance by at least one sentence to prevent infinite growth
+            // if overlap >= window length.
+            let overlap_start = window.len().saturating_sub(sentence_overlap).max(1);
             window = window.split_off(overlap_start);
             token_sum = window.iter().map(|&i| sentences[i].tokens).sum();
         }
@@ -409,7 +411,7 @@ mod tests {
         assert_eq!(normalize_whitespace("  foo   bar  "), "foo bar");
         assert_eq!(normalize_whitespace("foo\nbar"), "foo bar");
 
-        let parts = vec!["foo  ", "  bar"];
+        let parts = ["foo  ", "  bar"];
         assert_eq!(normalize_whitespace(&parts.join(" ")), "foo bar");
 
         // approximate_token_count
@@ -420,5 +422,51 @@ mod tests {
         // words=5. 5*0.9 = 4.5 -> 5.
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
+    }
+
+    #[test]
+    fn test_excessive_overlap_does_not_grow_indefinitely() {
+        // Use double newlines to force separate sentences, avoiding SRX abbreviation detection
+        // which might treat "A. B." as one sentence.
+        let text = "WordA.\n\nWordB.\n\nWordC.\n\nWordD.\n\nWordE.";
+        // Each "WordX." is ~1 token.
+        // chunk_tokens=2. overlap=5 (larger than window).
+
+        // Without fix, chunks grow: [A, B], [A, B, C], [A, B, C, D]...
+        // With fix, window slides: [A, B], [B, C], [C, D]...
+        let chunks = chunk_text(text, 2, 5);
+
+        assert!(!chunks.is_empty());
+        for (i, chunk) in chunks.iter().enumerate() {
+            // Each chunk should be roughly 2 sentences ("WordA. WordB.").
+            // Allow slop, but 5 sentences is definitely wrong.
+            let sentence_count = chunk.text.matches('.').count();
+            assert!(
+                sentence_count <= 3,
+                "Chunk {} grew too large with {} sentences: {}",
+                i,
+                sentence_count,
+                chunk.text
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_input_safe() {
+        let chunks = chunk_text("", 10, 0);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_single_huge_token() {
+        // One huge word that exceeds chunk limit
+        let huge = "A".repeat(100);
+        let text = format!("{}.", huge);
+        // approximate_token_count for 100 chars -> 25 tokens.
+        // chunk_tokens = 10.
+        // Should produce 1 chunk containing the huge token.
+        let chunks = chunk_text(&text, 10, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, text);
     }
 }
