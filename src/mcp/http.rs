@@ -29,15 +29,18 @@ async fn healthz() -> axum::http::StatusCode {
 #[instrument(skip(app_state))]
 async fn readyz(
     axum::extract::State(app_state): axum::extract::State<AppState>,
-) -> axum::http::StatusCode {
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
     match tokio::time::timeout(
         std::time::Duration::from_millis(100),
         app_state.rag_state.read(),
     )
     .await
     {
-        Ok(_guard) => axum::http::StatusCode::OK,
-        Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        Ok(_guard) => Ok(axum::http::StatusCode::OK),
+        Err(_) => Err(api_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Engine lock acquisition timeout",
+        )),
     }
 }
 

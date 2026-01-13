@@ -141,6 +141,7 @@ pub struct SearchResult {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "persistence", derive(Serialize, Deserialize))]
 pub struct SearchWeights {
     /// Weight for embedding (semantic) similarity in Stage 1. Default: 0.7
     pub embedding: f32,
