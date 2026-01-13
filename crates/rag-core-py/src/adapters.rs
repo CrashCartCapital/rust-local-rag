@@ -69,6 +69,8 @@ enum RerankCallResult {
 struct AdapterInner {
     /// Python backend object wrapped for safe sharing.
     backend: BackendRef,
+    /// Cached inspect.iscoroutine function.
+    is_coroutine: BackendRef,
     /// Cached model identifier.
     model_id: String,
     /// Cached embedding dimension.
@@ -134,11 +136,16 @@ impl PyEmbeddingBackendAdapter {
         // Check for optional embed_batch
         let has_batch = backend.hasattr("embed_batch")?;
 
+        // Import inspect.iscoroutine for checking results
+        let inspect = backend.py().import("inspect")?;
+        let is_coroutine = inspect.getattr("iscoroutine")?;
+
         let concurrency = max_concurrency.unwrap_or(DEFAULT_CONCURRENCY);
 
         Ok(Self {
             inner: Arc::new(AdapterInner {
                 backend: BackendRef(backend.clone().unbind()),
+                is_coroutine: BackendRef(is_coroutine.unbind()),
                 model_id,
                 dimension,
                 has_batch,
@@ -164,10 +171,11 @@ impl PyEmbeddingBackendAdapter {
         // Call Python and check for coroutine - returns either sync result or async future
         let call_result = Python::with_gil(|py| -> PyResult<EmbedCallResult> {
             let backend = inner.backend.0.bind(py);
+            let is_coroutine_fn = inner.is_coroutine.0.bind(py);
             let result = backend.call_method1("embed", (&text,))?;
 
             // Check if result is a coroutine
-            if is_coroutine(py, &result)? {
+            if is_coroutine(is_coroutine_fn, &result)? {
                 // Convert coroutine to future (only once, no re-call)
                 let future = pyo3_async_runtimes::tokio::into_future(result)?;
                 Ok(EmbedCallResult::Async(Box::pin(future)))
@@ -205,11 +213,12 @@ impl PyEmbeddingBackendAdapter {
         // Call Python and check for coroutine
         let call_result = Python::with_gil(|py| -> PyResult<EmbedBatchCallResult> {
             let backend = inner.backend.0.bind(py);
+            let is_coroutine_fn = inner.is_coroutine.0.bind(py);
             let texts_list = PyList::new(py, &texts)?;
             let result = backend.call_method1("embed_batch", (texts_list,))?;
 
             // Check if result is a coroutine
-            if is_coroutine(py, &result)? {
+            if is_coroutine(is_coroutine_fn, &result)? {
                 let future = pyo3_async_runtimes::tokio::into_future(result)?;
                 Ok(EmbedBatchCallResult::Async(Box::pin(future)))
             } else {
@@ -268,9 +277,8 @@ impl EmbeddingBackend for PyEmbeddingBackendAdapter {
 }
 
 /// Check if a Python object is a coroutine.
-fn is_coroutine(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let inspect = py.import("inspect")?;
-    let is_coro: bool = inspect.call_method1("iscoroutine", (obj,))?.extract()?;
+fn is_coroutine(check_fn: &Bound<'_, PyAny>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let is_coro: bool = check_fn.call1((obj,))?.extract()?;
     Ok(is_coro)
 }
 
@@ -326,6 +334,8 @@ fn pyerr_to_embedding_error(e: PyErr) -> EmbeddingError {
 struct RerankerInner {
     /// Python reranker object.
     backend: BackendRef,
+    /// Cached inspect.iscoroutine function.
+    is_coroutine: BackendRef,
     /// Semaphore for concurrency control.
     semaphore: Semaphore,
 }
@@ -391,9 +401,14 @@ impl PyRerankerAdapter {
 
         let concurrency = max_concurrency.unwrap_or(DEFAULT_CONCURRENCY);
 
+        // Import inspect.iscoroutine
+        let inspect = backend.py().import("inspect")?;
+        let is_coroutine = inspect.getattr("iscoroutine")?;
+
         Ok(Self {
             inner: Arc::new(RerankerInner {
                 backend: BackendRef(backend.clone().unbind()),
+                is_coroutine: BackendRef(is_coroutine.unbind()),
                 semaphore: Semaphore::new(concurrency),
             }),
         })
@@ -420,11 +435,12 @@ impl PyRerankerAdapter {
         // Call Python and check for coroutine
         let call_result = Python::with_gil(|py| -> PyResult<RerankCallResult> {
             let backend = inner.backend.0.bind(py);
+            let is_coroutine_fn = inner.is_coroutine.0.bind(py);
             let py_candidates = candidates_to_py(py, &candidates)?;
             let result = backend.call_method1("rerank", (&query, py_candidates))?;
 
             // Check if result is a coroutine
-            if is_coroutine(py, &result)? {
+            if is_coroutine(is_coroutine_fn, &result)? {
                 let future = pyo3_async_runtimes::tokio::into_future(result)?;
                 Ok(RerankCallResult::Async(Box::pin(future)))
             } else {
