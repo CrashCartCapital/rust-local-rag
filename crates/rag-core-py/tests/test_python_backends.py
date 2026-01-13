@@ -288,3 +288,83 @@ class TestAsyncPythonBackend:
         engine.upsert_document("test.txt", "Test document content.")
         results = engine.search("test", top_k=5)
         assert len(results) > 0
+
+
+class TestRegressionTD10:
+    """Regression tests for TD-10: Correctness of async calls.
+
+    Ensures that backend methods (embed/rerank) are called exactly once per
+    operation, resolving the "double-call" issue where methods were called
+    once for type checking and once for execution.
+    """
+
+    def test_sync_double_call_check(self, tmp_path):
+        """Verify that synchronous embed is called exactly once per request."""
+        from ragcore import RagEngine
+
+        class CountingSyncEmbedder:
+            def __init__(self):
+                self.call_count = 0
+
+            def model_id(self) -> str:
+                return "counting-sync"
+
+            def dimension(self) -> int:
+                return 4
+
+            def embed(self, text: str) -> list[float]:
+                self.call_count += 1
+                return [0.1, 0.2, 0.3, 0.4]
+
+        backend = CountingSyncEmbedder()
+        engine = RagEngine.create(str(tmp_path), backend=backend)
+
+        # Trigger embedding via upsert
+        # "doc1" -> short text -> 1 chunk -> 1 embed call
+        chunk_count = engine.upsert_document("doc1", "This is a longer text that should definitely be chunked.")
+
+        # Ensure we actually processed something
+        assert chunk_count > 0
+
+        # Expect exactly 1 call
+        assert backend.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_double_call_check(self, tmp_path):
+        """Verify that asynchronous embed is called exactly once per request."""
+        import asyncio
+        from ragcore import RagEngine
+
+        class CountingAsyncEmbedder:
+            def __init__(self):
+                self.call_count = 0
+
+            def model_id(self) -> str:
+                return "counting-async"
+
+            def dimension(self) -> int:
+                return 4
+
+            def embed(self, text: str):
+                # We define this as a sync function returning a coroutine
+                # so that we can count the invocation immediately,
+                # even if the coroutine execution fails due to TD-11 (missing event loop).
+                self.call_count += 1
+
+                async def _coro():
+                    # This won't run successfully due to missing event loop in worker thread
+                    return [0.1, 0.2, 0.3, 0.4]
+
+                return _coro()
+
+        backend = CountingAsyncEmbedder()
+        engine = RagEngine.create(str(tmp_path), backend=backend)
+
+        # Run blocking upsert in a separate thread.
+        # It will fail with "no running event loop" due to TD-11,
+        # but we only care that embed() was invoked exactly once before that failure.
+        with pytest.raises(Exception, match="no running event loop"):
+            await asyncio.to_thread(engine.upsert_document, "doc1", "This is a longer text that should definitely be chunked.")
+
+        # Expect exactly 1 call (the invocation that returned the coroutine)
+        assert backend.call_count == 1
