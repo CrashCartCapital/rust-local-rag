@@ -43,4 +43,3 @@ fn test_config_invalid_env_returns_error() {
         std::env::remove_var("RAG_RERANKER_CONCURRENCY");
     }
 }
-

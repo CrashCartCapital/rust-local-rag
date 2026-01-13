@@ -34,4 +34,3 @@ impl From<&Job> for JobStatusResponse {
         }
     }
 }
-

@@ -550,7 +550,12 @@ impl IndexSet {
         let mut expected_dim = self.embedding_dim;
 
         for update in updates {
-            if let ChunkUpdate::Add { id, text, embedding } = update {
+            if let ChunkUpdate::Add {
+                id,
+                text,
+                embedding,
+            } = update
+            {
                 // Validate embedding (non-mutating)
                 Self::validate_embedding_pure(id, embedding, &mut expected_dim)?;
 
@@ -572,7 +577,11 @@ impl IndexSet {
         // Phase 3: Apply all updates (validated, won't fail)
         for update in updates {
             match update {
-                ChunkUpdate::Add { id, text, embedding } => {
+                ChunkUpdate::Add {
+                    id,
+                    text,
+                    embedding,
+                } => {
                     self.add_chunk_internal(id, text, embedding);
                 }
                 ChunkUpdate::Remove { id } => {
@@ -804,10 +813,7 @@ impl IndexSet {
             Some(expected) if expected != dim => {
                 return Err(EngineError::validation(
                     id,
-                    ValidationKind::DimensionMismatch {
-                        expected,
-                        got: dim,
-                    },
+                    ValidationKind::DimensionMismatch { expected, got: dim },
                 ));
             }
             None => {
@@ -1056,7 +1062,9 @@ mod tests {
         let mut index = IndexSet::new();
         let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "hello world test", &embedding).unwrap();
+        index
+            .add_chunk("chunk1", "hello world test", &embedding)
+            .unwrap();
 
         assert!(index.contains("chunk1"));
         assert_eq!(index.chunk_count(), 1);
@@ -1069,7 +1077,9 @@ mod tests {
         let mut index = IndexSet::new();
         let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "hello world test", &embedding).unwrap();
+        index
+            .add_chunk("chunk1", "hello world test", &embedding)
+            .unwrap();
         index.remove_chunk("chunk1");
 
         assert!(!index.contains("chunk1"));
@@ -1136,7 +1146,9 @@ mod tests {
         let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
         let embedding2: Vec<f32> = (0..768).map(|i| i as f32 / 768.0).collect(); // Wrong dim
 
-        index.add_chunk("chunk1", "hello world", &embedding1).unwrap();
+        index
+            .add_chunk("chunk1", "hello world", &embedding1)
+            .unwrap();
         let result = index.add_chunk("chunk2", "foo bar", &embedding2);
 
         assert!(result.is_err());
@@ -1182,7 +1194,10 @@ mod tests {
 
         // Batch should fail and no chunks should be added
         assert!(result.is_err());
-        assert!(!index.contains("chunk1"), "chunk1 should not be added on batch failure");
+        assert!(
+            !index.contains("chunk1"),
+            "chunk1 should not be added on batch failure"
+        );
         assert!(!index.contains("chunk2"));
         assert_eq!(index.chunk_count(), 0);
     }
@@ -1195,11 +1210,16 @@ mod tests {
         let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
         let embedding2: Vec<f32> = (0..384).map(|i| (384 - i) as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "machine learning algorithms", &embedding1).unwrap();
-        index.add_chunk("chunk2", "deep learning neural networks", &embedding2).unwrap();
+        index
+            .add_chunk("chunk1", "machine learning algorithms", &embedding1)
+            .unwrap();
+        index
+            .add_chunk("chunk2", "deep learning neural networks", &embedding2)
+            .unwrap();
 
         let query_embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
-        let candidates = index.search_candidates(&query_embedding, "machine learning", 0.7, 0.3, 10);
+        let candidates =
+            index.search_candidates(&query_embedding, "machine learning", 0.7, 0.3, 10);
 
         assert!(!candidates.is_empty());
         // Results should be sorted by combined score
@@ -1213,11 +1233,18 @@ mod tests {
         let mut index = IndexSet::new();
         let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "hello world", &embedding).unwrap();
-        index.add_chunk("chunk2", "foo bar baz", &embedding).unwrap();
-        index.add_chunk("chunk3", "test document", &embedding).unwrap();
+        index
+            .add_chunk("chunk1", "hello world", &embedding)
+            .unwrap();
+        index
+            .add_chunk("chunk2", "foo bar baz", &embedding)
+            .unwrap();
+        index
+            .add_chunk("chunk3", "test document", &embedding)
+            .unwrap();
 
-        let valid_ids: HashSet<String> = ["chunk1", "chunk2"].iter().map(|s| s.to_string()).collect();
+        let valid_ids: HashSet<String> =
+            ["chunk1", "chunk2"].iter().map(|s| s.to_string()).collect();
         index.drop_stale(&valid_ids);
 
         assert!(index.contains("chunk1"));
@@ -1232,7 +1259,9 @@ mod tests {
         let mut index = IndexSet::new();
         let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "hello world", &embedding).unwrap();
+        index
+            .add_chunk("chunk1", "hello world", &embedding)
+            .unwrap();
         index.add_chunk("chunk2", "foo bar", &embedding).unwrap();
 
         index.clear();
@@ -1249,8 +1278,12 @@ mod tests {
         let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
         let embedding2: Vec<f32> = (0..384).map(|i| (i + 100) as f32 / 384.0).collect();
 
-        index.add_chunk("chunk1", "original text", &embedding1).unwrap();
-        index.add_chunk("chunk1", "updated text", &embedding2).unwrap(); // Same ID
+        index
+            .add_chunk("chunk1", "original text", &embedding1)
+            .unwrap();
+        index
+            .add_chunk("chunk1", "updated text", &embedding2)
+            .unwrap(); // Same ID
 
         assert!(index.contains("chunk1"));
         assert_eq!(index.chunk_count(), 1);

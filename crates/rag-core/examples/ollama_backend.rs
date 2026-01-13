@@ -147,10 +147,16 @@ impl EmbeddingBackend for MockOllamaEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         // Simulate what Ollama would return
         println!("  [MockOllama] Would call: POST http://localhost:11434/api/embeddings");
-        println!("  [MockOllama] Model: {}, Text length: {} chars", self.model, text.len());
+        println!(
+            "  [MockOllama] Model: {}, Text length: {} chars",
+            self.model,
+            text.len()
+        );
 
         // Generate deterministic embedding for demo
-        let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         let mut embedding = vec![0.0f32; self.dimension];
         for (i, v) in embedding.iter_mut().enumerate() {
             *v = ((hash.wrapping_add(i as u64) % 1000) as f32 / 1000.0) - 0.5;
@@ -177,12 +183,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embedder = MockOllamaEmbedder::new("nomic-embed-text", 768);
 
     let mut engine = RagEngine::new(embedder);
-    println!("Created RagEngine with {} embedder\n", engine.embedding_model());
+    println!(
+        "Created RagEngine with {} embedder\n",
+        engine.embedding_model()
+    );
 
     // Index documents
     let docs = [
-        ("quantum.txt", "Quantum computing uses qubits that can exist in superposition."),
-        ("ml.txt", "Machine learning models learn patterns from training data."),
+        (
+            "quantum.txt",
+            "Quantum computing uses qubits that can exist in superposition.",
+        ),
+        (
+            "ml.txt",
+            "Machine learning models learn patterns from training data.",
+        ),
     ];
 
     for (name, content) in &docs {

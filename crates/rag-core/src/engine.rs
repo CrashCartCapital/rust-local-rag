@@ -8,7 +8,7 @@ use crate::types::{
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tracing")]
-use tracing::instrument;
+use tracing::{Instrument, instrument};
 use uuid::Uuid;
 
 pub struct RagEngine<B: EmbeddingBackend, R = ()> {
@@ -411,7 +411,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(top_k, weights = ?weights)))]
     async fn search_internal(
         &self,
         query: &str,
@@ -428,24 +428,67 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         let top_k = top_k.max(1);
+        #[cfg(feature = "tracing")]
+        let start_total = std::time::Instant::now();
 
-        let mut query_embedding = self.backend.embed(query).await?;
+        // 1. Embedding Generation
+        let mut query_embedding = {
+            #[cfg(feature = "tracing")]
+            let start = std::time::Instant::now();
+
+            #[cfg(feature = "tracing")]
+            let res = self
+                .backend
+                .embed(query)
+                .instrument(tracing::debug_span!("generate_query_embedding"))
+                .await?;
+
+            #[cfg(not(feature = "tracing"))]
+            let res = self.backend.embed(query).await?;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                duration_ms = start.elapsed().as_millis(),
+                "Embedding generated"
+            );
+            res
+        };
         crate::search::normalize(&mut query_embedding);
 
-        let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
-            Some(index) => Box::new(
-                index
-                    .search(&query_embedding, top_k.saturating_mul(5))
-                    .into_iter(),
-            ),
-            None => Box::new(self.chunks.keys().cloned()),
+        // 2. Candidate Retrieval (ANN + Lexical)
+        let (candidate_ids, lexical_map) = {
+            #[cfg(feature = "tracing")]
+            let _span = tracing::debug_span!("retrieve_candidates").entered();
+            #[cfg(feature = "tracing")]
+            let start = std::time::Instant::now();
+
+            let ann_limit = top_k.saturating_mul(5);
+            let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
+                Some(index) => {
+                    let candidates = index.search(&query_embedding, ann_limit);
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(count = candidates.len(), "ANN search complete");
+                    Box::new(candidates.into_iter())
+                }
+                None => Box::new(self.chunks.keys().cloned()),
+            };
+
+            let lexical_candidates = self.lexical_index.score(query, ann_limit);
+            #[cfg(feature = "tracing")]
+            tracing::debug!(count = lexical_candidates.len(), "Lexical search complete");
+
+            let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
+            let mut ids: HashSet<String> = ann_candidate_iter.collect();
+            ids.extend(lexical_map.keys().cloned());
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                duration_ms = start.elapsed().as_millis(),
+                total_candidates = ids.len(),
+                "Candidate retrieval complete"
+            );
+            (ids, lexical_map)
         };
-
-        let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
-        let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
-
-        let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
-        candidate_ids.extend(lexical_map.keys().cloned());
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
@@ -507,90 +550,114 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             return Ok(vec![]);
         }
 
-        let candidate_map: HashMap<String, SearchCandidate> = candidates
-            .iter()
-            .cloned()
-            .map(|candidate| (candidate.chunk_id.clone(), candidate))
-            .collect();
+        // 3. Reranking
+        let (ordered_results, candidate_map) = {
+            #[cfg(feature = "tracing")]
+            let start = std::time::Instant::now();
 
-        let reranker_inputs: Vec<RerankerCandidate> = candidates
-            .iter()
-            .map(|candidate| RerankerCandidate {
-                chunk_id: candidate.chunk_id.clone(),
-                document: candidate.document.clone(),
-                text: candidate.text.clone(),
-                page_number: candidate.page_number,
-                section: candidate.section.clone(),
-                initial_score: candidate.initial_score,
-            })
-            .collect();
+            // Do not hold SpanGuard across awaits
+            let candidate_map: HashMap<String, SearchCandidate> = candidates
+                .iter()
+                .cloned()
+                .map(|candidate| (candidate.chunk_id.clone(), candidate))
+                .collect();
 
-        let reranked: Vec<RerankedResult> = match &self.reranker {
-            Some(reranker) => reranker
-                .rerank(query, &reranker_inputs)
-                .await
-                .unwrap_or_else(|_err| {
+            let reranker_inputs: Vec<RerankerCandidate> = candidates
+                .iter()
+                .map(|candidate| RerankerCandidate {
+                    chunk_id: candidate.chunk_id.clone(),
+                    document: candidate.document.clone(),
+                    text: candidate.text.clone(),
+                    page_number: candidate.page_number,
+                    section: candidate.section.clone(),
+                    initial_score: candidate.initial_score,
+                })
+                .collect();
+
+            let reranked: Vec<RerankedResult> = match &self.reranker {
+                Some(reranker) => {
+                    let fut = reranker.rerank(query, &reranker_inputs);
                     #[cfg(feature = "tracing")]
-                    tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
-                    Vec::new()
-                }),
-            None => Vec::new(),
-        };
-
-        let mut ordered_results = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-
-        if !reranked.is_empty() {
-            let max_reranker = reranked
-                .iter()
-                .map(|r| r.relevance)
-                .fold(0.0_f32, f32::max)
-                .max(f32::EPSILON);
-            let max_initial = candidates
-                .iter()
-                .map(|c| c.initial_score)
-                .fold(0.0_f32, f32::max)
-                .max(f32::EPSILON);
-
-            for result in &reranked {
-                if let Some(candidate) = candidate_map.get(&result.chunk_id)
-                    && seen.insert(result.chunk_id.clone())
-                {
-                    let reranker_norm = result.relevance / max_reranker;
-                    let initial_norm = candidate.initial_score / max_initial;
-                    let blended_score =
-                        weights.reranker * reranker_norm + weights.initial * initial_norm;
-
-                    ordered_results.push(SearchResultWithEmbedding {
-                        result: SearchResult {
-                            text: candidate.text.clone(),
-                            score: blended_score,
-                            document: candidate.document.clone(),
-                            chunk_id: candidate.chunk_id.clone(),
-                            chunk_index: candidate.chunk_index,
-                            page_number: candidate.page_number,
-                            section: candidate.section.clone(),
-                            embedding_score: Some(candidate.embedding_score),
-                            lexical_score: Some(candidate.lexical_score),
-                            initial_score: Some(candidate.initial_score),
-                            reranker_score: Some(result.relevance),
-                            yes_logprob: result.yes_logprob,
-                            no_logprob: result.no_logprob,
-                        },
-                        embedding: candidate.embedding.clone(),
-                    });
+                    let fut = fut.instrument(tracing::debug_span!("reranker_backend_call"));
+                    fut.await.unwrap_or_else(|_err| {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
+                        Vec::new()
+                    })
                 }
+                None => Vec::new(),
+            };
+
+            let mut ordered_results = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+
+            if !reranked.is_empty() {
+                let max_reranker = reranked
+                    .iter()
+                    .map(|r| r.relevance)
+                    .fold(0.0_f32, f32::max)
+                    .max(f32::EPSILON);
+                let max_initial = candidates
+                    .iter()
+                    .map(|c| c.initial_score)
+                    .fold(0.0_f32, f32::max)
+                    .max(f32::EPSILON);
+
+                for result in &reranked {
+                    if let Some(candidate) = candidate_map.get(&result.chunk_id)
+                        && seen.insert(result.chunk_id.clone())
+                    {
+                        let reranker_norm = result.relevance / max_reranker;
+                        let initial_norm = candidate.initial_score / max_initial;
+                        let blended_score =
+                            weights.reranker * reranker_norm + weights.initial * initial_norm;
+
+                        ordered_results.push(SearchResultWithEmbedding {
+                            result: SearchResult {
+                                text: candidate.text.clone(),
+                                score: blended_score,
+                                document: candidate.document.clone(),
+                                chunk_id: candidate.chunk_id.clone(),
+                                chunk_index: candidate.chunk_index,
+                                page_number: candidate.page_number,
+                                section: candidate.section.clone(),
+                                embedding_score: Some(candidate.embedding_score),
+                                lexical_score: Some(candidate.lexical_score),
+                                initial_score: Some(candidate.initial_score),
+                                reranker_score: Some(result.relevance),
+                                yes_logprob: result.yes_logprob,
+                                no_logprob: result.no_logprob,
+                            },
+                            embedding: candidate.embedding.clone(),
+                        });
+                    }
+                }
+
+                ordered_results.sort_by(|a, b| {
+                    b.result
+                        .score
+                        .partial_cmp(&a.result.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                ordered_results.truncate(top_k);
             }
 
-            ordered_results.sort_by(|a, b| {
-                b.result
-                    .score
-                    .partial_cmp(&a.result.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                duration_ms = start.elapsed().as_millis(),
+                reranked_count = reranked.len(),
+                "Reranking phase complete"
+            );
 
-            ordered_results.truncate(top_k);
-        }
+            (ordered_results, candidate_map)
+        };
+
+        let mut ordered_results = ordered_results;
+        let mut seen: HashSet<String> = ordered_results
+            .iter()
+            .map(|r| r.result.chunk_id.clone())
+            .collect();
 
         if ordered_results.len() < top_k {
             let mut fallback_candidates: Vec<_> = candidate_map.values().collect();
@@ -628,8 +695,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            "Search internal finished with {} results",
-            ordered_results.len()
+            duration_ms = start_total.elapsed().as_millis(),
+            result_count = ordered_results.len(),
+            "Search internal finished"
         );
 
         Ok(ordered_results)
@@ -756,13 +824,16 @@ where
             document_hashes: &self.document_hashes,
         };
 
-        let data = serde_json::to_string_pretty(&state)
-            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e)))?;
+        let data = serde_json::to_string_pretty(&state).map_err(|e| {
+            EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e))
+        })?;
 
-        std::fs::write(&temp_path, &data)
-            .map_err(|e| EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e)))?;
-        std::fs::rename(&temp_path, &final_path)
-            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e)))?;
+        std::fs::write(&temp_path, &data).map_err(|e| {
+            EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e))
+        })?;
+        std::fs::rename(&temp_path, &final_path).map_err(|e| {
+            EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e))
+        })?;
         Ok(())
     }
 
@@ -792,8 +863,12 @@ where
         let legacy_path = legacy_path(data_dir.as_ref());
 
         if model_specific_path.exists() {
-            let data = std::fs::read_to_string(&model_specific_path)
-                .map_err(|e| EngineError::load_failed(&model_specific_path, crate::error::PersistenceError::Io(e)))?;
+            let data = std::fs::read_to_string(&model_specific_path).map_err(|e| {
+                EngineError::load_failed(
+                    &model_specific_path,
+                    crate::error::PersistenceError::Io(e),
+                )
+            })?;
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(state) => {
@@ -820,8 +895,9 @@ where
         }
 
         if legacy_path.exists() {
-            let data = std::fs::read_to_string(&legacy_path)
-                .map_err(|e| EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e)))?;
+            let data = std::fs::read_to_string(&legacy_path).map_err(|e| {
+                EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e))
+            })?;
 
             if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
                 if info.model == current_model {

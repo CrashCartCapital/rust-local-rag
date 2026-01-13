@@ -101,10 +101,7 @@ impl TagIndex {
 
     /// Get all chunk IDs that have a specific tag.
     pub fn chunks_with_tag(&self, tag: &str) -> HashSet<ChunkId> {
-        self.tag_to_chunks
-            .get(tag)
-            .cloned()
-            .unwrap_or_default()
+        self.tag_to_chunks.get(tag).cloned().unwrap_or_default()
     }
 
     /// Get all chunk IDs that have tags matching a prefix.
@@ -460,7 +457,10 @@ mod tests {
     #[test]
     fn test_explode_tag_hierarchical() {
         let tags = explode_tag("finance/invoice/2024");
-        assert_eq!(tags, vec!["finance", "finance/invoice", "finance/invoice/2024"]);
+        assert_eq!(
+            tags,
+            vec!["finance", "finance/invoice", "finance/invoice/2024"]
+        );
     }
 
     #[test]

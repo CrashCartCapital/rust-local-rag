@@ -1,10 +1,10 @@
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream};
-use rust_local_rag::rag_engine::RagEngine;
 use rust_local_rag::Config;
+use rust_local_rag::rag_engine::RagEngine;
 use serial_test::serial;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
