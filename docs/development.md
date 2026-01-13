@@ -59,14 +59,17 @@ make ollama-models          # Pull required models
 ## Repository Layout
 
 *   `src/main.rs`: Entrypoint; env + logging; initializes engine + job system.
-*   `src/mcp_server.rs`: MCP tool definitions + HTTP server.
+*   `src/lib.rs`: Library exports.
+*   `src/mcp/`: MCP implementation (tools, HTTP server, formatting).
+*   `src/mcp_server.rs`: Re-exports MCP modules.
 *   `crates/rag-core/src/*`: Reusable core library: chunking, retrieval, scoring, persistence.
 *   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
-*   `src/bin/rag_tui/*`: TUI client.
+*   `src/config.rs`: Configuration loading.
+*   `src/bin/rag_tui/`: TUI client.
 *   `docs/*`: Documentation.
 *   `eval/*`: Python evaluation harness.
 
