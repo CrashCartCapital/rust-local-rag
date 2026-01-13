@@ -136,6 +136,27 @@ impl JobManager {
         Ok(job)
     }
 
+    /// Validates allowed state machine transitions to prevent inconsistent job states.
+    ///
+    /// Allowed transitions:
+    /// - Idempotent: Same -> Same
+    /// - Lifecycle: Pending -> InProgress -> Completed/Failed
+    /// - Early Exit: Pending -> Completed/Failed (e.g. empty batch or validation error)
+    /// - Retry/Rerun: Failed/Completed -> Pending
+    fn is_valid_transition(current: &JobStatus, new: &JobStatus) -> bool {
+        match (current, new) {
+            (c, n) if c == n => true,
+            (JobStatus::Pending, JobStatus::InProgress) => true,
+            (JobStatus::Pending, JobStatus::Completed) => true,
+            (JobStatus::Pending, JobStatus::Failed) => true,
+            (JobStatus::InProgress, JobStatus::Completed) => true,
+            (JobStatus::InProgress, JobStatus::Failed) => true,
+            (JobStatus::Failed, JobStatus::Pending) => true,
+            (JobStatus::Completed, JobStatus::Pending) => true,
+            _ => false,
+        }
+    }
+
     #[instrument(skip(self, error), fields(status = ?status))]
     pub async fn update_status(
         &self,
@@ -143,6 +164,25 @@ impl JobManager {
         status: JobStatus,
         error: Option<String>,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        let current_job = sqlx::query_as::<_, Job>("SELECT * FROM jobs WHERE job_id = ?")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        if let Some(job) = current_job {
+            if !Self::is_valid_transition(&job.status, &status) {
+                return Err(anyhow::anyhow!(
+                    "Invalid job status transition from {:?} to {:?}",
+                    job.status,
+                    status
+                ));
+            }
+        } else {
+            return Err(anyhow::anyhow!("Job {} not found", job_id));
+        }
+
         let now = Utc::now().timestamp();
 
         sqlx::query("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE job_id = ?")
@@ -150,8 +190,10 @@ impl JobManager {
             .bind(error)
             .bind(now)
             .bind(job_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -503,5 +545,67 @@ mod tests {
         if let Err(e) = std::fs::remove_file(format!("{db_file}-wal")) {
             eprintln!("Cleanup failed (db-wal): {e}");
         }
+    }
+
+    #[tokio::test]
+    async fn test_job_state_transitions() {
+        let manager = JobManager::new("sqlite::memory:").await.unwrap();
+        let job = manager.create_job(JobType::Reindex, None, 0).await.unwrap();
+
+        // Valid: Pending -> InProgress
+        manager
+            .update_status(&job.job_id, JobStatus::InProgress, None)
+            .await
+            .expect("Pending -> InProgress should be valid");
+
+        // Valid: InProgress -> InProgress (Idempotent)
+        manager
+            .update_status(&job.job_id, JobStatus::InProgress, None)
+            .await
+            .expect("InProgress -> InProgress should be valid");
+
+        // Valid: InProgress -> Completed
+        manager
+            .update_status(&job.job_id, JobStatus::Completed, None)
+            .await
+            .expect("InProgress -> Completed should be valid");
+
+        // Invalid: Completed -> InProgress (Regression)
+        let err = manager
+            .update_status(&job.job_id, JobStatus::InProgress, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid job status transition from Completed to InProgress")
+        );
+
+        // Valid: Completed -> Pending (Re-run)
+        manager
+            .update_status(&job.job_id, JobStatus::Pending, None)
+            .await
+            .expect("Completed -> Pending should be valid");
+
+        // Valid: Pending -> Failed
+        manager
+            .update_status(&job.job_id, JobStatus::Failed, None)
+            .await
+            .expect("Pending -> Failed should be valid");
+
+        // Invalid: Failed -> InProgress (Must retry via Pending)
+        let err = manager
+            .update_status(&job.job_id, JobStatus::InProgress, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid job status transition from Failed to InProgress")
+        );
+
+        // Valid: Failed -> Pending (Retry)
+        manager
+            .update_status(&job.job_id, JobStatus::Pending, None)
+            .await
+            .expect("Failed -> Pending should be valid");
     }
 }

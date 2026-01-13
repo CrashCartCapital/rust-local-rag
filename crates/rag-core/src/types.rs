@@ -141,6 +141,7 @@ pub struct SearchResult {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "persistence", derive(serde::Serialize, serde::Deserialize))]
 pub struct SearchWeights {
     /// Weight for embedding (semantic) similarity in Stage 1. Default: 0.7
     pub embedding: f32,
@@ -559,10 +560,7 @@ mod tests {
 
         assert_eq!(spec.query, "machine learning");
         assert_eq!(spec.top_k, 10);
-        assert_eq!(
-            spec.scope,
-            SearchScope::Documents(vec!["paper.pdf".into()])
-        );
+        assert_eq!(spec.scope, SearchScope::Documents(vec!["paper.pdf".into()]));
         assert!((spec.diversity_factor - 0.5).abs() < f32::EPSILON);
     }
 
@@ -584,8 +582,8 @@ mod tests {
 
     #[test]
     fn test_query_spec_with_filter() {
-        let spec = QuerySpec::new("test")
-            .with_filter(FilterExpr::DocumentNameEquals("doc.pdf".into()));
+        let spec =
+            QuerySpec::new("test").with_filter(FilterExpr::DocumentNameEquals("doc.pdf".into()));
 
         assert_eq!(spec.filters.len(), 1);
         assert_eq!(
@@ -596,8 +594,7 @@ mod tests {
 
     #[test]
     fn test_query_spec_with_boost() {
-        let spec = QuerySpec::new("test")
-            .with_boost(BoostSpec::new("important.pdf", 2.0));
+        let spec = QuerySpec::new("test").with_boost(BoostSpec::new("important.pdf", 2.0));
 
         assert_eq!(spec.boosts.len(), 1);
         assert_eq!(spec.boosts[0].document_name, "important.pdf");
@@ -710,7 +707,10 @@ mod tests {
     #[test]
     fn test_resolution_all_coarse_to_fine() {
         let all = Resolution::all_coarse_to_fine();
-        assert_eq!(all, [Resolution::Document, Resolution::Section, Resolution::Chunk]);
+        assert_eq!(
+            all,
+            [Resolution::Document, Resolution::Section, Resolution::Chunk]
+        );
     }
 
     #[test]
