@@ -274,11 +274,36 @@ impl EmbeddingBackend for PyEmbeddingBackendAdapter {
     }
 }
 
+// Cached reference to inspect.iscoroutine for performance (TD-8).
+// Using thread_local to avoid repeated module imports on each call.
+thread_local! {
+    static ISCOROUTINE_FN: std::cell::RefCell<Option<PyObject>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Check if a Python object is a coroutine.
+/// Caches the inspect.iscoroutine function reference for performance.
 fn is_coroutine(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let inspect = py.import("inspect")?;
-    let is_coro: bool = inspect.call_method1("iscoroutine", (obj,))?.extract()?;
-    Ok(is_coro)
+    ISCOROUTINE_FN.with(|cell| {
+        let mut cached = cell.borrow_mut();
+
+        // Initialize cache on first use
+        if cached.is_none() {
+            let inspect = py.import("inspect")?;
+            let func = inspect.getattr("iscoroutine")?;
+            *cached = Some(func.unbind());
+        }
+
+        // Call the cached function (always Some after initialization above)
+        if let Some(ref func) = *cached {
+            let is_coro: bool = func.bind(py).call1((obj,))?.extract()?;
+            Ok(is_coro)
+        } else {
+            // Fallback (should never reach here)
+            let inspect = py.import("inspect")?;
+            let is_coro: bool = inspect.call_method1("iscoroutine", (obj,))?.extract()?;
+            Ok(is_coro)
+        }
+    })
 }
 
 /// Extract embedding vector from Python result.

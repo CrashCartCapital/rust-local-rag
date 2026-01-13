@@ -1,0 +1,14 @@
+# Python artifacts
+__pycache__/
+.pytest_cache/
+.venv/
+dist/
+*.egg-info/
+
+# Compiled extensions
+*.so
+*.pyd
+*.whl
+
+# Build artifacts
+target/

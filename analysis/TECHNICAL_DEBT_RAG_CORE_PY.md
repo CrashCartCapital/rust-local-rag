@@ -16,11 +16,11 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | MockEmbeddingBackend determinism |
 | **File** | `crates/rag-core-py/src/mock_backend.rs` |
 | **Priority** | Low |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** `DefaultHasher` is not stable across Rust versions; future toolchain bumps could silently change embeddings and break "golden" tests.
 
-**Recommendation:** Switch to an explicit stable hash (e.g., sha2/blake3/xxhash) or document the determinism scope as "best-effort within current toolchain."
+**Resolution:** Switched to SHA-256 (`sha2` crate) for stable, platform-independent hashing. The mock backend now produces deterministic embeddings that are guaranteed stable across Rust versions and platforms.
 
 ---
 
@@ -46,11 +46,11 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | MockEmbeddingBackend implementation |
 | **File** | `crates/rag-core-py/src/mock_backend.rs` |
 | **Priority** | Low |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** The `seed >> 33` scaling yields values biased toward [-1, 0), then normalization hides it but reduces "randomness quality."
 
-**Recommendation:** Use a full 32-bit slice (e.g., `(seed as u32)`), or convert bytes to `f32` in a well-defined way.
+**Resolution:** Now extracts full 32-bit values from SHA-256 hash bytes using `u32::from_le_bytes()`. For dimensions > 8, uses chained hashes with counter suffix. Values are uniformly distributed in [-1, 1] before normalization.
 
 ---
 
@@ -76,11 +76,11 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | CI/CD |
 | **Files** | `.github/workflows/python-bindings.yml`, `crates/rag-core-py/pyproject.toml` |
 | **Priority** | Low |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** Python classifiers claim 3.13 support, but CI only runs 3.10–3.12; `extension-module` compilation is only implicitly covered via `pip install .`.
 
-**Recommendation:** Add Python 3.13 to the test matrix (or remove the classifier for now) and consider an explicit `cargo test -p rag-core-py --features extension-module` build/test step.
+**Resolution:** Added Python 3.13 to the CI test matrix. The `python-tests` job now runs against Python 3.10, 3.11, 3.12, and 3.13 on all platforms (ubuntu, macos, windows).
 
 ---
 
@@ -152,11 +152,11 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | Performance |
 | **File** | `crates/rag-core-py/src/adapters.rs` |
 | **Priority** | Low |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** The `is_coroutine()` helper calls `py.import("inspect")` on every invocation to check if a Python result is a coroutine. While negligible for typical usage (Python imports are cached), it adds minor overhead.
 
-**Recommendation:** Cache the `iscoroutine` function reference in the adapter's inner state during construction, avoiding repeated module lookups.
+**Resolution:** Implemented thread-local caching for the `inspect.iscoroutine` function reference using `thread_local!` with `RefCell<Option<PyObject>>`. The function is cached on first use and reused for subsequent calls within the same thread.
 
 ---
 
@@ -252,11 +252,11 @@ This document tracks technical debt identified during implementation of rag-core
 
 | Phase | Open | Resolved | Accepted | Total |
 |-------|------|----------|----------|-------|
-| Phase 1 | 5 | 1 | 0 | 6 |
+| Phase 1 | 2 | 4 | 0 | 6 |
 | Phase 2 | 0 | 1 | 0 | 1 |
-| Phase 3 | 1 | 1 | 1 | 3 |
+| Phase 3 | 0 | 2 | 1 | 3 |
 | Phase 4 | 1 | 0 | 1 | 2 |
-| **Total** | **7** | **3** | **2** | **12** |
+| **Total** | **3** | **7** | **2** | **12** |
 
 ---
 
@@ -271,3 +271,7 @@ This document tracks technical debt identified during implementation of rag-core
 - **2025-01-13:** TD-10 resolved - Refactored to enum pattern to avoid double-calling Python methods
 - **2025-01-13:** Phase 4 gate review - TD-11 identified (async Python backends require event loop)
 - **2025-01-13:** TD-12 accepted - Async Python API spawn_blocking workaround validated by Gemini/Codex
+- **2025-01-13:** TD-1 resolved - Switched to SHA-256 for stable, platform-independent hashing
+- **2025-01-13:** TD-3 resolved - Fixed value distribution using full 32-bit extraction from hash bytes
+- **2025-01-13:** TD-5 resolved - Added Python 3.13 to CI test matrix
+- **2025-01-13:** TD-8 resolved - Implemented thread-local caching for iscoroutine function reference
