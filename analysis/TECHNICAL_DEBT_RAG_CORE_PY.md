@@ -221,6 +221,33 @@ This document tracks technical debt identified during implementation of rag-core
 
 ---
 
+### TD-12: Async Python API Uses spawn_blocking Workaround
+| Field | Value |
+|-------|-------|
+| **ID** | TD-12 |
+| **Area** | Async architecture |
+| **File** | `crates/rag-core-py/src/engine.rs` |
+| **Priority** | Low |
+| **Status** | **Accepted** |
+
+**Issue:** The `asearch()` and `aupsert_document()` async methods use `spawn_blocking + block_on` pattern instead of true async. This is because `RagEngine::search()` returns a future that borrows from `&self`, which doesn't satisfy `'static` bounds required by `future_into_py`.
+
+**Impact:** Minor performance overhead (extra thread pool scheduling, blocks a thread during async operations). The Python API remains fully async-compatible and all tests pass.
+
+**Validation:** Reviewed by both Gemini (gemini-3-pro-preview) and Codex (gpt-5.2-xhigh). Both confirmed:
+- Pattern is acceptable as a temporary workaround
+- Proper fix requires refactoring `rag_core::RagEngine` to support "snapshot" pattern (clone Arc fields before await)
+- Current approach is functionally correct
+
+**Recommendation:** In a future iteration, refactor `rag_core::RagEngine` to:
+1. Split search into sync "snapshot" + async "work" steps
+2. Or make async methods take `self: Arc<Self>` instead of `&self`
+3. Or use `Arc<RwLock>` for read-only operations
+
+**Tests:** `tests/test_async_api.py` - 13 tests validating async API parity and concurrency.
+
+---
+
 ## Summary
 
 | Phase | Open | Resolved | Accepted | Total |
@@ -228,8 +255,8 @@ This document tracks technical debt identified during implementation of rag-core
 | Phase 1 | 5 | 1 | 0 | 6 |
 | Phase 2 | 0 | 1 | 0 | 1 |
 | Phase 3 | 1 | 1 | 1 | 3 |
-| Phase 4 | 1 | 0 | 0 | 1 |
-| **Total** | **7** | **3** | **1** | **11** |
+| Phase 4 | 1 | 0 | 1 | 2 |
+| **Total** | **7** | **3** | **2** | **12** |
 
 ---
 
@@ -243,3 +270,4 @@ This document tracks technical debt identified during implementation of rag-core
 - **2025-01-13:** TD-9 accepted - BackendRef unsafe Send+Sync is acceptable pattern
 - **2025-01-13:** TD-10 resolved - Refactored to enum pattern to avoid double-calling Python methods
 - **2025-01-13:** Phase 4 gate review - TD-11 identified (async Python backends require event loop)
+- **2025-01-13:** TD-12 accepted - Async Python API spawn_blocking workaround validated by Gemini/Codex

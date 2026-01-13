@@ -7,8 +7,9 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 
 use crate::adapters::{PyEmbeddingBackendAdapter, PyRerankerAdapter};
 use crate::errors::engine_error_to_pyerr;
@@ -89,7 +90,9 @@ pub struct PyRagEngine {
     /// Directory for storing the index
     index_dir: PathBuf,
     /// The underlying rag-core engine with dynamic dispatch.
-    engine: Mutex<DynamicEngine>,
+    /// Using Arc<tokio::sync::Mutex> to support both sync (blocking_lock)
+    /// and async (.lock().await) access patterns.
+    engine: Arc<Mutex<DynamicEngine>>,
 }
 
 #[pymethods]
@@ -155,7 +158,7 @@ impl PyRagEngine {
 
             Ok(Self {
                 index_dir: PathBuf::from(index_dir),
-                engine: Mutex::new(engine),
+                engine: Arc::new(Mutex::new(engine)),
             })
         })
     }
@@ -193,7 +196,7 @@ impl PyRagEngine {
 
             Ok(Self {
                 index_dir: PathBuf::from(index_dir),
-                engine: Mutex::new(engine),
+                engine: Arc::new(Mutex::new(engine)),
             })
         })
     }
@@ -207,11 +210,7 @@ impl PyRagEngine {
     /// EngineStats with current engine state.
     fn stats(&self, _py: Python<'_>) -> PyResult<PyEngineStats> {
         catch_panic!(_py, {
-            let engine = self
-                .engine
-                .lock()
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))?;
-
+            let engine = self.engine.blocking_lock();
             let health = engine.health();
 
             Ok(PyEngineStats {
@@ -231,17 +230,14 @@ impl PyRagEngine {
     /// # Errors
     /// Raises IndexError if persistence fails.
     fn save(&self, py: Python<'_>) -> PyResult<()> {
-        // Release GIL during potentially slow disk I/O
-        py.allow_threads(|| {
-            let engine = match self.engine.lock() {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))
-                }
-            };
+        let index_dir = self.index_dir.clone();
+        let engine = Arc::clone(&self.engine);
 
+        // Release GIL during potentially slow disk I/O
+        py.allow_threads(move || {
+            let engine = engine.blocking_lock();
             engine
-                .save_to_dir(&self.index_dir)
+                .save_to_dir(&index_dir)
                 .map_err(engine_error_to_pyerr)
         })
     }
@@ -254,17 +250,14 @@ impl PyRagEngine {
     /// # Errors
     /// Raises IndexError if loading fails.
     fn load(&self, py: Python<'_>) -> PyResult<()> {
-        // Release GIL during potentially slow disk I/O
-        py.allow_threads(|| {
-            let mut engine = match self.engine.lock() {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))
-                }
-            };
+        let index_dir = self.index_dir.clone();
+        let engine = Arc::clone(&self.engine);
 
+        // Release GIL during potentially slow disk I/O
+        py.allow_threads(move || {
+            let mut engine = engine.blocking_lock();
             engine
-                .load_from_dir(&self.index_dir)
+                .load_from_dir(&index_dir)
                 .map_err(engine_error_to_pyerr)
         })
     }
@@ -275,11 +268,7 @@ impl PyRagEngine {
     /// List of document names currently in the index.
     fn list_documents(&self, _py: Python<'_>) -> PyResult<Vec<String>> {
         catch_panic!(_py, {
-            let engine = self
-                .engine
-                .lock()
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))?;
-
+            let engine = self.engine.blocking_lock();
             Ok(engine.list_documents())
         })
     }
@@ -289,11 +278,7 @@ impl PyRagEngine {
     /// Returns true if the embedding model has changed since the last index.
     fn needs_reindex(&self, _py: Python<'_>) -> PyResult<bool> {
         catch_panic!(_py, {
-            let engine = self
-                .engine
-                .lock()
-                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))?;
-
+            let engine = self.engine.blocking_lock();
             Ok(engine.needs_reindex())
         })
     }
@@ -330,17 +315,15 @@ impl PyRagEngine {
         text: &str,
         content_hash: Option<String>,
     ) -> PyResult<usize> {
-        // Release GIL and perform async embedding + upsert
-        py.allow_threads(|| {
-            let mut engine = match self.engine.lock() {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))
-                }
-            };
+        let name = name.to_string();
+        let text = text.to_string();
+        let engine = Arc::clone(&self.engine);
 
+        // Release GIL and perform async embedding + upsert
+        py.allow_threads(move || {
+            let mut engine = engine.blocking_lock();
             runtime()
-                .block_on(engine.upsert_document(name, text, content_hash))
+                .block_on(engine.upsert_document(&name, &text, content_hash))
                 .map_err(engine_error_to_pyerr)
         })
     }
@@ -366,15 +349,12 @@ impl PyRagEngine {
     ///     print(f"Removed {removed} chunks")
     /// ```
     fn remove_document(&self, py: Python<'_>, name: &str) -> PyResult<usize> {
-        py.allow_threads(|| {
-            let mut engine = match self.engine.lock() {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))
-                }
-            };
+        let name = name.to_string();
+        let engine = Arc::clone(&self.engine);
 
-            engine.remove_document(name).map_err(engine_error_to_pyerr)
+        py.allow_threads(move || {
+            let mut engine = engine.blocking_lock();
+            engine.remove_document(&name).map_err(engine_error_to_pyerr)
         })
     }
 
@@ -428,15 +408,11 @@ impl PyRagEngine {
                 .with_diversity(0.0) // Match Python QuerySpec default
         };
 
+        let engine = Arc::clone(&self.engine);
+
         // Release GIL and perform async search
-        let result = py.allow_threads(|| {
-            // Acquire engine lock
-            let engine = match self.engine.lock() {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err("Lock poisoned"))
-                }
-            };
+        py.allow_threads(move || {
+            let engine = engine.blocking_lock();
 
             // Use diversity search if diversity_factor > 0
             let search_result = if query_spec.diversity_factor > 0.0 {
@@ -457,9 +433,133 @@ impl PyRagEngine {
             search_result
                 .map(|rs| rs.into_iter().map(PySearchResult::from).collect())
                 .map_err(engine_error_to_pyerr)
-        });
+        })
+    }
 
-        result
+    /// Async version of search.
+    ///
+    /// Returns a Python coroutine that can be awaited. This is the preferred
+    /// method when calling from async Python code (asyncio).
+    ///
+    /// # Arguments
+    /// * `query` - The search query string
+    /// * `top_k` - Maximum number of results to return (default: 10)
+    /// * `spec` - Optional QuerySpec for advanced configuration
+    ///
+    /// # Returns
+    /// A coroutine that resolves to List[SearchResult].
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// async def search_async(engine):
+    ///     results = await engine.asearch("machine learning", top_k=5)
+    ///     return results
+    /// ```
+    #[pyo3(signature = (query, top_k=10, spec=None))]
+    fn asearch<'py>(
+        &self,
+        py: Python<'py>,
+        query: &str,
+        top_k: usize,
+        spec: Option<&PyQuerySpec>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Validate parameters
+        if query.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Query cannot be empty",
+            ));
+        }
+
+        // Build QuerySpec from optional spec or Python defaults.
+        let query_spec = if let Some(s) = spec {
+            s.to_query_spec(query).with_top_k(top_k)
+        } else {
+            rag_core::QuerySpec::new(query)
+                .with_top_k(top_k)
+                .with_diversity(0.0)
+        };
+
+        let engine = Arc::clone(&self.engine);
+
+        // Convert Rust future to Python coroutine.
+        // We use spawn_blocking because RagEngine::search returns a future
+        // that borrows from &self, which doesn't satisfy 'static bounds.
+        // spawn_blocking moves the work to a thread pool where we can safely
+        // use blocking_lock + block_on.
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || {
+                let engine = engine.blocking_lock();
+
+                // Use diversity search if diversity_factor > 0
+                let search_result = if query_spec.diversity_factor > 0.0 {
+                    runtime().block_on(engine.search_with_diversity(
+                        &query_spec.query,
+                        query_spec.top_k,
+                        query_spec.diversity_factor,
+                        query_spec.weights.clone(),
+                    ))
+                } else {
+                    runtime().block_on(engine.search(
+                        &query_spec.query,
+                        query_spec.top_k,
+                        query_spec.weights.clone(),
+                    ))
+                };
+
+                search_result
+                    .map(|rs| rs.into_iter().map(PySearchResult::from).collect::<Vec<_>>())
+                    .map_err(engine_error_to_pyerr)
+            })
+            .await
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        })
+    }
+
+    /// Async version of upsert_document.
+    ///
+    /// Returns a Python coroutine that can be awaited. This is the preferred
+    /// method when calling from async Python code (asyncio).
+    ///
+    /// # Arguments
+    /// * `name` - Document name/identifier (e.g., "paper.pdf")
+    /// * `text` - Full text content of the document
+    /// * `content_hash` - Optional content hash for change detection.
+    ///
+    /// # Returns
+    /// A coroutine that resolves to the number of chunks created.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// async def add_doc_async(engine):
+    ///     chunks = await engine.aupsert_document("doc.txt", "Hello world!")
+    ///     return chunks
+    /// ```
+    #[pyo3(signature = (name, text, content_hash=None))]
+    fn aupsert_document<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+        text: &str,
+        content_hash: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let name = name.to_string();
+        let text = text.to_string();
+        let engine = Arc::clone(&self.engine);
+
+        // Convert Rust future to Python coroutine.
+        // Uses spawn_blocking pattern for same reason as asearch.
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut engine = engine.blocking_lock();
+                runtime()
+                    .block_on(engine.upsert_document(&name, &text, content_hash))
+                    .map_err(engine_error_to_pyerr)
+            })
+            .await
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+        })
     }
 
     /// Get the index directory path.
