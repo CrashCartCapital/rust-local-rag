@@ -40,7 +40,7 @@ impl MockEmbeddingBackend {
             // Simple LCG-style PRNG for deterministic values
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             // Convert to f32 in range [-1, 1]
-            let value = ((seed >> 33) as f32 / (u32::MAX as f32)) * 2.0 - 1.0;
+            let value = (seed as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0;
             embedding.push(value);
         }
 
