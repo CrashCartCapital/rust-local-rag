@@ -7,6 +7,12 @@
 //! This implementation uses SHA-256 for hashing, which provides stable,
 //! reproducible embeddings across Rust versions and platforms. The same
 //! text will always produce the same embedding regardless of toolchain.
+//!
+//! ## Text Correlation Mode (TD-2)
+//!
+//! The [`CorrelatedMockEmbeddingBackend`] produces embeddings where textual
+//! similarity correlates with vector similarity. Uses bag-of-words hashing:
+//! texts with shared words produce similar vectors.
 
 use rag_core::{EmbeddingBackend, EmbeddingError};
 use sha2::{Digest, Sha256};
@@ -110,6 +116,109 @@ impl EmbeddingBackend for MockEmbeddingBackend {
     }
 }
 
+/// A mock embedding backend with text-correlated embeddings (TD-2).
+///
+/// Unlike [`MockEmbeddingBackend`] which produces random-looking vectors,
+/// this backend produces embeddings where textual similarity correlates
+/// with vector similarity. Uses bag-of-words hashing:
+///
+/// - "hello world" and "hello there" → similar vectors (shared "hello")
+/// - "hello world" and "quantum physics" → different vectors (no shared words)
+///
+/// This enables meaningful search/ranking tests where results correlate
+/// with actual text similarity rather than being deterministic noise.
+///
+/// # Example
+///
+/// ```rust
+/// use rag_core_py::mock_backend::CorrelatedMockEmbeddingBackend;
+///
+/// let backend = CorrelatedMockEmbeddingBackend::new(384);
+/// let v1 = backend.text_to_embedding("hello world");
+/// let v2 = backend.text_to_embedding("hello there");
+/// let v3 = backend.text_to_embedding("quantum physics");
+///
+/// // v1 and v2 should be more similar than v1 and v3
+/// let sim_12: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
+/// let sim_13: f32 = v1.iter().zip(v3.iter()).map(|(a, b)| a * b).sum();
+/// assert!(sim_12 > sim_13);
+/// ```
+pub struct CorrelatedMockEmbeddingBackend {
+    /// Underlying hash-based backend for per-token embeddings
+    inner: MockEmbeddingBackend,
+}
+
+impl CorrelatedMockEmbeddingBackend {
+    /// Create a new correlated mock backend with specified dimension.
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            inner: MockEmbeddingBackend {
+                dimension,
+                model_id: format!("mock-correlated-{}", dimension),
+            },
+        }
+    }
+
+    /// Generate text-correlated embedding using bag-of-words hashing.
+    ///
+    /// Splits text into whitespace-delimited tokens, hashes each token
+    /// to get a per-token vector, sums all vectors, then normalizes.
+    /// Texts with shared tokens produce similar (overlapping) vectors.
+    pub fn text_to_embedding(&self, text: &str) -> Vec<f32> {
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+
+        if tokens.is_empty() {
+            // Empty text gets zero vector (will be normalized to zero)
+            return vec![0.0; self.inner.dimension];
+        }
+
+        // Sum embeddings of all tokens
+        let mut sum_vec = vec![0.0f32; self.inner.dimension];
+        for token in &tokens {
+            let token_vec = self.inner.hash_to_embedding(token);
+            for (i, v) in token_vec.into_iter().enumerate() {
+                sum_vec[i] += v;
+            }
+        }
+
+        // Normalize to unit length
+        let norm: f32 = sum_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut sum_vec {
+                *x /= norm;
+            }
+        }
+
+        sum_vec
+    }
+}
+
+impl EmbeddingBackend for CorrelatedMockEmbeddingBackend {
+    fn model_id(&self) -> &str {
+        &self.inner.model_id
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension
+    }
+
+    fn embed(
+        &self,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<f32>, EmbeddingError>> + Send {
+        let embedding = self.text_to_embedding(text);
+        async move { Ok(embedding) }
+    }
+
+    fn embed_batch(
+        &self,
+        texts: &[String],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, EmbeddingError>> + Send {
+        let embeddings: Vec<Vec<f32>> = texts.iter().map(|t| self.text_to_embedding(t)).collect();
+        async move { Ok(embeddings) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +261,79 @@ mod tests {
     fn test_model_id() {
         let backend = MockEmbeddingBackend::new(384);
         assert_eq!(backend.model_id(), "mock-384");
+    }
+
+    // TD-2: Correlated mock backend tests
+
+    #[test]
+    fn test_correlated_similar_texts_produce_similar_vectors() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+
+        // Texts with shared words should produce similar vectors
+        let v1 = backend.text_to_embedding("hello world");
+        let v2 = backend.text_to_embedding("hello there");
+        let v3 = backend.text_to_embedding("quantum physics");
+
+        // Cosine similarity (vectors are normalized)
+        let sim_12: f32 = v1.iter().zip(v2.iter()).map(|(a, b)| a * b).sum();
+        let sim_13: f32 = v1.iter().zip(v3.iter()).map(|(a, b)| a * b).sum();
+
+        // "hello world" and "hello there" share "hello", so should be more similar
+        assert!(
+            sim_12 > sim_13,
+            "Expected similar texts to have higher similarity: {} > {}",
+            sim_12,
+            sim_13
+        );
+    }
+
+    #[test]
+    fn test_correlated_identical_texts_produce_identical_vectors() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+
+        let v1 = backend.text_to_embedding("hello world");
+        let v2 = backend.text_to_embedding("hello world");
+
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_correlated_normalized() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+        let emb = backend.text_to_embedding("hello world test");
+
+        let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 0.001,
+            "Expected unit norm, got {}",
+            norm
+        );
+    }
+
+    #[test]
+    fn test_correlated_model_id() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+        assert_eq!(backend.model_id(), "mock-correlated-384");
+    }
+
+    #[test]
+    fn test_correlated_empty_text() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+        let emb = backend.text_to_embedding("");
+
+        // Empty text should produce zero vector
+        assert_eq!(emb.len(), 384);
+        assert!(emb.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn test_correlated_word_order_invariant() {
+        let backend = CorrelatedMockEmbeddingBackend::new(384);
+
+        // Bag-of-words is order-invariant
+        let v1 = backend.text_to_embedding("hello world");
+        let v2 = backend.text_to_embedding("world hello");
+
+        assert_eq!(v1, v2, "Bag-of-words should be order-invariant");
     }
 }

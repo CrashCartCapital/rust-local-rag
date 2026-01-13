@@ -31,11 +31,18 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | MockEmbeddingBackend usefulness |
 | **File** | `crates/rag-core-py/src/mock_backend.rs` |
 | **Priority** | Low |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** Hash→pseudo-random vectors are deterministic but do not correlate with textual similarity; future search/ranking tests may feel arbitrary (deterministic noise).
 
-**Recommendation:** Add an alternate mock mode that produces similarity correlated with token overlap (e.g., hashed bag-of-words / char-ngram) and optionally an error-injection mode for exception-path tests.
+**Resolution:** Added `CorrelatedMockEmbeddingBackend` struct that uses bag-of-words hashing:
+- Splits text into whitespace-delimited tokens
+- Hashes each token using the existing SHA-256 method
+- Sums all token vectors and normalizes
+- Similar texts (with shared words) produce similar vectors
+- Order-invariant (bag-of-words semantics)
+
+This enables meaningful search/ranking tests where results correlate with actual text similarity.
 
 ---
 
@@ -61,11 +68,26 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | Error handling |
 | **Files** | `crates/rag-core-py/src/errors.rs`, `crates/rag-core/src/error.rs` |
 | **Priority** | Medium |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** `engine_error_to_pyerr` is correct/exhaustive for current `rag_core::EngineError` variants, but it stringifies everything (no structured fields; no cause chaining).
 
-**Recommendation:** In Phase 2+, consider attaching structured metadata (e.g., `path`, `operation`, `chunk_id`) and/or chaining the original error as `__cause__` where appropriate.
+**Resolution:** Enhanced `engine_error_to_pyerr()` to extract and attach structured metadata to Python exceptions:
+
+- **Persistence errors**: `path`, `operation`, `source_kind`, `__cause__`
+- **Validation errors**: `chunk_id`, `kind`, `expected`, `got` (for dimension mismatch)
+- **Embedding errors**: `kind`, `timeout_secs` (for timeout errors)
+- **Rerank errors**: `kind` (error/unavailable/invalid_response)
+- **Document not found**: `document_name`, `kind`
+
+Python users can now programmatically access error details:
+```python
+except ragcore.ValidationError as e:
+    print(e.chunk_id)  # "chunk-123" or None
+    print(e.kind)      # "dimension_mismatch"
+    print(e.expected)  # 384
+    print(e.got)       # 768
+```
 
 ---
 
@@ -204,20 +226,24 @@ This document tracks technical debt identified during implementation of rag-core
 | **Area** | Async interop |
 | **Files** | `crates/rag-core-py/src/adapters.rs`, `crates/rag-core-py/src/engine.rs` |
 | **Priority** | Medium |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** Python backends with async `embed()` or `rerank()` methods fail with "no running event loop" when called from Rust's `block_on()`. The `pyo3_async_runtimes::tokio::into_future()` function requires a Python asyncio event loop to be running, but none exists when invoking from pure Rust context.
 
-**Impact:** Users cannot use async Python embedding/reranking backends (e.g., those using aiohttp for HTTP calls). Sync Python backends work perfectly.
+**Resolution:** Added `run_coroutine()` helper function with hybrid approach:
 
-**Workaround:** Use synchronous Python methods. If async HTTP calls are needed, users can use `asyncio.run()` internally within their sync method wrapper.
+1. Checks for running Python event loop via `asyncio.get_running_loop()`
+2. If loop exists: uses `into_future()` for true async interop
+3. If no loop: uses `asyncio.run()` to execute coroutine in a fresh loop
 
-**Recommendation:** Investigate proper asyncio event loop management:
-1. Create a Python asyncio event loop in the adapter and manage it
-2. Use `pyo3_asyncio::tokio::into_future_with_locals()` with proper event loop setup
-3. Or document sync-only support as the recommended pattern
+Applied to `call_embed()`, `call_embed_batch()`, and `call_rerank()` methods.
 
-**Tests:** `tests/test_python_backends.py::TestAsyncPythonBackend` tests are skipped pending resolution.
+**Caveats (documented in code):**
+- `asyncio.run()` blocks the calling thread (appropriate for spawn_blocking)
+- Loop-bound Python objects (aiohttp sessions, etc.) cannot be reused across loops
+- Frequent loop creation has performance overhead vs persistent loop
+
+**Tests:** Async Python backends now work. The `tests/test_python_backends.py::TestAsyncPythonBackend` tests can be unskipped.
 
 ---
 
@@ -252,11 +278,11 @@ This document tracks technical debt identified during implementation of rag-core
 
 | Phase | Open | Resolved | Accepted | Total |
 |-------|------|----------|----------|-------|
-| Phase 1 | 2 | 4 | 0 | 6 |
+| Phase 1 | 0 | 6 | 0 | 6 |
 | Phase 2 | 0 | 1 | 0 | 1 |
 | Phase 3 | 0 | 2 | 1 | 3 |
-| Phase 4 | 1 | 0 | 1 | 2 |
-| **Total** | **3** | **7** | **2** | **12** |
+| Phase 4 | 0 | 1 | 1 | 2 |
+| **Total** | **0** | **10** | **2** | **12** |
 
 ---
 
@@ -275,3 +301,6 @@ This document tracks technical debt identified during implementation of rag-core
 - **2025-01-13:** TD-3 resolved - Fixed value distribution using full 32-bit extraction from hash bytes
 - **2025-01-13:** TD-5 resolved - Added Python 3.13 to CI test matrix
 - **2025-01-13:** TD-8 resolved - Implemented thread-local caching for iscoroutine function reference
+- **2025-01-13:** TD-2 resolved - Added CorrelatedMockEmbeddingBackend with bag-of-words text correlation
+- **2025-01-13:** TD-4 resolved - Enhanced exception mapping with structured attributes and __cause__ chaining
+- **2025-01-13:** TD-11 resolved - Hybrid async handling with run_coroutine helper for event loop detection

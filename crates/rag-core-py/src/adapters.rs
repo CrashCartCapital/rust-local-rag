@@ -167,15 +167,20 @@ impl PyEmbeddingBackendAdapter {
             .map_err(|e| EmbeddingError::Api(format!("Semaphore error: {}", e)))?;
 
         // Call Python and check for coroutine - returns either sync result or async future
+        // TD-11: Uses run_coroutine helper to handle missing event loop
         let call_result = Python::with_gil(|py| -> PyResult<EmbedCallResult> {
             let backend = inner.backend.0.bind(py);
             let result = backend.call_method1("embed", (&text,))?;
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                // Convert coroutine to future (only once, no re-call)
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(EmbedCallResult::Async(Box::pin(future)))
+                // Run coroutine with TD-11 event loop handling
+                match run_coroutine(py, result)? {
+                    CoroutineResult::Async(future) => Ok(EmbedCallResult::Async(future)),
+                    CoroutineResult::Sync(sync_result) => {
+                        Ok(EmbedCallResult::Sync(extract_embedding(&sync_result)?))
+                    }
+                }
             } else {
                 // Sync result - extract directly
                 Ok(EmbedCallResult::Sync(extract_embedding(&result)?))
@@ -208,6 +213,7 @@ impl PyEmbeddingBackendAdapter {
             .map_err(|e| EmbeddingError::Api(format!("Semaphore error: {}", e)))?;
 
         // Call Python and check for coroutine
+        // TD-11: Uses run_coroutine helper to handle missing event loop
         let call_result = Python::with_gil(|py| -> PyResult<EmbedBatchCallResult> {
             let backend = inner.backend.0.bind(py);
             let texts_list = PyList::new(py, &texts)?;
@@ -215,8 +221,12 @@ impl PyEmbeddingBackendAdapter {
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(EmbedBatchCallResult::Async(Box::pin(future)))
+                match run_coroutine(py, result)? {
+                    CoroutineResult::Async(future) => Ok(EmbedBatchCallResult::Async(future)),
+                    CoroutineResult::Sync(sync_result) => {
+                        Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(&sync_result)?))
+                    }
+                }
             } else {
                 Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(
                     &result,
@@ -304,6 +314,54 @@ fn is_coroutine(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
             Ok(is_coro)
         }
     })
+}
+
+/// Result type for running a Python coroutine (TD-11).
+///
+/// When calling async Python backends from Rust:
+/// - If a Python event loop is running: returns Async variant for true async
+/// - If no event loop: runs coroutine with asyncio.run() and returns Sync variant
+enum CoroutineResult<'py> {
+    /// Coroutine converted to Rust future (Python loop was running)
+    Async(std::pin::Pin<Box<dyn std::future::Future<Output = PyResult<Py<PyAny>>> + Send + 'static>>),
+    /// Coroutine executed synchronously via asyncio.run() (no Python loop)
+    Sync(Bound<'py, PyAny>),
+}
+
+/// Run a Python coroutine, handling the event loop issue (TD-11).
+///
+/// The problem: `pyo3_async_runtimes::tokio::into_future()` requires a running
+/// Python asyncio event loop. When called from pure Rust context (e.g., tokio
+/// runtime, spawn_blocking), there's no Python loop.
+///
+/// Solution:
+/// 1. Check if a Python event loop is running via `asyncio.get_running_loop()`
+/// 2. If yes: use `into_future()` for true async interop
+/// 3. If no: use `asyncio.run()` to execute coroutine in a fresh loop
+///
+/// # Caveats
+///
+/// - `asyncio.run()` blocks the calling thread (appropriate for spawn_blocking)
+/// - Loop-bound Python objects (aiohttp sessions, etc.) created in one loop
+///   cannot be reused in the new loop created by asyncio.run()
+/// - Frequent loop creation has performance overhead vs persistent loop
+fn run_coroutine<'py>(py: Python<'py>, coroutine: Bound<'py, PyAny>) -> PyResult<CoroutineResult<'py>> {
+    let asyncio = py.import("asyncio")?;
+
+    // Check if there's already a running event loop
+    match asyncio.call_method0("get_running_loop") {
+        Ok(_loop) => {
+            // Loop exists - use into_future for true async conversion
+            let future = pyo3_async_runtimes::tokio::into_future(coroutine)?;
+            Ok(CoroutineResult::Async(Box::pin(future)))
+        }
+        Err(_) => {
+            // No running loop - execute coroutine synchronously with asyncio.run()
+            // This creates a fresh event loop, runs the coroutine, and closes the loop
+            let result = asyncio.call_method1("run", (coroutine,))?;
+            Ok(CoroutineResult::Sync(result))
+        }
+    }
 }
 
 /// Extract embedding vector from Python result.
@@ -450,6 +508,7 @@ impl PyRerankerAdapter {
             .map_err(|e| RerankError::Error(format!("Semaphore error: {}", e)))?;
 
         // Call Python and check for coroutine
+        // TD-11: Uses run_coroutine helper to handle missing event loop
         let call_result = Python::with_gil(|py| -> PyResult<RerankCallResult> {
             let backend = inner.backend.0.bind(py);
             let py_candidates = candidates_to_py(py, &candidates)?;
@@ -457,8 +516,12 @@ impl PyRerankerAdapter {
 
             // Check if result is a coroutine
             if is_coroutine(py, &result)? {
-                let future = pyo3_async_runtimes::tokio::into_future(result)?;
-                Ok(RerankCallResult::Async(Box::pin(future)))
+                match run_coroutine(py, result)? {
+                    CoroutineResult::Async(future) => Ok(RerankCallResult::Async(future)),
+                    CoroutineResult::Sync(sync_result) => {
+                        Ok(RerankCallResult::Sync(extract_rerank_results(py, &sync_result)?))
+                    }
+                }
             } else {
                 Ok(RerankCallResult::Sync(extract_rerank_results(py, &result)?))
             }
