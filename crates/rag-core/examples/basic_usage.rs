@@ -72,9 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Configure and create the engine
     let config = RagConfig {
-        chunk_tokens: 200,        // tokens per chunk (approx 4 chars/token)
-        sentence_overlap: 1,      // sentences to overlap between chunks
-        ..Default::default()      // use defaults for weights and batch_size
+        chunk_tokens: 200,    // tokens per chunk (approx 4 chars/token)
+        sentence_overlap: 1,  // sentences to overlap between chunks
+        ..Default::default()  // use defaults for weights and batch_size
     };
 
     let mut engine = RagEngine::with_config(embedder, config);

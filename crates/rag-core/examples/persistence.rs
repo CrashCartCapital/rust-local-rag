@@ -7,7 +7,9 @@
 
 #[cfg(feature = "persistence")]
 mod example {
-    use rag_core::{EmbeddingBackend, EmbeddingError, JsonFileBackend, PersistenceBackend, RagEngine};
+    use rag_core::{
+        EmbeddingBackend, EmbeddingError, JsonFileBackend, PersistenceBackend, RagEngine,
+    };
 
     /// Simple embedder for demonstration.
     struct MockEmbedder {
@@ -20,13 +22,17 @@ mod example {
         }
 
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+            let hash = text
+                .bytes()
+                .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
             let mut emb = vec![0.0f32; self.dim];
             for (i, v) in emb.iter_mut().enumerate() {
                 *v = ((hash.wrapping_add(i as u64) % 1000) as f32 / 1000.0) - 0.5;
             }
             let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-            if norm > 0.0 { emb.iter_mut().for_each(|v| *v /= norm); }
+            if norm > 0.0 {
+                emb.iter_mut().for_each(|v| *v /= norm);
+            }
             Ok(emb)
         }
 
@@ -48,9 +54,18 @@ mod example {
 
             // Index some documents
             let docs = [
-                ("physics.txt", "Quantum mechanics describes the behavior of particles at atomic scales."),
-                ("biology.txt", "DNA contains the genetic instructions for all living organisms."),
-                ("history.txt", "The Roman Empire was one of the largest empires in ancient history."),
+                (
+                    "physics.txt",
+                    "Quantum mechanics describes the behavior of particles at atomic scales.",
+                ),
+                (
+                    "biology.txt",
+                    "DNA contains the genetic instructions for all living organisms.",
+                ),
+                (
+                    "history.txt",
+                    "The Roman Empire was one of the largest empires in ancient history.",
+                ),
             ];
 
             for (name, content) in &docs {
@@ -75,9 +90,11 @@ mod example {
 
             // Load persisted state
             engine.load_from_dir(&temp_dir)?;
-            println!("  Loaded {} documents, {} chunks",
+            println!(
+                "  Loaded {} documents, {} chunks",
                 engine.list_documents().len(),
-                engine.chunk_count());
+                engine.chunk_count()
+            );
 
             // Search to verify data is intact
             println!("\n  Searching for 'atomic particles':");
