@@ -140,13 +140,96 @@ This document tracks technical debt identified during implementation of rag-core
 
 ---
 
+## Phase 3: Backend Adapters
+
+**Gate Review Date:** 2025-01-13
+**Reviewers:** Gemini (gemini-3-pro-preview)
+
+### TD-8: Inspect Module Import per Async Check
+| Field | Value |
+|-------|-------|
+| **ID** | TD-8 |
+| **Area** | Performance |
+| **File** | `crates/rag-core-py/src/adapters.rs` |
+| **Priority** | Low |
+| **Status** | Open |
+
+**Issue:** The `is_coroutine()` helper calls `py.import("inspect")` on every invocation to check if a Python result is a coroutine. While negligible for typical usage (Python imports are cached), it adds minor overhead.
+
+**Recommendation:** Cache the `iscoroutine` function reference in the adapter's inner state during construction, avoiding repeated module lookups.
+
+---
+
+### TD-9: BackendRef Unsafe Send+Sync
+| Field | Value |
+|-------|-------|
+| **ID** | TD-9 |
+| **Area** | Thread safety |
+| **File** | `crates/rag-core-py/src/adapters.rs` |
+| **Priority** | Low |
+| **Status** | **Accepted** |
+
+**Issue:** `BackendRef(Py<PyAny>)` has `unsafe impl Send` and `unsafe impl Sync`. This is safe because all access to the Python object is gated through `Python::with_gil()`, but the unsafe marker requires careful maintenance.
+
+**Recommendation:** This is an acceptable pattern for PyO3 interop. The safety invariant is documented in code comments. No action required unless PyO3 provides a safer pattern in future versions.
+
+---
+
+### TD-10: Double-Call for Async Python Methods
+| Field | Value |
+|-------|-------|
+| **ID** | TD-10 |
+| **Area** | Correctness |
+| **File** | `crates/rag-core-py/src/adapters.rs` |
+| **Priority** | Medium |
+| **Status** | **Resolved** |
+
+**Issue:** Initial implementation called Python methods twice for async backends - once to detect coroutine type, once to get the actual result.
+
+**Resolution:** Refactored to use enum pattern (`EmbedCallResult`, `EmbedBatchCallResult`, `RerankCallResult`) that stores either the sync result OR the async future from a single Python call. The coroutine check happens on the result of the first call, not a separate call.
+
+**Files Changed:**
+- `crates/rag-core-py/src/adapters.rs` - Added enum types and refactored call_embed/call_embed_batch/call_rerank methods
+
+---
+
+## Phase 4: PyRagEngine Integration
+
+**Gate Review Date:** 2025-01-13
+
+### TD-11: Async Python Backends Require Event Loop
+| Field | Value |
+|-------|-------|
+| **ID** | TD-11 |
+| **Area** | Async interop |
+| **Files** | `crates/rag-core-py/src/adapters.rs`, `crates/rag-core-py/src/engine.rs` |
+| **Priority** | Medium |
+| **Status** | Open |
+
+**Issue:** Python backends with async `embed()` or `rerank()` methods fail with "no running event loop" when called from Rust's `block_on()`. The `pyo3_async_runtimes::tokio::into_future()` function requires a Python asyncio event loop to be running, but none exists when invoking from pure Rust context.
+
+**Impact:** Users cannot use async Python embedding/reranking backends (e.g., those using aiohttp for HTTP calls). Sync Python backends work perfectly.
+
+**Workaround:** Use synchronous Python methods. If async HTTP calls are needed, users can use `asyncio.run()` internally within their sync method wrapper.
+
+**Recommendation:** Investigate proper asyncio event loop management:
+1. Create a Python asyncio event loop in the adapter and manage it
+2. Use `pyo3_asyncio::tokio::into_future_with_locals()` with proper event loop setup
+3. Or document sync-only support as the recommended pattern
+
+**Tests:** `tests/test_python_backends.py::TestAsyncPythonBackend` tests are skipped pending resolution.
+
+---
+
 ## Summary
 
-| Phase | Open | Resolved | Total |
-|-------|------|----------|-------|
-| Phase 1 | 5 | 1 | 6 |
-| Phase 2 | 0 | 1 | 1 |
-| **Total** | **5** | **2** | **7** |
+| Phase | Open | Resolved | Accepted | Total |
+|-------|------|----------|----------|-------|
+| Phase 1 | 5 | 1 | 0 | 6 |
+| Phase 2 | 0 | 1 | 0 | 1 |
+| Phase 3 | 1 | 1 | 1 | 3 |
+| Phase 4 | 1 | 0 | 0 | 1 |
+| **Total** | **7** | **3** | **1** | **11** |
 
 ---
 
@@ -156,3 +239,7 @@ This document tracks technical debt identified during implementation of rag-core
 - **2025-01-13:** TD-6 resolved - Updated .gitignore for Python artifacts
 - **2025-01-13:** Phase 2 start - TD-7 identified (RPITIT object-safety issue)
 - **2025-01-13:** TD-7 resolved - Implemented dual-trait pattern with DynEmbeddingBackend/DynRerank
+- **2025-01-13:** Phase 3 gate review - 3 items identified (TD-8 through TD-10)
+- **2025-01-13:** TD-9 accepted - BackendRef unsafe Send+Sync is acceptable pattern
+- **2025-01-13:** TD-10 resolved - Refactored to enum pattern to avoid double-calling Python methods
+- **2025-01-13:** Phase 4 gate review - TD-11 identified (async Python backends require event loop)

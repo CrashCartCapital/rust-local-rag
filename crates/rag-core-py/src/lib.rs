@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 
+mod adapters;
 mod conversions;
 mod engine;
 mod errors;

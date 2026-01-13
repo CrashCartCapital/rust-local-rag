@@ -7,12 +7,14 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 
+use crate::adapters::{PyEmbeddingBackendAdapter, PyRerankerAdapter};
 use crate::errors::engine_error_to_pyerr;
 use crate::mock_backend::MockEmbeddingBackend;
 use crate::types::{PyEngineStats, PyQuerySpec, PySearchResult};
+use rag_core::{BoxedEmbedder, BoxedReranker};
 
 /// Shared Tokio runtime for async operations.
 ///
@@ -27,9 +29,10 @@ static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to create Tokio runtime")
 });
 
-/// Type alias for the concrete engine type using MockEmbeddingBackend.
-/// In Phase 3, this will be replaced with trait object support.
-type MockEngine = rag_core::RagEngine<MockEmbeddingBackend, ()>;
+/// Type alias for the dynamic engine type using boxed trait objects.
+/// This allows the engine to work with any embedding backend or reranker
+/// that implements the required traits (via adapters for Python backends).
+type DynamicEngine = rag_core::RagEngine<BoxedEmbedder, BoxedReranker>;
 
 /// Helper macro for catch_unwind at FFI boundary.
 ///
@@ -69,17 +72,94 @@ macro_rules! catch_panic {
 /// engine = RagEngine.create_mock("/tmp/index")
 /// stats = engine.stats()
 /// print(f"Documents: {stats.document_count}")
+///
+/// # Create an engine with a Python backend
+/// class MyEmbedder:
+///     def model_id(self) -> str:
+///         return "my-model"
+///     def dimension(self) -> int:
+///         return 768
+///     def embed(self, text: str) -> list[float]:
+///         return [0.0] * 768
+///
+/// engine = RagEngine.create("/tmp/index", backend=MyEmbedder())
 /// ```
 #[pyclass(name = "RagEngine", module = "ragcore")]
 pub struct PyRagEngine {
     /// Directory for storing the index
     index_dir: PathBuf,
-    /// The underlying rag-core engine (using mock backend for Phase 2)
-    engine: Mutex<MockEngine>,
+    /// The underlying rag-core engine with dynamic dispatch.
+    engine: Mutex<DynamicEngine>,
 }
 
 #[pymethods]
 impl PyRagEngine {
+    /// Create a new engine with a Python embedding backend.
+    ///
+    /// This is the primary constructor for production use. You provide
+    /// your own embedding backend (and optionally a reranker) that will
+    /// be called during document indexing and search operations.
+    ///
+    /// # Arguments
+    /// * `index_dir` - Directory for storing the index
+    /// * `backend` - Python object implementing embedding backend protocol:
+    ///   - `model_id() -> str`
+    ///   - `dimension() -> int`
+    ///   - `embed(text: str) -> list[float]` (sync or async)
+    ///   - `embed_batch(texts: list[str]) -> list[list[float]]` (optional)
+    /// * `reranker` - Optional Python object implementing reranker protocol:
+    ///   - `rerank(query: str, candidates: list[dict]) -> list[dict]` (sync or async)
+    ///
+    /// # Returns
+    /// A new RagEngine instance with the provided backends.
+    ///
+    /// # Errors
+    /// Raises AttributeError if backend/reranker doesn't have required methods.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// class MyEmbedder:
+    ///     def model_id(self) -> str:
+    ///         return "my-model"
+    ///     def dimension(self) -> int:
+    ///         return 768
+    ///     def embed(self, text: str) -> list[float]:
+    ///         return [0.0] * 768
+    ///
+    /// engine = RagEngine.create("/tmp/index", backend=MyEmbedder())
+    /// ```
+    #[staticmethod]
+    #[pyo3(signature = (index_dir, backend, reranker=None))]
+    fn create(
+        py: Python<'_>,
+        index_dir: &str,
+        backend: &Bound<'_, PyAny>,
+        reranker: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        catch_panic!(py, {
+            // Wrap Python backend in adapter
+            let adapter = PyEmbeddingBackendAdapter::new(py, backend, None)?;
+            let boxed_embedder: BoxedEmbedder = Arc::new(adapter);
+
+            // Wrap reranker if provided, otherwise use no-op
+            let boxed_reranker: BoxedReranker = if let Some(r) = reranker {
+                let reranker_adapter = PyRerankerAdapter::new(py, r, None)?;
+                Arc::new(reranker_adapter)
+            } else {
+                // No-op reranker: () implements Rerank returning empty vec
+                Arc::new(()) as BoxedReranker
+            };
+
+            let engine = rag_core::RagEngine::with_reranker(boxed_embedder, boxed_reranker);
+
+            Ok(Self {
+                index_dir: PathBuf::from(index_dir),
+                engine: Mutex::new(engine),
+            })
+        })
+    }
+
     /// Create a new engine with a mock backend (for testing).
     ///
     /// This constructor is primarily for testing and development.
@@ -102,8 +182,14 @@ impl PyRagEngine {
     #[pyo3(signature = (index_dir, dimension=768))]
     fn create_mock(_py: Python<'_>, index_dir: &str, dimension: usize) -> PyResult<Self> {
         catch_panic!(_py, {
-            let backend = MockEmbeddingBackend::new(dimension);
-            let engine = rag_core::RagEngine::new(backend);
+            // Wrap mock backend in BoxedEmbedder for dynamic dispatch
+            let mock_backend = MockEmbeddingBackend::new(dimension);
+            let boxed_embedder: BoxedEmbedder = Arc::new(mock_backend);
+
+            // No-op reranker
+            let boxed_reranker: BoxedReranker = Arc::new(()) as BoxedReranker;
+
+            let engine = rag_core::RagEngine::with_reranker(boxed_embedder, boxed_reranker);
 
             Ok(Self {
                 index_dir: PathBuf::from(index_dir),
@@ -400,11 +486,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Helper to create a DynamicEngine with MockEmbeddingBackend.
+    fn create_mock_dynamic_engine(dimension: usize) -> DynamicEngine {
+        let mock_backend = MockEmbeddingBackend::new(dimension);
+        let boxed_embedder: BoxedEmbedder = Arc::new(mock_backend);
+        let boxed_reranker: BoxedReranker = Arc::new(()) as BoxedReranker;
+        rag_core::RagEngine::with_optional_reranker(boxed_embedder, Some(boxed_reranker), rag_core::RagConfig::default())
+    }
+
     #[test]
     fn test_mock_engine_creation() {
         let _dir = tempdir().unwrap();
-        let backend = MockEmbeddingBackend::new(768);
-        let engine: MockEngine = rag_core::RagEngine::new(backend);
+        let engine = create_mock_dynamic_engine(768);
         let health = engine.health();
 
         assert_eq!(health.chunk_count, 0);
@@ -415,8 +508,7 @@ mod tests {
 
     #[test]
     fn test_mock_engine_custom_dimension() {
-        let backend = MockEmbeddingBackend::new(384);
-        let engine: MockEngine = rag_core::RagEngine::new(backend);
+        let engine = create_mock_dynamic_engine(384);
         let health = engine.health();
 
         assert_eq!(health.embedding_dim, 384);
