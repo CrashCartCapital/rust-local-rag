@@ -412,6 +412,9 @@ mod tests {
                     page_number: 1,
                     section: None,
                     metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
                 },
             );
             state.document_hashes.insert("test.pdf".to_string(), "hash123".to_string());
@@ -502,6 +505,9 @@ mod tests {
                     page_number: 1,
                     section: None,
                     metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
                 },
             );
             backend.save(&state1).unwrap();
@@ -519,6 +525,9 @@ mod tests {
                     page_number: 1,
                     section: None,
                     metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
                 },
             );
             backend.save(&state2).unwrap();
@@ -549,6 +558,9 @@ mod tests {
                     page_number: 1,
                     section: None,
                     metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
                 },
             );
             backend.save(&state).unwrap();
@@ -579,6 +591,9 @@ mod tests {
                 page_number: 1,
                 section: None,
                 metadata: crate::types::ChunkMetadata::default(),
+                tags: std::collections::HashSet::new(),
+                resolution: crate::types::Resolution::default(),
+                parent_id: None,
             });
             backend_a.save(&state_a).unwrap();
 
@@ -594,6 +609,9 @@ mod tests {
                 page_number: 1,
                 section: None,
                 metadata: crate::types::ChunkMetadata::default(),
+                tags: std::collections::HashSet::new(),
+                resolution: crate::types::Resolution::default(),
+                parent_id: None,
             });
             backend_b.save(&state_b).unwrap();
 

@@ -47,9 +47,12 @@
 //! - [`persistence`]: Save/load engine state (feature-gated)
 
 pub mod chunking;
+pub mod collections;
 pub mod engine;
 pub mod error;
+pub mod relationships;
 pub mod search;
+pub mod tags;
 pub mod traits;
 pub mod types;
 
@@ -63,9 +66,18 @@ pub use crate::engine::RagEngine;
 pub use crate::error::{
     EmbeddingError, EngineError, PersistenceError, PersistenceOp, RerankError, ValidationKind,
 };
+pub use crate::collections::{Collection, CollectionConfig, CollectionId, CollectionManifest};
+pub use crate::relationships::{
+    Edge, RelationIndex, Relationship, RelationshipConfig, RelationshipType,
+};
+pub use crate::tags::{
+    cosine_similarity, explode_tag, explode_tags, ExpandedTag, ExpansionMode, TagEmbeddingIndex,
+    TagExpansionConfig, TagIndex,
+};
 pub use crate::traits::{EmbeddingBackend, Rerank};
 pub use crate::search::{CandidateScore, ChunkUpdate, IndexSet};
 pub use crate::types::{
-    ChunkMetadata, DocumentChunk, HealthStatus, RagConfig, RerankedResult, RerankerCandidate,
-    SearchResult, SearchWeights,
+    BoostSpec, ChunkMetadata, DocumentChunk, FilterExpr, HealthStatus, QuerySpec, RagConfig,
+    RerankedResult, RerankerCandidate, Resolution, ResolutionSpec, SearchResult, SearchScope,
+    SearchStrategy, SearchWeights,
 };

@@ -25,23 +25,12 @@ pub(crate) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 /// Calculate cosine similarity between two embeddings.
 /// Returns a value in [-1, 1] where 1 means identical direction.
 /// Returns 0.0 for edge cases (empty, mismatched length, near-zero norm).
+///
+/// Note: This is a re-export of the canonical implementation in tags.rs
+/// for crate-internal use.
 #[allow(dead_code)] // used by tests and legacy paths
 pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-
-    const EPSILON: f32 = 1e-10;
-
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a < EPSILON || norm_b < EPSILON {
-        0.0
-    } else {
-        (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
-    }
+    crate::tags::cosine_similarity(a, b)
 }
 
 #[derive(Debug, Clone)]

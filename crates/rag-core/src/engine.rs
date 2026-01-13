@@ -236,6 +236,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 page_number: fragment.page_number,
                 section: fragment.section.clone(),
                 metadata: fragment.metadata,
+                tags: std::collections::HashSet::new(),
+                resolution: crate::types::Resolution::default(), // Chunk-level by default
+                parent_id: None,
             });
         }
 
