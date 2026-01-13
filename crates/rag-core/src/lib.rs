@@ -62,22 +62,22 @@ pub mod persistence;
 #[cfg(feature = "persistence")]
 pub use crate::persistence::{EngineState, JsonFileBackend, PersistenceBackend};
 
+pub use crate::collections::{Collection, CollectionConfig, CollectionId, CollectionManifest};
 pub use crate::engine::RagEngine;
 pub use crate::error::{
     EmbeddingError, EngineError, PersistenceError, PersistenceOp, RerankError, ValidationKind,
 };
-pub use crate::collections::{Collection, CollectionConfig, CollectionId, CollectionManifest};
 pub use crate::relationships::{
     Edge, RelationIndex, Relationship, RelationshipConfig, RelationshipType,
 };
+pub use crate::search::{CandidateScore, ChunkUpdate, IndexSet};
 pub use crate::tags::{
-    cosine_similarity, explode_tag, explode_tags, ExpandedTag, ExpansionMode, TagEmbeddingIndex,
-    TagExpansionConfig, TagIndex,
+    ExpandedTag, ExpansionMode, TagEmbeddingIndex, TagExpansionConfig, TagIndex, cosine_similarity,
+    explode_tag, explode_tags,
 };
 pub use crate::traits::{
     BoxedEmbedder, BoxedReranker, DynEmbeddingBackend, DynRerank, EmbeddingBackend, Rerank,
 };
-pub use crate::search::{CandidateScore, ChunkUpdate, IndexSet};
 pub use crate::types::{
     BoostSpec, ChunkMetadata, DocumentChunk, FilterExpr, HealthStatus, QuerySpec, RagConfig,
     RerankedResult, RerankerCandidate, Resolution, ResolutionSpec, SearchResult, SearchScope,

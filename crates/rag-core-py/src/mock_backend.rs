@@ -113,7 +113,11 @@ mod tests {
         let emb = backend.hash_to_embedding("test");
 
         let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.001, "Expected unit norm, got {}", norm);
+        assert!(
+            (norm - 1.0).abs() < 0.001,
+            "Expected unit norm, got {}",
+            norm
+        );
     }
 
     #[test]

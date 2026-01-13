@@ -187,24 +187,18 @@ impl RelationIndex {
         let is_self_relationship = source == target;
 
         // Add outgoing edge from source to target
-        self.outgoing
-            .entry(source.clone())
-            .or_default()
-            .push(Edge {
-                document: target.clone(),
-                rel_type,
-                confidence,
-            });
+        self.outgoing.entry(source.clone()).or_default().push(Edge {
+            document: target.clone(),
+            rel_type,
+            confidence,
+        });
 
         // Add incoming edge from target to source
-        self.incoming
-            .entry(target.clone())
-            .or_default()
-            .push(Edge {
-                document: source.clone(),
-                rel_type,
-                confidence,
-            });
+        self.incoming.entry(target.clone()).or_default().push(Edge {
+            document: source.clone(),
+            rel_type,
+            confidence,
+        });
 
         // For undirected relationships, also add the reverse
         // (but skip for self-relationships to avoid duplicate edges)
@@ -321,7 +315,11 @@ impl RelationIndex {
     ) -> bool {
         self.outgoing
             .get(source)
-            .map(|edges| edges.iter().any(|e| e.document == target && e.rel_type == rel_type))
+            .map(|edges| {
+                edges
+                    .iter()
+                    .any(|e| e.document == target && e.rel_type == rel_type)
+            })
             .unwrap_or(false)
     }
 
@@ -653,7 +651,12 @@ mod tests {
         let mut index = RelationIndex::new();
 
         index.add(Relationship::new("a", "b", RelationshipType::Citation, 0.9));
-        index.add(Relationship::new("a", "b", RelationshipType::Citation, 0.95));
+        index.add(Relationship::new(
+            "a",
+            "b",
+            RelationshipType::Citation,
+            0.95,
+        ));
 
         // Both edges should be present
         let outgoing = index.outgoing("a");

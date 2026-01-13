@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo bench -p rag-core`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use rag_core::IndexSet;
 
 /// Generate a deterministic embedding from an index.
@@ -115,5 +115,10 @@ fn bench_apply_batch(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_search_candidates, bench_add_chunk, bench_apply_batch);
+criterion_group!(
+    benches,
+    bench_search_candidates,
+    bench_add_chunk,
+    bench_apply_batch
+);
 criterion_main!(benches);

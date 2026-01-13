@@ -11,10 +11,10 @@ use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
 use tokio::sync::mpsc;
 
+use super::MAX_TOP_K;
+use super::formatting::format_search_results;
 use super::models::{CalibrateRerankerRequest, GetJobStatusRequest, SearchRequest};
 use super::responses::{JobStatusResponse, ReindexResponse};
-use super::formatting::format_search_results;
-use super::MAX_TOP_K;
 
 #[derive(Clone)]
 pub(crate) struct RagMcpServer {
@@ -289,7 +289,9 @@ impl ServerHandler for RagMcpServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some("A Rust-based RAG server for document search and analysis.".to_string()),
+            instructions: Some(
+                "A Rust-based RAG server for document search and analysis.".to_string(),
+            ),
         }
     }
 }

@@ -234,7 +234,11 @@ async fn test_worker_completes_job_with_corrupt_pdf() {
 
         if current_job.status == JobStatus::Completed {
             assert!(
-                current_job.error.as_deref().unwrap_or("").contains("corrupt.pdf"),
+                current_job
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("corrupt.pdf"),
                 "Expected job error summary to mention corrupt.pdf"
             );
             break;

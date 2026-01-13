@@ -10,7 +10,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use pyo3::types::PyDict;
-use rag_core::{EmbeddingBackend, EmbeddingError, Rerank, RerankError, RerankedResult, RerankerCandidate};
+use rag_core::{
+    EmbeddingBackend, EmbeddingError, Rerank, RerankError, RerankedResult, RerankerCandidate,
+};
 
 /// Default number of concurrent Python embedding calls.
 #[allow(dead_code)]
@@ -153,7 +155,10 @@ impl PyEmbeddingBackendAdapter {
     }
 
     /// Call Python embed method and handle sync/async.
-    async fn call_embed(inner: Arc<AdapterInner>, text: String) -> Result<Vec<f32>, EmbeddingError> {
+    async fn call_embed(
+        inner: Arc<AdapterInner>,
+        text: String,
+    ) -> Result<Vec<f32>, EmbeddingError> {
         // Acquire semaphore permit
         let _permit = inner
             .semaphore
@@ -213,7 +218,9 @@ impl PyEmbeddingBackendAdapter {
                 let future = pyo3_async_runtimes::tokio::into_future(result)?;
                 Ok(EmbedBatchCallResult::Async(Box::pin(future)))
             } else {
-                Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(&result)?))
+                Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(
+                    &result,
+                )?))
             }
         })
         .map_err(pyerr_to_embedding_error)?;
@@ -477,7 +484,10 @@ fn candidates_to_py<'py>(
 }
 
 /// Extract reranked results from Python result.
-fn extract_rerank_results(_py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<Vec<RerankedResult>> {
+fn extract_rerank_results(
+    _py: Python<'_>,
+    result: &Bound<'_, PyAny>,
+) -> PyResult<Vec<RerankedResult>> {
     let list = result.downcast::<PyList>()?;
     let mut results = Vec::with_capacity(list.len());
 

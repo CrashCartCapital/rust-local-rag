@@ -5,7 +5,7 @@
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -645,7 +645,11 @@ mod tests {
         let mock_backend = MockEmbeddingBackend::new(dimension);
         let boxed_embedder: BoxedEmbedder = Arc::new(mock_backend);
         let boxed_reranker: BoxedReranker = Arc::new(()) as BoxedReranker;
-        rag_core::RagEngine::with_optional_reranker(boxed_embedder, Some(boxed_reranker), rag_core::RagConfig::default())
+        rag_core::RagEngine::with_optional_reranker(
+            boxed_embedder,
+            Some(boxed_reranker),
+            rag_core::RagConfig::default(),
+        )
     }
 
     #[test]
