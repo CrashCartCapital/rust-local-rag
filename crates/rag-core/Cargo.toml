@@ -16,9 +16,13 @@ publish = true
 default = []
 persistence = ["dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
+# Enable object-safe dynamic dispatch traits (DynEmbeddingBackend, DynRerank)
+dyn-backend = []
 
 [dependencies]
 regex = "1"
+# BoxFuture for object-safe async traits
+futures-core = "0.3"
 srx = { version = "0.1", features = ["from_xml"] }
 thiserror = "2"
 tracing = { version = "0.1", optional = true }

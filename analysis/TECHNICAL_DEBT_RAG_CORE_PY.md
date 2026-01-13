@@ -110,22 +110,33 @@ This document tracks technical debt identified during implementation of rag-core
 |-------|-------|
 | **ID** | TD-7 |
 | **Area** | Trait object design |
-| **Files** | `crates/rag-core/src/traits.rs`, `crates/rag-core-py/src/adapters.rs` |
+| **Files** | `crates/rag-core/src/traits.rs` |
 | **Priority** | High |
-| **Status** | Open |
+| **Status** | **Resolved** |
 
 **Issue:** The `EmbeddingBackend` trait in rag-core uses RPITIT (`impl Future<Output = ...>`) for the `embed()` method, which makes it non-object-safe. This prevents using `Arc<dyn EmbeddingBackend>` directly.
 
 **Impact:** Cannot create a single `PyRagEngine` type that works with arbitrary Python embedding backends without resolving object-safety.
 
-**Recommendation Options:**
-1. Add `#[async_trait]` to rag-core traits (additive but changes impl signature)
-2. Create object-safe bridge traits in rag-core-py using `BoxFuture`
-3. Use newtype wrapper pattern with internal `Arc<dyn DynBackend>`
+**Resolution:** Implemented dual-trait pattern (additive, non-breaking):
 
-**Current Workaround:** Phase 2 uses concrete `MockEmbeddingBackend` type. Full Python backend integration deferred to Phase 3.
+1. **Added `DynEmbeddingBackend` trait** - Object-safe version using explicit `BoxFuture<'a, ...>` returns
+2. **Added `DynRerank` trait** - Object-safe version of `Rerank` trait
+3. **Blanket impls**: `impl<T: EmbeddingBackend> DynEmbeddingBackend for T` - automatic conversion
+4. **Reverse impls**: `impl EmbeddingBackend for Arc<dyn DynEmbeddingBackend>` - enables `BoxedEmbedder` with `RagEngine`
+5. **Type aliases**: `BoxedEmbedder`, `BoxedReranker` for convenience
 
-**PRD Reference:** PRD Section 2.2.1 assumes trait objects will work; needs update.
+**Key Design Decisions:**
+- Used explicit `BoxFuture` instead of `#[async_trait]` macro (per Codex recommendation - cleaner, no proc-macro)
+- Reverse impl clones `Arc` and owned strings to create `'static` futures (acceptable overhead for dynamic dispatch path)
+- Zero breaking changes to existing `EmbeddingBackend`/`Rerank` users
+
+**Validation:** CRASH analysis + Codex + Gemini Pro review approved the approach.
+
+**Files Changed:**
+- `crates/rag-core/Cargo.toml` - Added `futures-core` dependency
+- `crates/rag-core/src/traits.rs` - Added ~100 lines for new traits, blanket impls, reverse impls
+- `crates/rag-core/src/lib.rs` - Exported new types
 
 ---
 
@@ -134,8 +145,8 @@ This document tracks technical debt identified during implementation of rag-core
 | Phase | Open | Resolved | Total |
 |-------|------|----------|-------|
 | Phase 1 | 5 | 1 | 6 |
-| Phase 2 | 1 | 0 | 1 |
-| **Total** | **6** | **1** | **7** |
+| Phase 2 | 0 | 1 | 1 |
+| **Total** | **5** | **2** | **7** |
 
 ---
 
@@ -144,3 +155,4 @@ This document tracks technical debt identified during implementation of rag-core
 - **2025-01-13:** Phase 1 gate review - 6 items identified (TD-1 through TD-6)
 - **2025-01-13:** TD-6 resolved - Updated .gitignore for Python artifacts
 - **2025-01-13:** Phase 2 start - TD-7 identified (RPITIT object-safety issue)
+- **2025-01-13:** TD-7 resolved - Implemented dual-trait pattern with DynEmbeddingBackend/DynRerank
