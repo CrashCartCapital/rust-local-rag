@@ -394,6 +394,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     where
         R: Rerank,
     {
+        #[cfg(feature = "tracing")]
+        let start_total = std::time::Instant::now();
+
         if self.chunks.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::debug!("Search internal: index empty");
@@ -402,9 +405,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let top_k = top_k.max(1);
 
+        #[cfg(feature = "tracing")]
+        let start_embed = std::time::Instant::now();
         let mut query_embedding = self.backend.embed(query).await?;
         crate::search::normalize(&mut query_embedding);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            "Query embedding generated in {:?}",
+            start_embed.elapsed()
+        );
 
+        #[cfg(feature = "tracing")]
+        let start_retrieval = std::time::Instant::now();
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
             Some(index) => Box::new(
                 index
@@ -419,6 +431,13 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
         candidate_ids.extend(lexical_map.keys().cloned());
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            "Retrieval (ANN + Lexical) completed in {:?} with {} unique candidates",
+            start_retrieval.elapsed(),
+            candidate_ids.len()
+        );
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
@@ -498,6 +517,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        #[cfg(feature = "tracing")]
+        let start_rerank = std::time::Instant::now();
         let reranked: Vec<RerankedResult> = match &self.reranker {
             Some(reranker) => reranker
                 .rerank(query, &reranker_inputs)
@@ -509,6 +530,14 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 }),
             None => Vec::new(),
         };
+        #[cfg(feature = "tracing")]
+        if self.reranker.is_some() {
+            tracing::debug!(
+                "Reranking completed in {:?} for {} candidates",
+                start_rerank.elapsed(),
+                reranker_inputs.len()
+            );
+        }
 
         let mut ordered_results = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -601,7 +630,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            "Search internal finished with {} results",
+            "Search internal finished in {:?} with {} results",
+            start_total.elapsed(),
             ordered_results.len()
         );
 
