@@ -14,17 +14,22 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "persistence")]
+use serde::{Deserialize, Serialize};
+
 /// Type alias for document names (consistent with existing codebase).
 pub type DocumentName = String;
 
 /// Types of relationships between documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "persistence", derive(Serialize, Deserialize))]
 pub enum RelationshipType {
     /// Document A cites/references Document B (directed).
     Citation,
     /// Document B supersedes Document A (directed).
     Version,
     /// Documents are semantically related (undirected).
+    #[default]
     Related,
     /// Document B is a child of Document A (directed).
     ParentChild,
@@ -37,11 +42,6 @@ impl RelationshipType {
     }
 }
 
-impl Default for RelationshipType {
-    fn default() -> Self {
-        RelationshipType::Related
-    }
-}
 
 /// A relationship between two documents.
 #[derive(Debug, Clone, PartialEq)]
@@ -187,24 +187,18 @@ impl RelationIndex {
         let is_self_relationship = source == target;
 
         // Add outgoing edge from source to target
-        self.outgoing
-            .entry(source.clone())
-            .or_default()
-            .push(Edge {
-                document: target.clone(),
-                rel_type,
-                confidence,
-            });
+        self.outgoing.entry(source.clone()).or_default().push(Edge {
+            document: target.clone(),
+            rel_type,
+            confidence,
+        });
 
         // Add incoming edge from target to source
-        self.incoming
-            .entry(target.clone())
-            .or_default()
-            .push(Edge {
-                document: source.clone(),
-                rel_type,
-                confidence,
-            });
+        self.incoming.entry(target.clone()).or_default().push(Edge {
+            document: source.clone(),
+            rel_type,
+            confidence,
+        });
 
         // For undirected relationships, also add the reverse
         // (but skip for self-relationships to avoid duplicate edges)
@@ -321,7 +315,11 @@ impl RelationIndex {
     ) -> bool {
         self.outgoing
             .get(source)
-            .map(|edges| edges.iter().any(|e| e.document == target && e.rel_type == rel_type))
+            .map(|edges| {
+                edges
+                    .iter()
+                    .any(|e| e.document == target && e.rel_type == rel_type)
+            })
             .unwrap_or(false)
     }
 
@@ -653,7 +651,12 @@ mod tests {
         let mut index = RelationIndex::new();
 
         index.add(Relationship::new("a", "b", RelationshipType::Citation, 0.9));
-        index.add(Relationship::new("a", "b", RelationshipType::Citation, 0.95));
+        index.add(Relationship::new(
+            "a",
+            "b",
+            RelationshipType::Citation,
+            0.95,
+        ));
 
         // Both edges should be present
         let outgoing = index.outgoing("a");

@@ -16,10 +16,49 @@ pub type PreparedDocument = rag_core::engine::PreparedDocument;
 // Helper function to get configurable batch size from environment.
 // Default to 32 for power-efficient operation (down from 128 for throughput).
 fn get_batch_size() -> usize {
-    std::env::var("EMBEDDING_BATCH_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(32)
+    parse_batch_size(std::env::var("EMBEDDING_BATCH_SIZE").ok())
+}
+
+fn parse_batch_size(input: Option<String>) -> usize {
+    const DEFAULT_BATCH_SIZE: usize = 32;
+    const MIN_BATCH_SIZE: usize = 1;
+    const MAX_BATCH_SIZE: usize = 1024;
+
+    let Some(s) = input else {
+        return DEFAULT_BATCH_SIZE;
+    };
+
+    let val = match s.parse::<usize>() {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                "Invalid EMBEDDING_BATCH_SIZE format '{}', using default {}",
+                s,
+                DEFAULT_BATCH_SIZE
+            );
+            return DEFAULT_BATCH_SIZE;
+        }
+    };
+
+    if val < MIN_BATCH_SIZE {
+        tracing::warn!(
+            "EMBEDDING_BATCH_SIZE {} is too small, clamping to min {}",
+            val,
+            MIN_BATCH_SIZE
+        );
+        return MIN_BATCH_SIZE;
+    }
+
+    if val > MAX_BATCH_SIZE {
+        tracing::warn!(
+            "EMBEDDING_BATCH_SIZE {} is too large, clamping to max {}",
+            val,
+            MAX_BATCH_SIZE
+        );
+        return MAX_BATCH_SIZE;
+    }
+
+    val
 }
 
 /// Core RAG engine for the server binary.
@@ -523,5 +562,34 @@ impl ResolvedWeights {
             reranker: resolve_weight(weights.and_then(|w| w.reranker), get_reranker_weight()),
             initial: resolve_weight(weights.and_then(|w| w.initial), get_initial_score_weight()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_batch_size() {
+        // Default
+        assert_eq!(parse_batch_size(None), 32);
+
+        // Valid
+        assert_eq!(parse_batch_size(Some("64".to_string())), 64);
+        assert_eq!(parse_batch_size(Some("1".to_string())), 1);
+
+        // Invalid format -> Default
+        assert_eq!(parse_batch_size(Some("abc".to_string())), 32);
+        assert_eq!(parse_batch_size(Some("".to_string())), 32);
+
+        // Clamping min
+        assert_eq!(parse_batch_size(Some("0".to_string())), 1);
+
+        // Clamping max
+        assert_eq!(parse_batch_size(Some("2048".to_string())), 1024);
+        assert_eq!(parse_batch_size(Some("1025".to_string())), 1024);
+
+        // Signed inputs (parse::<usize> fails for negative, so default)
+        assert_eq!(parse_batch_size(Some("-1".to_string())), 32);
     }
 }

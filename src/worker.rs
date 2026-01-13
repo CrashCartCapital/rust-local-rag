@@ -2,8 +2,8 @@ use crate::job_manager::{JobManager, JobStatus};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
 use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
@@ -283,7 +283,10 @@ impl WorkerSupervisor {
             match result {
                 Ok(outcome) => {
                     let error = outcome.failure_summary();
-                    if let Err(e) = job_manager.update_status(&job_id, JobStatus::Completed, error).await {
+                    if let Err(e) = job_manager
+                        .update_status(&job_id, JobStatus::Completed, error)
+                        .await
+                    {
                         tracing::error!("Failed to mark job {} as completed: {}", job_id, e);
                     } else {
                         tracing::info!(
@@ -358,8 +361,13 @@ impl WorkerSupervisor {
         progress_state: &mut ProgressState,
     ) -> Result<()> {
         progress_state.stage = Stage::Finalize;
-        Self::emit_logger(progress_logger, progress_state, "stage", Some("finalizing reindex"))
-            .await;
+        Self::emit_logger(
+            progress_logger,
+            progress_state,
+            "stage",
+            Some("finalizing reindex"),
+        )
+        .await;
 
         {
             let mut engine = TimedWriteLockGuard::acquire(rag_engine, "finalize_reindex").await;
@@ -408,31 +416,33 @@ impl WorkerSupervisor {
             let mut progress_state_clone = progress_state.clone();
             let current_idx = idx;
 
-            let mut batch_callback =
-                |batch_idx: usize, batch_count: usize, total_chunks: usize, chunks_in_batch: usize| {
-                    progress_state_clone.current_batch = Some(batch_idx);
-                    progress_state_clone.total_batches = Some(batch_count);
-                    progress_state_clone.current_chunks = Some(total_chunks);
-                    progress_state_clone.last_doc = Some(filename_clone.clone());
-                    progress_state_clone.done_docs = (current_idx + 1) as i64;
+            let mut batch_callback = |batch_idx: usize,
+                                      batch_count: usize,
+                                      total_chunks: usize,
+                                      chunks_in_batch: usize| {
+                progress_state_clone.current_batch = Some(batch_idx);
+                progress_state_clone.total_batches = Some(batch_count);
+                progress_state_clone.current_chunks = Some(total_chunks);
+                progress_state_clone.last_doc = Some(filename_clone.clone());
+                progress_state_clone.done_docs = (current_idx + 1) as i64;
 
-                    if let Some(ref logger) = logger_clone {
-                        let batch_progress = crate::progress_logger::BatchProgress {
-                            document_name: filename_clone.clone(),
-                            batch_index: batch_idx,
-                            batch_count,
-                            chunks_in_batch,
-                            total_chunks,
-                        };
-                        let logger = logger.clone();
-                        let state = progress_state_clone.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
-                                tracing::error!("Failed to log batch progress: {}", e);
-                            }
-                        });
-                    }
-                };
+                if let Some(ref logger) = logger_clone {
+                    let batch_progress = crate::progress_logger::BatchProgress {
+                        document_name: filename_clone.clone(),
+                        batch_index: batch_idx,
+                        batch_count,
+                        chunks_in_batch,
+                        total_chunks,
+                    };
+                    let logger = logger.clone();
+                    let state = progress_state_clone.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = logger.emit_batch(&state, &batch_progress).await {
+                            tracing::error!("Failed to log batch progress: {}", e);
+                        }
+                    });
+                }
+            };
 
             let prepared = {
                 let engine = rag_engine.read().await;
@@ -481,8 +491,13 @@ impl WorkerSupervisor {
 
         let mut progress_state = ProgressState::new(job_id.to_string(), total_docs);
         let discovery_note = format!("discovered {total_docs} PDFs");
-        Self::emit_logger(&progress_logger, &progress_state, "stage", Some(discovery_note.as_str()))
-            .await;
+        Self::emit_logger(
+            &progress_logger,
+            &progress_state,
+            "stage",
+            Some(discovery_note.as_str()),
+        )
+        .await;
 
         {
             let engine = rag_engine.read().await;

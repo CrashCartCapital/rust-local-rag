@@ -232,10 +232,20 @@ mod tests {
 
     #[test]
     fn test_validation_kind_display() {
-        assert_eq!(ValidationKind::NaN.to_string(), "embedding contains NaN values");
-        assert_eq!(ValidationKind::EmptyText.to_string(), "text is empty or whitespace-only");
         assert_eq!(
-            ValidationKind::DimensionMismatch { expected: 384, got: 768 }.to_string(),
+            ValidationKind::NaN.to_string(),
+            "embedding contains NaN values"
+        );
+        assert_eq!(
+            ValidationKind::EmptyText.to_string(),
+            "text is empty or whitespace-only"
+        );
+        assert_eq!(
+            ValidationKind::DimensionMismatch {
+                expected: 384,
+                got: 768
+            }
+            .to_string(),
             "dimension mismatch: expected 384, got 768"
         );
     }
@@ -244,7 +254,10 @@ mod tests {
     fn test_engine_error_persistence_display() {
         let err = EngineError::save_failed(
             PathBuf::from("/tmp/test.json"),
-            PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied")),
+            PersistenceError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "access denied",
+            )),
         );
         let msg = err.to_string();
         assert!(msg.contains("save"));
@@ -293,13 +306,19 @@ mod tests {
     #[test]
     fn test_validation_kind_pattern_matching() {
         // Verify errors are machine-actionable via pattern matching
-        let err = EngineError::validation("chunk-1", ValidationKind::DimensionMismatch {
-            expected: 384,
-            got: 768,
-        });
+        let err = EngineError::validation(
+            "chunk-1",
+            ValidationKind::DimensionMismatch {
+                expected: 384,
+                got: 768,
+            },
+        );
 
         match &err {
-            EngineError::Validation { kind: ValidationKind::DimensionMismatch { expected, got }, .. } => {
+            EngineError::Validation {
+                kind: ValidationKind::DimensionMismatch { expected, got },
+                ..
+            } => {
                 assert_eq!(*expected, 384);
                 assert_eq!(*got, 768);
             }

@@ -312,7 +312,10 @@ mod tests {
             .with_created_at("2026-01-12T10:00:00Z");
 
         assert_eq!(collection.id.as_str(), "legal");
-        assert_eq!(collection.description, Some("Contracts and agreements".into()));
+        assert_eq!(
+            collection.description,
+            Some("Contracts and agreements".into())
+        );
         assert_eq!(collection.created_at, "2026-01-12T10:00:00Z");
     }
 
