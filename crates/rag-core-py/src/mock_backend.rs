@@ -3,8 +3,7 @@
 //! Provides deterministic embeddings based on text hash for reproducible tests.
 
 use rag_core::{EmbeddingBackend, EmbeddingError};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Sha256, Digest};
 
 /// A mock embedding backend that returns deterministic embeddings.
 ///
@@ -28,9 +27,14 @@ impl MockEmbeddingBackend {
 
     /// Generate deterministic embedding from text hash.
     fn hash_to_embedding(&self, text: &str) -> Vec<f32> {
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        let hash = hasher.finish();
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        let result = hasher.finalize();
+
+        // Use first 8 bytes as seed
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&result[0..8]);
+        let hash = u64::from_le_bytes(bytes);
 
         // Generate deterministic values from hash
         let mut embedding = Vec::with_capacity(self.dimension);
@@ -120,5 +124,20 @@ mod tests {
     fn test_model_id() {
         let backend = MockEmbeddingBackend::new(384);
         assert_eq!(backend.model_id(), "mock-384");
+    }
+
+    #[test]
+    fn test_golden_value() {
+        let backend = MockEmbeddingBackend::new(4);
+        let emb = backend.hash_to_embedding("hello world");
+
+        // Expected value derived from running with sha2 hashing:
+        // [-0.4005266, -0.57599217, -0.12500009, -0.7015601]
+        let expected = vec![-0.4005266, -0.57599217, -0.12500009, -0.7015601];
+
+        assert_eq!(emb.len(), expected.len());
+        for (a, b) in emb.iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-6, "Expected {}, got {}", b, a);
+        }
     }
 }
