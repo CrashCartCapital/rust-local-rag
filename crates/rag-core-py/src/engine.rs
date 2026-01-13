@@ -85,6 +85,17 @@ macro_rules! catch_panic {
 ///
 /// engine = RagEngine.create("/tmp/index", backend=MyEmbedder())
 /// ```
+/// Construction mode for pickle support.
+enum ConstructionMode {
+    /// Mock backend with specified dimension
+    Mock { dimension: usize },
+    /// Python backend (stores references for pickle reconstruction)
+    PythonBackend {
+        backend: Py<PyAny>,
+        reranker: Option<Py<PyAny>>,
+    },
+}
+
 #[pyclass(name = "RagEngine", module = "ragcore")]
 pub struct PyRagEngine {
     /// Directory for storing the index
@@ -93,6 +104,8 @@ pub struct PyRagEngine {
     /// Using Arc<tokio::sync::Mutex> to support both sync (blocking_lock)
     /// and async (.lock().await) access patterns.
     engine: Arc<Mutex<DynamicEngine>>,
+    /// How the engine was constructed (for pickle support)
+    construction_mode: ConstructionMode,
 }
 
 #[pymethods]
@@ -156,9 +169,16 @@ impl PyRagEngine {
 
             let engine = rag_core::RagEngine::with_reranker(boxed_embedder, boxed_reranker);
 
+            // Store references for pickle reconstruction
+            let construction_mode = ConstructionMode::PythonBackend {
+                backend: backend.clone().unbind(),
+                reranker: reranker.map(|r| r.clone().unbind()),
+            };
+
             Ok(Self {
                 index_dir: PathBuf::from(index_dir),
                 engine: Arc::new(Mutex::new(engine)),
+                construction_mode,
             })
         })
     }
@@ -197,6 +217,7 @@ impl PyRagEngine {
             Ok(Self {
                 index_dir: PathBuf::from(index_dir),
                 engine: Arc::new(Mutex::new(engine)),
+                construction_mode: ConstructionMode::Mock { dimension },
             })
         })
     }
@@ -566,6 +587,39 @@ impl PyRagEngine {
     #[getter]
     fn index_dir(&self) -> String {
         self.index_dir.to_string_lossy().to_string()
+    }
+
+    /// Pickle support via __reduce__.
+    ///
+    /// Returns (callable, args) tuple that reconstructs the engine.
+    /// For mock backends: (RagEngine.create_mock, (index_dir, dimension))
+    /// For Python backends: (RagEngine.create, (index_dir, backend, reranker))
+    ///
+    /// Note: Python backends must themselves be picklable for this to work.
+    /// If the backend is not picklable, pickle.dumps() will raise.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        let cls = py.get_type::<Self>();
+        let index_dir = self.index_dir.to_string_lossy().to_string();
+
+        match &self.construction_mode {
+            ConstructionMode::Mock { dimension } => {
+                // Return (RagEngine.create_mock, (index_dir, dimension))
+                let callable = cls.getattr("create_mock")?;
+                let args = (index_dir, *dimension).into_pyobject(py)?;
+                Ok((callable, args.into_any()))
+            }
+            ConstructionMode::PythonBackend { backend, reranker } => {
+                // Return (RagEngine.create, (index_dir, backend, reranker))
+                let callable = cls.getattr("create")?;
+                let args = (
+                    index_dir,
+                    backend.clone_ref(py),
+                    reranker.as_ref().map(|r| r.clone_ref(py)),
+                )
+                    .into_pyobject(py)?;
+                Ok((callable, args.into_any()))
+            }
+        }
     }
 
     fn __repr__(&self) -> String {

@@ -24,7 +24,12 @@ classifiers = [
     "Topic :: Text Processing",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["rag", "retrieval", "embeddings", "search", "nlp", "rust"]
+keywords = ["rag", "retrieval", "embeddings", "search", "nlp", "rust", "semantic-search", "vector-search"]
+
+[project.urls]
+Homepage = "https://github.com/ryanpappal/rust-local-rag"
+Repository = "https://github.com/ryanpappal/rust-local-rag"
+Documentation = "https://github.com/ryanpappal/rust-local-rag/tree/main/crates/rag-core-py"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
