@@ -110,9 +110,7 @@ fn parse_env_f64(var: &'static str) -> Result<Option<f64>, ConfigError> {
     }
 }
 
-fn parse_env_nonzero_usize(
-    var: &'static str,
-) -> Result<Option<NonZeroUsize>, ConfigError> {
+fn parse_env_nonzero_usize(var: &'static str) -> Result<Option<NonZeroUsize>, ConfigError> {
     match std::env::var(var) {
         Ok(val) => {
             let parsed = val.parse::<usize>().map_err(|e| ConfigError {
@@ -120,11 +118,13 @@ fn parse_env_nonzero_usize(
                 value: val.clone(),
                 message: e.to_string(),
             })?;
-            NonZeroUsize::new(parsed).ok_or_else(|| ConfigError {
-                var,
-                value: val,
-                message: "must be > 0".to_string(),
-            }).map(Some)
+            NonZeroUsize::new(parsed)
+                .ok_or_else(|| ConfigError {
+                    var,
+                    value: val,
+                    message: "must be > 0".to_string(),
+                })
+                .map(Some)
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(e) => Err(ConfigError {
@@ -134,4 +134,3 @@ fn parse_env_nonzero_usize(
         }),
     }
 }
-

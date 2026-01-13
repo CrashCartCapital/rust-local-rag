@@ -7,8 +7,8 @@ use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
 use tokio::sync::mpsc;
 
-mod http;
 mod formatting;
+mod http;
 mod models;
 mod responses;
 mod tools;

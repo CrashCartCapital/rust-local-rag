@@ -1,5 +1,5 @@
-use rust_local_rag::rag_engine::RagEngine;
 use rust_local_rag::Config;
+use rust_local_rag::rag_engine::RagEngine;
 use serial_test::serial;
 use std::io::Write;
 use wiremock::matchers::{method, path};
