@@ -78,10 +78,15 @@ impl EmbeddingBackend for SimpleEmbedder {
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         // Simulate some work
-        println!("  [SimpleEmbedder] Computing embedding for: {}...", &text[..text.len().min(30)]);
+        println!(
+            "  [SimpleEmbedder] Computing embedding for: {}...",
+            &text[..text.len().min(30)]
+        );
 
         // Create deterministic embedding from text hash
-        let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         let mut embedding = vec![0.0f32; self.dim];
 
         for (i, val) in embedding.iter_mut().enumerate() {
@@ -127,7 +132,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\nCache entries after indexing: {}", engine.embedding_model());
+    println!(
+        "\nCache entries after indexing: {}",
+        engine.embedding_model()
+    );
 
     // Search - first call computes embedding
     println!("\nFirst search (cache miss):");

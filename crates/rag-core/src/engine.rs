@@ -756,13 +756,16 @@ where
             document_hashes: &self.document_hashes,
         };
 
-        let data = serde_json::to_string_pretty(&state)
-            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e)))?;
+        let data = serde_json::to_string_pretty(&state).map_err(|e| {
+            EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e))
+        })?;
 
-        std::fs::write(&temp_path, &data)
-            .map_err(|e| EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e)))?;
-        std::fs::rename(&temp_path, &final_path)
-            .map_err(|e| EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e)))?;
+        std::fs::write(&temp_path, &data).map_err(|e| {
+            EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e))
+        })?;
+        std::fs::rename(&temp_path, &final_path).map_err(|e| {
+            EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e))
+        })?;
         Ok(())
     }
 
@@ -792,8 +795,12 @@ where
         let legacy_path = legacy_path(data_dir.as_ref());
 
         if model_specific_path.exists() {
-            let data = std::fs::read_to_string(&model_specific_path)
-                .map_err(|e| EngineError::load_failed(&model_specific_path, crate::error::PersistenceError::Io(e)))?;
+            let data = std::fs::read_to_string(&model_specific_path).map_err(|e| {
+                EngineError::load_failed(
+                    &model_specific_path,
+                    crate::error::PersistenceError::Io(e),
+                )
+            })?;
 
             match serde_json::from_str::<PersistedState>(&data) {
                 Ok(state) => {
@@ -820,8 +827,9 @@ where
         }
 
         if legacy_path.exists() {
-            let data = std::fs::read_to_string(&legacy_path)
-                .map_err(|e| EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e)))?;
+            let data = std::fs::read_to_string(&legacy_path).map_err(|e| {
+                EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e))
+            })?;
 
             if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
                 if info.model == current_model {

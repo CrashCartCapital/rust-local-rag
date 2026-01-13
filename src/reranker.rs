@@ -240,14 +240,21 @@ Answer:"#
             }
         }
 
-        // Sort by relevance score (highest first)
+        // Sort by relevance score (highest first) with stable tie-breaking
+        Self::sort_reranked_results(&mut results);
+
+        Ok(results)
+    }
+
+    /// Sorts reranked results by relevance (descending) and then chunk_id (ascending)
+    /// to ensure deterministic ordering when scores are tied.
+    fn sort_reranked_results(results: &mut [RerankedResult]) {
         results.sort_by(|a, b| {
             b.relevance
                 .partial_cmp(&a.relevance)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
-
-        Ok(results)
     }
 
     #[instrument(skip(self, candidate), fields(chunk_id = %candidate.chunk_id))]
@@ -816,5 +823,38 @@ mod tests {
         }
 
         assert!(template.contains("Consider semantic meaning"));
+    }
+
+    #[test]
+    fn test_stable_sorting() {
+        let mut results = vec![
+            RerankedResult {
+                chunk_id: "B".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "A".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "C".to_string(),
+                relevance: 0.8,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+        ];
+
+        RerankerService::sort_reranked_results(&mut results);
+
+        assert_eq!(results[0].chunk_id, "A");
+        assert_eq!(results[0].relevance, 0.9);
+        assert_eq!(results[1].chunk_id, "B");
+        assert_eq!(results[1].relevance, 0.9);
+        assert_eq!(results[2].chunk_id, "C");
+        assert_eq!(results[2].relevance, 0.8);
     }
 }

@@ -417,7 +417,9 @@ mod tests {
                     parent_id: None,
                 },
             );
-            state.document_hashes.insert("test.pdf".to_string(), "hash123".to_string());
+            state
+                .document_hashes
+                .insert("test.pdf".to_string(), "hash123".to_string());
 
             // Save
             backend.save(&state).unwrap();
@@ -429,7 +431,10 @@ mod tests {
             assert_eq!(loaded.embedding_model_id, state.embedding_model_id);
             assert_eq!(loaded.chunks.len(), 1);
             assert!(loaded.chunks.contains_key("chunk1"));
-            assert_eq!(loaded.document_hashes.get("test.pdf"), Some(&"hash123".to_string()));
+            assert_eq!(
+                loaded.document_hashes.get("test.pdf"),
+                Some(&"hash123".to_string())
+            );
         }
 
         #[test]
@@ -469,7 +474,10 @@ mod tests {
 
             // Load should return None (graceful degradation)
             let result = backend.load().unwrap();
-            assert!(result.is_none(), "Corrupted file should return None, not error");
+            assert!(
+                result.is_none(),
+                "Corrupted file should return None, not error"
+            );
         }
 
         #[test]
@@ -570,8 +578,12 @@ mod tests {
 
             // Verify precision is maintained (within f32 limits)
             for (original, loaded) in precise_embedding.iter().zip(loaded_embedding.iter()) {
-                assert!((original - loaded).abs() < 1e-6,
-                    "Embedding precision lost: {} vs {}", original, loaded);
+                assert!(
+                    (original - loaded).abs() < 1e-6,
+                    "Embedding precision lost: {} vs {}",
+                    original,
+                    loaded
+                );
             }
         }
 
@@ -582,37 +594,43 @@ mod tests {
             // Save state for model A
             let backend_a = JsonFileBackend::new(temp_dir.path(), "model-a");
             let mut state_a = EngineState::new("model-a", 128);
-            state_a.chunks.insert("chunk-a".to_string(), DocumentChunk {
-                id: "chunk-a".to_string(),
-                document_name: "a.pdf".to_string(),
-                text: "content a".to_string(),
-                embedding: vec![1.0; 128],
-                chunk_index: 0,
-                page_number: 1,
-                section: None,
-                metadata: crate::types::ChunkMetadata::default(),
-                tags: std::collections::HashSet::new(),
-                resolution: crate::types::Resolution::default(),
-                parent_id: None,
-            });
+            state_a.chunks.insert(
+                "chunk-a".to_string(),
+                DocumentChunk {
+                    id: "chunk-a".to_string(),
+                    document_name: "a.pdf".to_string(),
+                    text: "content a".to_string(),
+                    embedding: vec![1.0; 128],
+                    chunk_index: 0,
+                    page_number: 1,
+                    section: None,
+                    metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
+                },
+            );
             backend_a.save(&state_a).unwrap();
 
             // Save state for model B
             let backend_b = JsonFileBackend::new(temp_dir.path(), "model-b");
             let mut state_b = EngineState::new("model-b", 256);
-            state_b.chunks.insert("chunk-b".to_string(), DocumentChunk {
-                id: "chunk-b".to_string(),
-                document_name: "b.pdf".to_string(),
-                text: "content b".to_string(),
-                embedding: vec![2.0; 256],
-                chunk_index: 0,
-                page_number: 1,
-                section: None,
-                metadata: crate::types::ChunkMetadata::default(),
-                tags: std::collections::HashSet::new(),
-                resolution: crate::types::Resolution::default(),
-                parent_id: None,
-            });
+            state_b.chunks.insert(
+                "chunk-b".to_string(),
+                DocumentChunk {
+                    id: "chunk-b".to_string(),
+                    document_name: "b.pdf".to_string(),
+                    text: "content b".to_string(),
+                    embedding: vec![2.0; 256],
+                    chunk_index: 0,
+                    page_number: 1,
+                    section: None,
+                    metadata: crate::types::ChunkMetadata::default(),
+                    tags: std::collections::HashSet::new(),
+                    resolution: crate::types::Resolution::default(),
+                    parent_id: None,
+                },
+            );
             backend_b.save(&state_b).unwrap();
 
             // Load each - should be isolated

@@ -32,4 +32,3 @@ pub struct CalibrateRerankerRequest {
     #[schemars(description = "Number of samples to test (default: 100)")]
     pub sample_size: Option<usize>,
 }
-
