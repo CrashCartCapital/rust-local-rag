@@ -61,4 +61,4 @@ tempfile = "3.10"
 wiremock = "0.6.5"
 
 [workspace]
-members = ["crates/rag-core"]
+members = ["crates/rag-core", "crates/rag-core-py"]

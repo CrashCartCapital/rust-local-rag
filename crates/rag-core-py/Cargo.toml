@@ -1,0 +1,30 @@
+[package]
+name = "rag-core-py"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Python bindings for rag-core RAG engine"
+readme = "README.md"
+repository = "https://github.com/ryanpappal/rust-local-rag"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# Extension module feature for building Python wheels
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+rag-core = { path = "../rag-core", features = ["persistence"] }
+pyo3 = { version = "0.23", features = ["abi3-py310"] }
+pyo3-async-runtimes = { version = "0.23", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+tempfile = "3"

@@ -23,6 +23,10 @@ __pycache__/
 *.egg-info/
 .eggs/
 *.egg
+.venv/
+.pytest_cache/
+dist/
+*.whl
 
 # IDE
 .idea/
@@ -43,7 +47,6 @@ mcp.db
 .jules/
 CODE_REVIEW_REPORT.md
 PRODUCTION_POLISHING_GUIDE.md
-analysis/
 scripts/
 docs/tracking/
 prompts/reranker_v2.txt
@@ -51,6 +54,9 @@ start-server.sh
 test_*.sh
 test_*.py
 cleanup_*.py
+
+# Exception: rag-core-py Python tests are tracked
+!crates/rag-core-py/tests/test_*.py
 frontend/node_modules
 frontend/dist
 frontend/.vite

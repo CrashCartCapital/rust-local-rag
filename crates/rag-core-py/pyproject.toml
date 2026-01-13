@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ragcore"
+version = "0.1.0"
+description = "Python bindings for rag-core RAG engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ryan Pappal" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["rag", "retrieval", "embeddings", "search", "nlp", "rust"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.maturin]
+features = ["extension-module"]
+python-source = "."
+module-name = "ragcore._native"
+strip = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
