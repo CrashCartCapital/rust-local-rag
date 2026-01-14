@@ -176,6 +176,9 @@ pub enum EngineError {
     #[error("invalid configuration: {0}")]
     Config(String),
 
+    #[error("chunking failed: {0}")]
+    Chunking(String),
+
     #[error("index synchronization error: {message}")]
     IndexSync { message: String },
 }

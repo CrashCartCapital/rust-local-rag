@@ -1,3 +1,5 @@
+use crate::EngineError;
+use crate::error::Result;
 use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
@@ -38,12 +40,12 @@ pub(crate) fn chunk_text(
     text: &str,
     chunk_tokens: usize,
     sentence_overlap: usize,
-) -> Vec<ChunkFragment> {
-    let sentences = extract_sentences(text);
+) -> Result<Vec<ChunkFragment>> {
+    let sentences = extract_sentences(text)?;
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut window: Vec<usize> = Vec::new();
@@ -80,7 +82,7 @@ pub(crate) fn chunk_text(
         sentences.len()
     );
 
-    fragments
+    Ok(fragments)
 }
 
 fn finalize_chunk(
@@ -154,8 +156,8 @@ fn finalize_chunk(
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
-    let splitter = sentence_splitter();
+fn extract_sentences(text: &str) -> Result<Vec<SentenceInfo>> {
+    let splitter = sentence_splitter()?;
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
 
@@ -244,7 +246,7 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     #[cfg(feature = "tracing")]
     tracing::trace!("Extracted {} sentences", sentences.len());
 
-    sentences
+    Ok(sentences)
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -340,13 +342,19 @@ fn approximate_token_count(value: &str) -> usize {
     char_estimate.max(word_estimate).max(1)
 }
 
-fn sentence_splitter() -> &'static srx::Rules {
-    static SPLITTER: OnceLock<srx::Rules> = OnceLock::new();
-    SPLITTER.get_or_init(|| {
+fn sentence_splitter() -> Result<&'static srx::Rules> {
+    static SPLITTER: OnceLock<std::result::Result<srx::Rules, String>> = OnceLock::new();
+    let result = SPLITTER.get_or_init(|| {
         const SRX_XML: &str = include_str!("../../../data/segment.srx");
-        let srx = srx::SRX::from_str(SRX_XML).expect("valid SRX rules from embedded segment.srx");
-        srx.language_rules("en")
-    })
+        srx::SRX::from_str(SRX_XML)
+            .map_err(|e| e.to_string())
+            .map(|srx| srx.language_rules("en"))
+    });
+
+    match result {
+        Ok(rules) => Ok(rules),
+        Err(e) => Err(EngineError::Chunking(e.clone())),
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +365,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text).unwrap();
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -370,7 +378,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text).unwrap();
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -395,7 +403,7 @@ mod tests {
     #[test]
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
-        let chunks = chunk_text(text, 1, 0);
+        let chunks = chunk_text(text, 1, 0).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
