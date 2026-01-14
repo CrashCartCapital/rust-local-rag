@@ -22,6 +22,8 @@ impl Default for Config {
     }
 }
 
+const MAX_EMBEDDING_CACHE_SIZE: usize = 10_000;
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
@@ -30,6 +32,16 @@ impl Config {
             config.embedding_timeout = Duration::from_secs(timeout_secs);
         }
         if let Some(cache_size) = parse_env_nonzero_usize("RAG_EMBEDDING_CACHE_SIZE")? {
+            if cache_size.get() > MAX_EMBEDDING_CACHE_SIZE {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_CACHE_SIZE",
+                    value: cache_size.to_string(),
+                    message: format!(
+                        "exceeds maximum allowed size of {}",
+                        MAX_EMBEDDING_CACHE_SIZE
+                    ),
+                });
+            }
             config.embedding_cache_size = cache_size;
         }
 
@@ -132,5 +144,55 @@ fn parse_env_nonzero_usize(var: &'static str) -> Result<Option<NonZeroUsize>, Co
             value: String::new(),
             message: e.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_cache_size_parsing() {
+        // Valid case
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "500");
+        }
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.embedding_cache_size.get(), 500);
+
+        // Invalid: too large
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "10001");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(err.message.contains("exceeds maximum allowed size"));
+
+        // Invalid: non-number
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "abc");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(err.message.contains("invalid digit"));
+
+        // Invalid: zero
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "0");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(err.message.contains("must be > 0"));
+
+        // Invalid: negative
+        unsafe {
+            std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "-5");
+        }
+        let err = Config::from_env().unwrap_err();
+        assert!(err.message.contains("invalid digit"));
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("RAG_EMBEDDING_CACHE_SIZE");
+        }
     }
 }
