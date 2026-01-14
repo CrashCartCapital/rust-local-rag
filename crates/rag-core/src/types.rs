@@ -235,9 +235,10 @@ fn default_page_number() -> usize {
 /// Defines which documents to search across.
 ///
 /// Used in [`QuerySpec`] to scope searches to specific documents, collections, or all.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum SearchScope {
     /// Search all indexed documents across all collections
+    #[default]
     All,
     /// Search only the specified documents (by name)
     Documents(Vec<DocumentName>),
@@ -245,12 +246,6 @@ pub enum SearchScope {
     Collection(crate::collections::CollectionId),
     /// Search across multiple collections (Phase 1)
     Multi(Vec<crate::collections::CollectionId>),
-}
-
-impl Default for SearchScope {
-    fn default() -> Self {
-        SearchScope::All
-    }
 }
 
 /// Filter expressions for document and tag-based filtering.

@@ -274,6 +274,23 @@ impl EmbeddingService {
     }
 }
 
+fn map_embedding_error(e: anyhow::Error) -> rag_core::EmbeddingError {
+    if let Some(re) = e.downcast_ref::<reqwest::Error>() {
+        if re.is_timeout() {
+            return rag_core::EmbeddingError::Timeout(std::time::Duration::ZERO);
+        }
+        if re.is_connect() {
+            return rag_core::EmbeddingError::Connection(re.to_string());
+        }
+    }
+    // Also check for our manual timeout error message from embed_texts
+    let msg = e.to_string();
+    if msg.contains("timed out") {
+        return rag_core::EmbeddingError::Timeout(std::time::Duration::ZERO);
+    }
+    rag_core::EmbeddingError::Api(msg)
+}
+
 impl rag_core::EmbeddingBackend for EmbeddingService {
     fn model_id(&self) -> &str {
         self.model_name()
@@ -282,16 +299,14 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
     async fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, rag_core::EmbeddingError> {
         self.get_query_embedding(text)
             .await
-            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+            .map_err(map_embedding_error)
     }
 
     async fn embed_batch(
         &self,
         texts: &[String],
     ) -> std::result::Result<Vec<Vec<f32>>, rag_core::EmbeddingError> {
-        self.embed_texts(texts)
-            .await
-            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+        self.embed_texts(texts).await.map_err(map_embedding_error)
     }
 
     fn dimension(&self) -> usize {

@@ -266,3 +266,165 @@ async fn test_documents_endpoint() {
 
     server_handle.abort();
 }
+
+#[tokio::test]
+#[serial]
+async fn test_search_timeout_returns_504() {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Dictionary, Document, Object, Stream};
+    use std::time::Duration;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+
+    // Mock tags endpoint (needed for init)
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                { "name": "nomic-embed-text:latest" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Mock embed for document (Hello World) - SUCCESS
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_json(serde_json::json!({
+            "model": "nomic-embed-text",
+            "input": "Hello World"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1; 768]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Mock embed for query (timeout query) - TIMEOUT
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_json(serde_json::json!({
+            "model": "nomic-embed-text",
+            "input": "timeout query"
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "embedding": vec![0.2; 768]
+                }))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config = crate::config::Config {
+        embedding_timeout: Duration::from_millis(100),
+        ..Default::default()
+    };
+
+    let embedding_service = EmbeddingService::new_with_settings(
+        mock_server.uri(),
+        "nomic-embed-text".to_string(),
+        &config,
+    )
+    .await
+    .expect("EmbeddingService init failed");
+
+    let mut rag_engine = RagEngine::new_with_embedding_service(
+        temp_dir.path().to_str().unwrap(),
+        embedding_service,
+        &config,
+    )
+    .await
+    .expect("RagEngine init failed");
+
+    // Create a minimal valid PDF
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", "Font".into()),
+        ("Subtype", "Type1".into()),
+        ("BaseFont", "Courier".into()),
+    ]));
+    let resources_id = doc.add_object(Dictionary::from_iter(vec![(
+        "Font",
+        Dictionary::from_iter(vec![("F1", font_id.into())]).into(),
+    )]));
+    let content = Content {
+        operations: vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 48.into()]),
+            Operation::new("Td", vec![100.into(), 600.into()]),
+            Operation::new("Tj", vec![Object::string_literal("Hello World")]),
+            Operation::new("ET", vec![]),
+        ],
+    };
+    let content_id = doc.add_object(Stream::new(Dictionary::new(), content.encode().unwrap()));
+    let page_id = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", "Page".into()),
+        ("Parent", pages_id.into()),
+        ("Contents", content_id.into()),
+    ]));
+    let pages = Dictionary::from_iter(vec![
+        ("Type", "Pages".into()),
+        ("Kids", vec![page_id.into()].into()),
+        ("Count", 1.into()),
+        ("Resources", resources_id.into()),
+    ]);
+    doc.objects.insert(pages_id, Object::Dictionary(pages));
+    let catalog_id = doc.add_object(Dictionary::from_iter(vec![
+        ("Type", "Catalog".into()),
+        ("Pages", pages_id.into()),
+    ]));
+    doc.trailer.set("Root", catalog_id);
+    let mut pdf_bytes = Vec::new();
+    doc.save_to(&mut pdf_bytes).unwrap();
+
+    // Add document to index
+    rag_engine
+        .add_document("test.pdf", &pdf_bytes, None)
+        .await
+        .expect("Failed to add document");
+
+    let rag_state = Arc::new(RwLock::new(rag_engine));
+    let job_manager = Arc::new(JobManager::new("sqlite::memory:").await.unwrap());
+    let (job_tx, _rx) = mpsc::channel(1);
+    let documents_dir = temp_dir.path().to_string_lossy().to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = tokio::spawn(async move {
+        super::start_mcp_server(rag_state, job_manager, job_tx, documents_dir, listener)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{}/search", port))
+        .json(&serde_json::json!({
+            "query": "timeout query",
+            "top_k": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::GATEWAY_TIMEOUT,
+        "Expected 504, got {}. Body: {}",
+        status,
+        body
+    );
+
+    server_handle.abort();
+}

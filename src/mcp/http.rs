@@ -123,6 +123,37 @@ async fn http_search(
         }
         Err(e) => {
             tracing::error!("Search error: {}", e);
+
+            if let Some(engine_error) = e.downcast_ref::<rag_core::EngineError>() {
+                match engine_error {
+                    rag_core::EngineError::Validation { .. } => {
+                        return Err(api_error(
+                            axum::http::StatusCode::BAD_REQUEST,
+                            format!("Validation error: {e}"),
+                        ));
+                    }
+                    rag_core::EngineError::Embedding(rag_core::EmbeddingError::Timeout(_)) => {
+                        return Err(api_error(
+                            axum::http::StatusCode::GATEWAY_TIMEOUT,
+                            "Embedding service timed out",
+                        ));
+                    }
+                    rag_core::EngineError::Embedding(rag_core::EmbeddingError::Connection(_)) => {
+                        return Err(api_error(
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            format!("Embedding service connection failed: {e}"),
+                        ));
+                    }
+                    rag_core::EngineError::Rerank(rag_core::RerankError::Unavailable(_)) => {
+                        return Err(api_error(
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            format!("Reranker service unavailable: {e}"),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
             Err(api_error(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Search error: {e}"),
