@@ -160,70 +160,13 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     let mut sentence_index = 0usize;
 
     for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
-        let page_number = page_idx + 1;
-        let mut last_heading: Option<String> = None;
-
-        for block in page_text.split("\n\n") {
-            let block = block.trim();
-            if block.is_empty() {
-                continue;
-            }
-
-            let lines: Vec<&str> = block.lines().collect();
-            if lines.len() == 1 && is_heading(lines[0]) {
-                last_heading = Some(lines[0].trim().to_string());
-                continue;
-            }
-
-            let mut paragraph_lines = Vec::new();
-            for line in lines {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if paragraph_lines.is_empty() && is_heading(trimmed) {
-                    last_heading = Some(trimmed.to_string());
-                    continue;
-                }
-                paragraph_lines.push(trimmed);
-            }
-
-            if paragraph_lines.is_empty() {
-                continue;
-            }
-
-            let normalized = normalize_from_parts(&paragraph_lines);
-            if normalized.is_empty() {
-                continue;
-            }
-
-            let splits: Vec<&str> = splitter
-                .split(&normalized)
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .collect();
-
-            let parts = if splits.is_empty() {
-                vec![normalized.as_str()]
-            } else {
-                splits
-            };
-
-            for part in parts {
-                let tokens = approximate_token_count(part);
-                if tokens == 0 {
-                    continue;
-                }
-                sentences.push(SentenceInfo {
-                    text: part.to_string(),
-                    tokens,
-                    page: page_number,
-                    heading: last_heading.clone(),
-                    index: sentence_index,
-                });
-                sentence_index += 1;
-            }
-        }
+        process_page(
+            page_text,
+            page_idx + 1,
+            splitter,
+            &mut sentences,
+            &mut sentence_index,
+        );
     }
 
     if sentences.is_empty() {
@@ -245,6 +188,113 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     tracing::trace!("Extracted {} sentences", sentences.len());
 
     sentences
+}
+
+fn process_page(
+    page_text: &str,
+    page_number: usize,
+    splitter: &srx::Rules,
+    sentences: &mut Vec<SentenceInfo>,
+    sentence_index: &mut usize,
+) {
+    let mut last_heading: Option<String> = None;
+
+    for block in page_text.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        process_block(
+            block,
+            page_number,
+            splitter,
+            &mut last_heading,
+            sentences,
+            sentence_index,
+        );
+    }
+}
+
+fn process_block(
+    block: &str,
+    page_number: usize,
+    splitter: &srx::Rules,
+    last_heading: &mut Option<String>,
+    sentences: &mut Vec<SentenceInfo>,
+    sentence_index: &mut usize,
+) {
+    let lines: Vec<&str> = block.lines().collect();
+    if lines.len() == 1 && is_heading(lines[0]) {
+        *last_heading = Some(lines[0].trim().to_string());
+        return;
+    }
+
+    let mut paragraph_lines = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if paragraph_lines.is_empty() && is_heading(trimmed) {
+            *last_heading = Some(trimmed.to_string());
+            continue;
+        }
+        paragraph_lines.push(trimmed);
+    }
+
+    if paragraph_lines.is_empty() {
+        return;
+    }
+
+    let normalized = normalize_from_parts(&paragraph_lines);
+    if normalized.is_empty() {
+        return;
+    }
+
+    process_paragraph(
+        &normalized,
+        page_number,
+        splitter,
+        last_heading.as_deref(),
+        sentences,
+        sentence_index,
+    );
+}
+
+fn process_paragraph(
+    text: &str,
+    page_number: usize,
+    splitter: &srx::Rules,
+    heading: Option<&str>,
+    sentences: &mut Vec<SentenceInfo>,
+    sentence_index: &mut usize,
+) {
+    let splits: Vec<&str> = splitter
+        .split(text)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    let parts = if splits.is_empty() {
+        vec![text]
+    } else {
+        splits
+    };
+
+    for part in parts {
+        let tokens = approximate_token_count(part);
+        if tokens == 0 {
+            continue;
+        }
+        sentences.push(SentenceInfo {
+            text: part.to_string(),
+            tokens,
+            page: page_number,
+            heading: heading.map(|h| h.to_string()),
+            index: *sentence_index,
+        });
+        *sentence_index += 1;
+    }
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -420,5 +470,72 @@ mod tests {
         // words=5. 5*0.9 = 4.5 -> 5.
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
+    }
+
+    #[test]
+    fn test_extract_sentences_edge_cases() {
+        // Empty text
+        assert!(extract_sentences("").is_empty());
+        assert!(extract_sentences("   ").is_empty());
+
+        // Only delimiters
+        assert!(extract_sentences("\u{c}\n\n").is_empty());
+
+        // Heading only
+        // "Title only" might be considered a sentence fallback if it's the only thing,
+        // or if it's detected as a heading it might not be emitted if there are no other sentences in the block?
+        // Let's trace the logic:
+        // process_page -> process_block ->
+        // lines.len() == 1. is_heading("Title only")?
+        // "Title only": word_count=2, caps=1, lower=8. caps < lower. word_count <= 4? Yes. uppercase >= lowercase? No.
+        // So it's NOT a heading by that rule.
+        // It should be treated as a sentence.
+        let sentences = extract_sentences("Title only\n");
+        assert!(!sentences.is_empty());
+
+        // Let's try a definite heading.
+        // "1. Introduction"
+        // word_count=2, caps=1, lower=10. HEADING_REGEX matches "^\d+\.\s".
+        // So it IS a heading.
+        let heading_sentences = extract_sentences("1. Introduction");
+        // process_block: lines.len()=1. is_heading=true. last_heading="1. Introduction". returns.
+        // No sentences added.
+        // But then fallback logic in extract_sentences sees sentences.is_empty().
+        // Fallback adds the normalized text as a single sentence.
+        assert_eq!(heading_sentences.len(), 1);
+        assert_eq!(heading_sentences[0].text, "1. Introduction");
+    }
+
+    #[test]
+    fn test_extract_sentences_complex_structure() {
+        let text = "1. Heading\n\nFirst paragraph. Second sentence.\n\n2. Next Heading\n\nAnother paragraph.";
+        let sentences = extract_sentences(text);
+
+        // 1. Heading (block 1) -> heading detected, no sentences emitted.
+        // First paragraph. Second sentence. (block 2) -> 2 sentences. last_heading="1. Heading".
+        // 2. Next Heading (block 3) -> heading detected.
+        // Another paragraph. (block 4) -> 1 sentence. last_heading="2. Next Heading".
+
+        assert_eq!(sentences.len(), 3);
+        assert_eq!(sentences[0].text, "First paragraph.");
+        assert_eq!(sentences[0].heading.as_deref(), Some("1. Heading"));
+
+        assert_eq!(sentences[1].text, "Second sentence.");
+        assert_eq!(sentences[1].heading.as_deref(), Some("1. Heading"));
+
+        assert_eq!(sentences[2].text, "Another paragraph.");
+        assert_eq!(sentences[2].heading.as_deref(), Some("2. Next Heading"));
+    }
+
+    #[test]
+    fn test_chunk_text_long_sentences() {
+        let long_sentence = "word ".repeat(100); // 100 words ~ 100 tokens (approx)
+        let text = format!("{}. {}.", long_sentence, long_sentence);
+
+        // Chunk size small enough to force split if we were splitting sentences (we aren't, we chunk by sentences)
+        // If a sentence is larger than chunk_tokens, it should still form a chunk (maybe oversized).
+        let fragments = chunk_text(&text, 50, 0);
+
+        assert_eq!(fragments.len(), 2);
     }
 }
