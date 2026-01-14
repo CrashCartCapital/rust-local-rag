@@ -669,7 +669,7 @@ Answer:"#
         let p99_idx = ((0.99 * (n - 1) as f64).round() as usize).min(n - 1);
         let p95_ms = durations_ms[p95_idx];
         let p99_ms = durations_ms[p99_idx];
-        let max_ms = *durations_ms.last().unwrap();
+        let max_ms = *durations_ms.last().unwrap_or(&0.0);
 
         let stats = CalibrationStats {
             mean_ms,
