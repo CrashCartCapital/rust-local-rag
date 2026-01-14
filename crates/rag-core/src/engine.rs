@@ -995,4 +995,31 @@ mod tests {
             "Should skip unchanged documents when hash matches"
         );
     }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn test_load_from_dir_handles_corruption_gracefully() {
+        use crate::persistence::index_path;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut engine = RagEngine::new(MockBackend);
+
+        // Create the corrupted file
+        // MockBackend returns "mock-embed" as model_id
+        let path = index_path(temp_dir.path(), "mock-embed");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ invalid json").unwrap();
+
+        // Load
+        let result = engine.load_from_dir(temp_dir.path());
+
+        // Verify
+        assert!(result.is_ok(), "Should not return error on corruption");
+        assert!(
+            engine.needs_reindex,
+            "Should signal reindex needed on corruption"
+        );
+        assert!(engine.chunks.is_empty(), "Should have empty chunks");
+    }
 }

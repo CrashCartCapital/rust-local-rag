@@ -223,9 +223,9 @@ impl PyEmbeddingBackendAdapter {
             if is_coroutine(py, &result)? {
                 match run_coroutine(py, result)? {
                     CoroutineResult::Async(future) => Ok(EmbedBatchCallResult::Async(future)),
-                    CoroutineResult::Sync(sync_result) => {
-                        Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(&sync_result)?))
-                    }
+                    CoroutineResult::Sync(sync_result) => Ok(EmbedBatchCallResult::Sync(
+                        extract_embeddings_batch(&sync_result)?,
+                    )),
                 }
             } else {
                 Ok(EmbedBatchCallResult::Sync(extract_embeddings_batch(
@@ -323,7 +323,9 @@ fn is_coroutine(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
 /// - If no event loop: runs coroutine with asyncio.run() and returns Sync variant
 enum CoroutineResult<'py> {
     /// Coroutine converted to Rust future (Python loop was running)
-    Async(std::pin::Pin<Box<dyn std::future::Future<Output = PyResult<Py<PyAny>>> + Send + 'static>>),
+    Async(
+        std::pin::Pin<Box<dyn std::future::Future<Output = PyResult<Py<PyAny>>> + Send + 'static>>,
+    ),
     /// Coroutine executed synchronously via asyncio.run() (no Python loop)
     Sync(Bound<'py, PyAny>),
 }
@@ -345,7 +347,10 @@ enum CoroutineResult<'py> {
 /// - Loop-bound Python objects (aiohttp sessions, etc.) created in one loop
 ///   cannot be reused in the new loop created by asyncio.run()
 /// - Frequent loop creation has performance overhead vs persistent loop
-fn run_coroutine<'py>(py: Python<'py>, coroutine: Bound<'py, PyAny>) -> PyResult<CoroutineResult<'py>> {
+fn run_coroutine<'py>(
+    py: Python<'py>,
+    coroutine: Bound<'py, PyAny>,
+) -> PyResult<CoroutineResult<'py>> {
     let asyncio = py.import("asyncio")?;
 
     // Check if there's already a running event loop
@@ -518,9 +523,9 @@ impl PyRerankerAdapter {
             if is_coroutine(py, &result)? {
                 match run_coroutine(py, result)? {
                     CoroutineResult::Async(future) => Ok(RerankCallResult::Async(future)),
-                    CoroutineResult::Sync(sync_result) => {
-                        Ok(RerankCallResult::Sync(extract_rerank_results(py, &sync_result)?))
-                    }
+                    CoroutineResult::Sync(sync_result) => Ok(RerankCallResult::Sync(
+                        extract_rerank_results(py, &sync_result)?,
+                    )),
                 }
             } else {
                 Ok(RerankCallResult::Sync(extract_rerank_results(py, &result)?))
