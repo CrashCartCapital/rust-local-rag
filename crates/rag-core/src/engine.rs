@@ -421,6 +421,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     where
         R: Rerank,
     {
+        #[cfg(feature = "tracing")]
+        let start_time = std::time::Instant::now();
+
         if self.chunks.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::debug!("Search internal: index empty");
@@ -429,7 +432,14 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let top_k = top_k.max(1);
 
-        let mut query_embedding = self.backend.embed(query).await?;
+        let mut query_embedding = match self.backend.embed(query).await {
+            Ok(e) => e,
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(error = %e, query_len = query.len(), "Embedding generation failed");
+                return Err(e.into());
+            }
+        };
         crate::search::normalize(&mut query_embedding);
 
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
@@ -445,7 +455,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
+        #[cfg(feature = "tracing")]
+        let ann_count = candidate_ids.len();
+
         candidate_ids.extend(lexical_map.keys().cloned());
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            ann_candidates = ann_count,
+            lexical_candidates = lexical_map.len(),
+            total_unique = candidate_ids.len(),
+            "Candidate retrieval stats"
+        );
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
@@ -627,10 +648,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(
-            "Search internal finished with {} results",
-            ordered_results.len()
-        );
+        {
+            let duration = start_time.elapsed();
+            tracing::info!(
+                duration_ms = duration.as_millis(),
+                top_k,
+                weights = ?weights,
+                results_count = ordered_results.len(),
+                query_len = query.len(),
+                "Search internal completed"
+            );
+        }
 
         Ok(ordered_results)
     }
