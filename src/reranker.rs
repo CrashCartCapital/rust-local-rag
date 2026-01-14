@@ -240,11 +240,12 @@ Answer:"#
             }
         }
 
-        // Sort by relevance score (highest first)
+        // Sort by relevance score (highest first), with stable tie-breaker
         results.sort_by(|a, b| {
             b.relevance
                 .partial_cmp(&a.relevance)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
         Ok(results)
@@ -816,5 +817,43 @@ mod tests {
         }
 
         assert!(template.contains("Consider semantic meaning"));
+    }
+
+    #[test]
+    fn test_reranked_result_sorting_stability() {
+        // Create results with tied scores but different IDs
+        let mut results = [
+            RerankedResult {
+                chunk_id: "c".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "a".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "b".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+        ];
+
+        // Apply the same sort logic as in RerankerService::rerank
+        results.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
+
+        // Verify deterministic order (alphabetical by chunk_id for tied scores)
+        assert_eq!(results[0].chunk_id, "a");
+        assert_eq!(results[1].chunk_id, "b");
+        assert_eq!(results[2].chunk_id, "c");
     }
 }
