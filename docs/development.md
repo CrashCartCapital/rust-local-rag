@@ -15,6 +15,7 @@ We use `make` for common tasks.
 ```bash
 # Development run (console logging)
 make run
+make dev-start              # Start Ollama + run application
 
 # Build only
 make build                  # Debug build
@@ -59,14 +60,18 @@ make ollama-models          # Pull required models
 ## Repository Layout
 
 *   `src/main.rs`: Entrypoint; env + logging; initializes engine + job system.
-*   `src/mcp_server.rs`: MCP tool definitions + HTTP server.
+*   `src/config.rs`: Centralized configuration loading.
+*   `src/mcp_server.rs`: Entrypoint for MCP server (exports `src/mcp/*`).
+*   `src/mcp/*`: MCP server implementation (HTTP, tools, models).
 *   `crates/rag-core/src/*`: Reusable core library: chunking, retrieval, scoring, persistence.
-*   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
+*   `crates/rag-core-py/*`: Python bindings for `rag-core`.
+*   `src/rag_engine.rs`: Server wrapper: PDF extraction + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
 *   `src/bin/rag_tui/*`: TUI client.
+*   `frontend/*`: Minimal React (Vite) UI.
 *   `docs/*`: Documentation.
 *   `eval/*`: Python evaluation harness.
 
