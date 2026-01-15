@@ -87,12 +87,25 @@ impl EmbeddingService {
             model: &self.model,
             input: text,
         };
-        let response = self
+
+        let request_future = self
             .client
             .post(format!("{}/api/embed", self.ollama_url))
             .json(&request)
-            .send()
-            .await?;
+            .send();
+
+        // HARD TIMEOUT: Wrap request in tokio::time::timeout to prevent indefinite hangs
+        let response = match tokio::time::timeout(self.embedding_timeout, request_future).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "Embedding request timed out after {} seconds. The Ollama server may be overloaded.",
+                    self.embedding_timeout.as_secs()
+                ));
+            }
+        };
+
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
                 "Ollama API error: {} - {}",
@@ -296,5 +309,80 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
 
     fn dimension(&self) -> usize {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_get_embedding_timeout_enforced() {
+        // Start a mock server
+        let mock_server = MockServer::start().await;
+
+        // Mock a delayed response for embedding
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "embedding": vec![0.1, 0.2] }))
+                    .set_delay(Duration::from_millis(200)), // Delay longer than timeout
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Mock tags endpoint for connection check
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [ { "name": "nomic-embed-text:latest" } ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Create config with very short timeout
+        let config = Config {
+            embedding_timeout: Duration::from_millis(50),
+            ..Config::default()
+        };
+
+        // Initialize service
+        let service = EmbeddingService::new_with_settings(
+            mock_server.uri(),
+            "nomic-embed-text".to_string(),
+            &config,
+        )
+        .await
+        .expect("Failed to create service");
+
+        // Perform request - should timeout
+        let result = service.get_embedding("test text").await;
+
+        // Assert timeout error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+
+        // Check for our custom timeout message
+        let is_custom_timeout = err.to_string().contains("Embedding request timed out");
+
+        // Check for reqwest timeout (race condition means either can trigger)
+        let is_reqwest_timeout = err
+            .downcast_ref::<reqwest::Error>()
+            .map(|e| e.is_timeout())
+            .unwrap_or(false);
+
+        // Fallback check on string message
+        let err_msg = err.to_string();
+        let is_generic_timeout = err_msg.contains("timed out") || err_msg.contains("timeout");
+
+        assert!(
+            is_custom_timeout || is_reqwest_timeout || is_generic_timeout,
+            "Expected timeout error, got: {:?}",
+            err
+        );
     }
 }
