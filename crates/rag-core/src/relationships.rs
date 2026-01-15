@@ -37,12 +37,6 @@ impl RelationshipType {
     }
 }
 
-impl Default for RelationshipType {
-    fn default() -> Self {
-        RelationshipType::Related
-    }
-}
-
 /// A relationship between two documents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Relationship {

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroUsize;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -63,10 +62,7 @@ impl EmbeddingService {
                 .build()?,
             ollama_url,
             model,
-            query_cache: RwLock::new(LruCache::new(
-                NonZeroUsize::new(config.embedding_cache_size.get())
-                    .expect("embedding_cache_size is non-zero"),
-            )),
+            query_cache: RwLock::new(LruCache::new(config.embedding_cache_size)),
             embedding_timeout: config.embedding_timeout,
         };
 
