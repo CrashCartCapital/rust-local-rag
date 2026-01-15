@@ -481,10 +481,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
         if initial_k < scores.len() {
-            scores.select_nth_unstable_by(initial_k, |a, b| b.0.total_cmp(&a.0));
+            scores.select_nth_unstable_by(initial_k, |a, b| {
+                b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id))
+            });
             scores.truncate(initial_k);
         }
-        scores.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id)));
 
         let candidates: Vec<SearchCandidate> = scores
             .into_iter()
@@ -587,6 +589,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     .score
                     .partial_cmp(&a.result.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.result.chunk_id.cmp(&b.result.chunk_id))
             });
 
             ordered_results.truncate(top_k);
@@ -598,6 +601,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 b.initial_score
                     .partial_cmp(&a.initial_score)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.chunk_id.cmp(&b.chunk_id))
             });
             for candidate in fallback_candidates {
                 if ordered_results.len() == top_k {
@@ -994,5 +998,42 @@ mod tests {
             skipped, 0,
             "Should skip unchanged documents when hash matches"
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_stability_tie_breaker() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        let docs = vec!["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+        // Text must be > 10 chars
+        let content = "This is a sufficiently long text content to be indexed by the engine.";
+
+        for doc in &docs {
+            engine.upsert_document(doc, content, None).await.unwrap();
+        }
+
+        let results = engine.search(content, 10, None).await.unwrap();
+        assert_eq!(results.len(), 10);
+
+        for i in 0..results.len() - 1 {
+            let current = &results[i];
+            let next = &results[i + 1];
+
+            assert!(
+                (current.score - next.score).abs() < f32::EPSILON,
+                "Scores differ: {} vs {}",
+                current.score,
+                next.score
+            );
+
+            assert!(
+                current.chunk_id < next.chunk_id,
+                "Results not sorted by ID at index {}: {} comes before {} with same score {}",
+                i,
+                current.chunk_id,
+                next.chunk_id,
+                current.score
+            );
+        }
     }
 }
