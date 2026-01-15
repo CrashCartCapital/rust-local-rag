@@ -1,6 +1,7 @@
 use crate::job_manager::JobManager;
 use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
+use rag_core::{EmbeddingError, EngineError};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{Instrument, instrument};
@@ -79,7 +80,7 @@ fn api_error(
     )
 }
 
-#[instrument(skip(app_state), fields(query = %request.query, top_k = %request.top_k, diversity = %request.diversity_factor))]
+#[instrument(skip(app_state), fields(query_len = request.query.len(), top_k = %request.top_k, diversity = %request.diversity_factor))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
@@ -123,10 +124,33 @@ async fn http_search(
         }
         Err(e) => {
             tracing::error!("Search error: {}", e);
-            Err(api_error(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Search error: {e}"),
-            ))
+            if let Some(engine_error) = e.downcast_ref::<EngineError>() {
+                let (status, msg) = match engine_error {
+                    EngineError::Validation { kind, .. } => {
+                        (axum::http::StatusCode::BAD_REQUEST, kind.to_string())
+                    }
+                    EngineError::DocumentNotFound(name) => (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("Document {} not found", name),
+                    ),
+                    EngineError::Embedding(EmbeddingError::Timeout(_)) => {
+                        (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
+                    }
+                    EngineError::Embedding(EmbeddingError::Connection(_)) => {
+                        (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+                    }
+                    EngineError::Embedding(EmbeddingError::Api(_)) => {
+                        (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+                    }
+                    _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                };
+                Err(api_error(status, msg))
+            } else {
+                Err(api_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Search error: {e}"),
+                ))
+            }
         }
     }
 }
