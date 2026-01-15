@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 pub type DocumentName = String;
 
 /// Types of relationships between documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelationshipType {
     /// Document A cites/references Document B (directed).
     Citation,
