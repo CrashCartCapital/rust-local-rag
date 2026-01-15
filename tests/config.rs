@@ -43,3 +43,26 @@ fn test_config_invalid_env_returns_error() {
         std::env::remove_var("RAG_RERANKER_CONCURRENCY");
     }
 }
+
+#[test]
+#[serial]
+fn test_config_cache_size_limit() {
+    unsafe {
+        std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "10000");
+    }
+    let config = Config::from_env().unwrap();
+    assert_eq!(config.embedding_cache_size.get(), 10000);
+
+    unsafe {
+        std::env::set_var("RAG_EMBEDDING_CACHE_SIZE", "10001");
+    }
+    let result = Config::from_env();
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("RAG_EMBEDDING_CACHE_SIZE"));
+    assert!(msg.contains("must be <= 10000"));
+
+    unsafe {
+        std::env::remove_var("RAG_EMBEDDING_CACHE_SIZE");
+    }
+}
