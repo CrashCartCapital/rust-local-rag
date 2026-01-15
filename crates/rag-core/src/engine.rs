@@ -411,7 +411,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query)))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len())))]
     async fn search_internal(
         &self,
         query: &str,
@@ -429,7 +429,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let top_k = top_k.max(1);
 
-        let mut query_embedding = self.backend.embed(query).await?;
+        #[cfg(feature = "tracing")]
+        let start = std::time::Instant::now();
+
+        let mut query_embedding = self.backend.embed(query).await.map_err(|e| {
+            #[cfg(feature = "tracing")]
+            tracing::error!(error = ?e, "Failed to generate query embedding");
+            e
+        })?;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(duration_ms = ?start.elapsed().as_millis(), "Generated query embedding");
+
         crate::search::normalize(&mut query_embedding);
 
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
@@ -445,7 +456,19 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
+
+        #[cfg(feature = "tracing")]
+        let ann_count = candidate_ids.len();
+
         candidate_ids.extend(lexical_map.keys().cloned());
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            ann_candidates = ann_count,
+            lexical_candidates = lexical_map.len(),
+            total_unique_candidates = candidate_ids.len(),
+            "Candidate selection complete"
+        );
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
@@ -526,14 +549,28 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .collect();
 
         let reranked: Vec<RerankedResult> = match &self.reranker {
-            Some(reranker) => reranker
-                .rerank(query, &reranker_inputs)
-                .await
-                .unwrap_or_else(|_err| {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!("Reranker failed, falling back to initial scores: {}", _err);
-                    Vec::new()
-                }),
+            Some(reranker) => {
+                #[cfg(feature = "tracing")]
+                let rerank_start = std::time::Instant::now();
+
+                let res = reranker
+                    .rerank(query, &reranker_inputs)
+                    .await
+                    .unwrap_or_else(|_err| {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(error = ?_err, "Reranker failed, falling back to initial scores");
+                        Vec::new()
+                    });
+
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    duration_ms = ?rerank_start.elapsed().as_millis(),
+                    input_count = reranker_inputs.len(),
+                    output_count = res.len(),
+                    "Reranking complete"
+                );
+                res
+            }
             None => Vec::new(),
         };
 
