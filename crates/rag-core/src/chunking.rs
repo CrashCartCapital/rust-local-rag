@@ -421,4 +421,11 @@ mod tests {
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
     }
+
+    #[test]
+    fn test_extract_sentences_whitespace_only() {
+        let text = "   \n\t  ";
+        let sentences = extract_sentences(text);
+        assert!(sentences.is_empty(), "Whitespace-only text should yield no sentences");
+    }
 }
