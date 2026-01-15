@@ -30,6 +30,13 @@ impl Config {
             config.embedding_timeout = Duration::from_secs(timeout_secs);
         }
         if let Some(cache_size) = parse_env_nonzero_usize("RAG_EMBEDDING_CACHE_SIZE")? {
+            if cache_size.get() > 10000 {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_CACHE_SIZE",
+                    value: cache_size.to_string(),
+                    message: "must be <= 10000".to_string(),
+                });
+            }
             config.embedding_cache_size = cache_size;
         }
 

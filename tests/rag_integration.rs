@@ -235,7 +235,7 @@ async fn test_reranker_timeout_fallback() {
 
     let config = Config {
         reranker_timeout: Duration::from_millis(200),
-        ..Config::default()
+        ..Default::default()
     };
 
     let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)

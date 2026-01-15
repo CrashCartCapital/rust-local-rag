@@ -235,7 +235,7 @@ fn default_page_number() -> usize {
 /// Defines which documents to search across.
 ///
 /// Used in [`QuerySpec`] to scope searches to specific documents, collections, or all.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub enum SearchScope {
     /// Search all indexed documents across all collections
     #[default]

@@ -61,7 +61,7 @@ pub(crate) fn chunk_text(
                 fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
             }
 
-            let overlap_start = window.len().saturating_sub(sentence_overlap);
+            let overlap_start = window.len().saturating_sub(sentence_overlap).max(1);
             window = window.split_off(overlap_start);
             token_sum = window.iter().map(|&i| sentences[i].tokens).sum();
         }
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(normalize_whitespace("  foo   bar  "), "foo bar");
         assert_eq!(normalize_whitespace("foo\nbar"), "foo bar");
 
-        let parts = vec!["foo  ", "  bar"];
+        let parts = ["foo  ", "  bar"];
         assert_eq!(normalize_whitespace(&parts.join(" ")), "foo bar");
 
         // approximate_token_count
@@ -420,5 +420,65 @@ mod tests {
         // words=5. 5*0.9 = 4.5 -> 5.
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
+    }
+
+    #[test]
+    fn test_chunking_overlap_exceeds_window() {
+        // Use full words to ensure SRX splits them correctly.
+        let text = "Sentence one. Sentence two. Sentence three. Sentence four. Sentence five.";
+        // Approx tokens per sentence:
+        // "Sentence one." -> 13 chars (4 tok) / 2 words (2 tok). -> 4 tokens.
+        // limit 5.
+        // Chunk 1: "Sentence one." (4) < 5.
+        // Chunk 1: "Sentence one. Sentence two." (8) >= 5.
+        // Overlap 10.
+        let chunks = chunk_text(text, 5, 10);
+        let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
+
+        // If bug exists (overlap=0 calc):
+        // 1. "one. two." (window keeps both)
+        // 2. "one. two. three."
+        // 3. "one. two. three. four."
+        // 4. "one. two. three. four. five."
+        // 5. "one. two. three. four. five." (after loop)
+
+        // If fixed (overlap_start=max(1)):
+        // 1. "one. two." (drop one) -> window [two]
+        // 2. "two. three." (drop two) -> window [three]
+        // 3. "three. four."
+        // 4. "four. five."
+        // 5. "five." (remaining)
+
+        assert!(
+            chunk_texts.len() <= 6,
+            "Should not produce infinitely growing chunks. Got: {:?}",
+            chunk_texts
+        );
+        if !chunk_texts.is_empty() {
+            assert_eq!(chunk_texts[0], "Sentence one. Sentence two.");
+            // If the bug exists, the second chunk will be longer
+            assert_eq!(chunk_texts[1], "Sentence two. Sentence three.");
+        }
+    }
+
+    #[test]
+    fn test_chunking_massive_sentence() {
+        // Single sentence larger than chunk limit
+        let text = "This is a very long sentence that exceeds the token limit all by itself.";
+        // Approx tokens: ~60 chars -> 15 tokens.
+        // Limit: 5.
+        let chunks = chunk_text(text, 5, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, text);
+    }
+
+    #[test]
+    fn test_chunking_tiny_limit() {
+        let text = "First. Second. Third.";
+        // Limit 1. Each sentence is ~1-2 tokens.
+        // Should produce 3 chunks.
+        let chunks = chunk_text(text, 1, 0);
+        let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
+        assert_eq!(texts, vec!["First.", "Second.", "Third."]);
     }
 }
