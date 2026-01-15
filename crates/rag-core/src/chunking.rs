@@ -49,6 +49,8 @@ pub(crate) fn chunk_text(
     let mut window: Vec<usize> = Vec::new();
     let mut token_sum = 0usize;
     let mut fragments = Vec::new();
+    // Track the last sentence index of the last emitted chunk to prevent redundant tails
+    let mut last_emitted_sentence_idx = None;
 
     for (idx, sentence) in sentences.iter().enumerate() {
         window.push(idx);
@@ -58,6 +60,9 @@ pub(crate) fn chunk_text(
             if let Some((chunk_text, metadata)) =
                 finalize_chunk(&window, &sentences, sentence_overlap)
             {
+                if let Some((_, end)) = metadata.sentence_range {
+                    last_emitted_sentence_idx = Some(end);
+                }
                 fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
             }
 
@@ -67,10 +72,19 @@ pub(crate) fn chunk_text(
         }
     }
 
-    if !window.is_empty()
-        && let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0)
-    {
-        fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
+    if !window.is_empty() {
+        let should_emit = if let Some(last_emitted) = last_emitted_sentence_idx {
+            // Only emit if the current window extends beyond what we've already emitted
+            window.last().is_some_and(|&last| last > last_emitted)
+        } else {
+            // No chunks emitted yet, so this is valid
+            true
+        };
+
+        if should_emit && let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0)
+        {
+            fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
+        }
     }
 
     #[cfg(feature = "tracing")]
@@ -420,5 +434,54 @@ mod tests {
         // words=5. 5*0.9 = 4.5 -> 5.
         // max(3, 5) = 5.
         assert_eq!(approximate_token_count("a b c d e"), 5);
+    }
+
+    #[test]
+    fn test_chunk_large_overlap_duplication() {
+        let large_sentence = "Large sentence.".repeat(10);
+        let text = format!("S1. S2. {}. S3. S4.", large_sentence);
+
+        let chunks = chunk_text(&text, 10, 10);
+
+        // We expect chunks to be created.
+        assert!(!chunks.is_empty());
+
+        // Check if the large sentence is present in multiple chunks
+        let large_count = chunks
+            .iter()
+            .filter(|c| c.text.contains("Large sentence."))
+            .count();
+        // It's expected to be in multiple chunks due to overlap.
+        assert!(large_count >= 1);
+    }
+
+    #[test]
+    fn test_heading_colon_aggressiveness() {
+        let text = "Description:\nThis is a description.";
+        let sentences = extract_sentences(text);
+
+        assert_eq!(sentences.len(), 1);
+        assert_eq!(sentences[0].text, "This is a description.");
+        assert_eq!(sentences[0].heading.as_deref(), Some("Description:"));
+
+        let text2 = "He said:\nHello.";
+        let sentences2 = extract_sentences(text2);
+
+        assert_eq!(sentences2[0].text, "Hello.");
+        assert_eq!(sentences2[0].heading.as_deref(), Some("He said:"));
+    }
+
+    #[test]
+    fn test_single_large_sentence_loop() {
+        let large = "A ".repeat(100);
+        let text = format!("{}", large);
+
+        let chunks = chunk_text(&text, 10, 5);
+
+        assert_eq!(
+            chunks.len(),
+            1,
+            "Should not duplicate the single large sentence"
+        );
     }
 }

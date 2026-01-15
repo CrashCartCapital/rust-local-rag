@@ -247,6 +247,7 @@ pub enum SearchScope {
     Multi(Vec<crate::collections::CollectionId>),
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for SearchScope {
     fn default() -> Self {
         SearchScope::All

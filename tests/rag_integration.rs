@@ -233,8 +233,7 @@ async fn test_reranker_timeout_fallback() {
         std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
     }
 
-    let mut config = Config::default();
-    config.reranker_timeout = Duration::from_millis(200);
+    let config = Config { reranker_timeout: Duration::from_millis(200), ..Config::default() };
 
     let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)
         .await

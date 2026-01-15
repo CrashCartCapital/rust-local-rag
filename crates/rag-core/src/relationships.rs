@@ -37,6 +37,7 @@ impl RelationshipType {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for RelationshipType {
     fn default() -> Self {
         RelationshipType::Related
