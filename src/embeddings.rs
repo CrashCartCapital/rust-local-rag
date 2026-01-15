@@ -2,7 +2,6 @@ use anyhow::Result;
 use lru::LruCache;
 use rag_core::EmbeddingError;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroUsize;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -24,9 +23,9 @@ struct OllamaEmbeddingResponse {
     embeddings: Option<Vec<Vec<f32>>>,
 }
 
-fn map_reqwest_error(e: reqwest::Error) -> EmbeddingError {
+fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> EmbeddingError {
     if e.is_timeout() {
-        EmbeddingError::Timeout(std::time::Duration::from_secs(0))
+        EmbeddingError::Timeout(timeout)
     } else if e.is_connect() {
         EmbeddingError::Connection(e.to_string())
     } else {
@@ -74,10 +73,7 @@ impl EmbeddingService {
                 .build()?,
             ollama_url,
             model,
-            query_cache: RwLock::new(LruCache::new(
-                NonZeroUsize::new(config.embedding_cache_size.get())
-                    .expect("embedding_cache_size is non-zero"),
-            )),
+            query_cache: RwLock::new(LruCache::new(config.embedding_cache_size)),
             embedding_timeout: config.embedding_timeout,
         };
 
@@ -107,7 +103,7 @@ impl EmbeddingService {
             .send();
 
         let response = match tokio::time::timeout(self.embedding_timeout, request_future).await {
-            Ok(result) => result.map_err(map_reqwest_error)?,
+            Ok(result) => result.map_err(|e| map_reqwest_error(e, self.embedding_timeout))?,
             Err(_) => return Err(EmbeddingError::Timeout(self.embedding_timeout).into()),
         };
 
@@ -174,7 +170,7 @@ impl EmbeddingService {
 
             let response = match tokio::time::timeout(self.embedding_timeout, request_future).await
             {
-                Ok(result) => result.map_err(map_reqwest_error)?,
+                Ok(result) => result.map_err(|e| map_reqwest_error(e, self.embedding_timeout))?,
                 Err(_) => {
                     return Err(EmbeddingError::Timeout(self.embedding_timeout).into());
                 }
@@ -231,7 +227,7 @@ impl EmbeddingService {
             .get(format!("{}/api/tags", self.ollama_url))
             .send()
             .await
-            .map_err(map_reqwest_error)?;
+            .map_err(|e| map_reqwest_error(e, self.embedding_timeout))?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -251,7 +247,7 @@ impl EmbeddingService {
             .get(format!("{}/api/tags", self.ollama_url))
             .send()
             .await
-            .map_err(map_reqwest_error)?;
+            .map_err(|e| map_reqwest_error(e, self.embedding_timeout))?;
 
         if !response.status().is_success() {
             let status = response.status();

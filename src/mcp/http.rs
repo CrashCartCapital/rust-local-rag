@@ -80,7 +80,7 @@ fn api_error(
     )
 }
 
-#[instrument(skip(app_state), fields(query = %request.query, top_k = %request.top_k, diversity = %request.diversity_factor))]
+#[instrument(skip(app_state), fields(query_len = request.query.len(), top_k = %request.top_k, diversity = %request.diversity_factor))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
     axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
