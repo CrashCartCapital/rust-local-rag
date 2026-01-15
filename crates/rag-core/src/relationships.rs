@@ -18,13 +18,14 @@ use std::collections::{HashMap, HashSet};
 pub type DocumentName = String;
 
 /// Types of relationships between documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelationshipType {
     /// Document A cites/references Document B (directed).
     Citation,
     /// Document B supersedes Document A (directed).
     Version,
     /// Documents are semantically related (undirected).
+    #[default]
     Related,
     /// Document B is a child of Document A (directed).
     ParentChild,
@@ -34,12 +35,6 @@ impl RelationshipType {
     /// Returns true if this relationship type is undirected.
     pub fn is_undirected(&self) -> bool {
         matches!(self, RelationshipType::Related)
-    }
-}
-
-impl Default for RelationshipType {
-    fn default() -> Self {
-        RelationshipType::Related
     }
 }
 
