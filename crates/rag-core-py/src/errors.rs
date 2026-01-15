@@ -33,7 +33,7 @@
 
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::{create_exception, PyErr};
+use pyo3::{PyErr, create_exception};
 use rag_core::{EngineError, ValidationKind};
 
 // Define Python exception hierarchy
