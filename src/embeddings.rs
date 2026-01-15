@@ -1,5 +1,6 @@
 use anyhow::Result;
 use lru::LruCache;
+use rag_core::EmbeddingError;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -21,6 +22,16 @@ struct OllamaEmbeddingResponse {
     embedding: Option<Vec<f32>>,
     #[serde(default)]
     embeddings: Option<Vec<Vec<f32>>>,
+}
+
+fn map_reqwest_error(e: reqwest::Error) -> EmbeddingError {
+    if e.is_timeout() {
+        EmbeddingError::Timeout(std::time::Duration::from_secs(0))
+    } else if e.is_connect() {
+        EmbeddingError::Connection(e.to_string())
+    } else {
+        EmbeddingError::Api(e.to_string())
+    }
 }
 
 /// Embedding service using Ollama API with LRU query caching.
@@ -87,12 +98,19 @@ impl EmbeddingService {
             model: &self.model,
             input: text,
         };
-        let response = self
+
+        // Wrap request in timeout
+        let request_future = self
             .client
             .post(format!("{}/api/embed", self.ollama_url))
             .json(&request)
-            .send()
-            .await?;
+            .send();
+
+        let response = match tokio::time::timeout(self.embedding_timeout, request_future).await {
+            Ok(result) => result.map_err(map_reqwest_error)?,
+            Err(_) => return Err(EmbeddingError::Timeout(self.embedding_timeout).into()),
+        };
+
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
                 "Ollama API error: {} - {}",
@@ -156,14 +174,9 @@ impl EmbeddingService {
 
             let response = match tokio::time::timeout(self.embedding_timeout, request_future).await
             {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(result) => result.map_err(map_reqwest_error)?,
                 Err(_) => {
-                    return Err(anyhow::anyhow!(
-                        "Batch embedding request timed out after {} seconds for {} texts. The Ollama server may be overloaded.",
-                        self.embedding_timeout.as_secs(),
-                        texts.len()
-                    ));
+                    return Err(EmbeddingError::Timeout(self.embedding_timeout).into());
                 }
             };
 
@@ -217,7 +230,8 @@ impl EmbeddingService {
             .client
             .get(format!("{}/api/tags", self.ollama_url))
             .send()
-            .await?;
+            .await
+            .map_err(map_reqwest_error)?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -236,7 +250,8 @@ impl EmbeddingService {
             .client
             .get(format!("{}/api/tags", self.ollama_url))
             .send()
-            .await?;
+            .await
+            .map_err(map_reqwest_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -280,9 +295,12 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
     }
 
     async fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, rag_core::EmbeddingError> {
-        self.get_query_embedding(text)
-            .await
-            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+        self.get_query_embedding(text).await.map_err(|e| {
+            match e.downcast::<rag_core::EmbeddingError>() {
+                Ok(err) => err,
+                Err(other) => rag_core::EmbeddingError::Api(other.to_string()),
+            }
+        })
     }
 
     async fn embed_batch(
@@ -291,7 +309,10 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
     ) -> std::result::Result<Vec<Vec<f32>>, rag_core::EmbeddingError> {
         self.embed_texts(texts)
             .await
-            .map_err(|e| rag_core::EmbeddingError::Api(e.to_string()))
+            .map_err(|e| match e.downcast::<rag_core::EmbeddingError>() {
+                Ok(err) => err,
+                Err(other) => rag_core::EmbeddingError::Api(other.to_string()),
+            })
     }
 
     fn dimension(&self) -> usize {
