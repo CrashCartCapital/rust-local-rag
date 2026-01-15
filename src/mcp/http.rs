@@ -131,7 +131,7 @@ async fn http_search(
                     }
                     EngineError::DocumentNotFound(name) => (
                         axum::http::StatusCode::NOT_FOUND,
-                        format!("Document {} not found", name),
+                        format!("Document {name} not found"),
                     ),
                     EngineError::Embedding(EmbeddingError::Timeout(_)) => {
                         (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())

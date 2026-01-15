@@ -21,7 +21,7 @@ pub(crate) fn get_highlight_regex(query: &str) -> Option<regex::Regex> {
             .map(|t| {
                 let escaped = regex::escape(t);
                 if t.chars().next().is_some_and(|c| c.is_alphanumeric()) {
-                    format!("\\b{}", escaped)
+                    format!("\\b{escaped}")
                 } else {
                     escaped
                 }
