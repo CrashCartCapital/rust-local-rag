@@ -48,6 +48,20 @@ impl Config {
         }
 
         if let Some(value) = parse_env_f64("RAG_DEFAULT_LOGPROB")? {
+            if !value.is_finite() {
+                return Err(ConfigError {
+                    var: "RAG_DEFAULT_LOGPROB",
+                    value: value.to_string(),
+                    message: "must be finite".to_string(),
+                });
+            }
+            if value > 0.0 {
+                return Err(ConfigError {
+                    var: "RAG_DEFAULT_LOGPROB",
+                    value: value.to_string(),
+                    message: "must be <= 0.0".to_string(),
+                });
+            }
             config.default_logprob_fallback = value;
         }
 
@@ -139,5 +153,65 @@ fn parse_env_nonzero_usize(var: &'static str) -> Result<Option<NonZeroUsize>, Co
             value: String::new(),
             message: e.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    unsafe fn set_env(key: &str, value: &str) {
+        // SAFETY: This is safe because we are using serial_test to ensure serial execution
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    unsafe fn unset_env(key: &str) {
+        // SAFETY: This is safe because we are using serial_test to ensure serial execution
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    #[serial]
+    fn test_valid_logprob() {
+        unsafe {
+            set_env("RAG_DEFAULT_LOGPROB", "-0.5");
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.default_logprob_fallback, -0.5);
+            unset_env("RAG_DEFAULT_LOGPROB");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_invalid_logprob_positive() {
+        unsafe {
+            set_env("RAG_DEFAULT_LOGPROB", "0.1");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be <= 0.0"));
+            unset_env("RAG_DEFAULT_LOGPROB");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_invalid_logprob_nan() {
+        unsafe {
+            set_env("RAG_DEFAULT_LOGPROB", "NaN");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite"));
+            unset_env("RAG_DEFAULT_LOGPROB");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_invalid_logprob_inf() {
+        unsafe {
+            set_env("RAG_DEFAULT_LOGPROB", "inf");
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite"));
+            unset_env("RAG_DEFAULT_LOGPROB");
+        }
     }
 }
