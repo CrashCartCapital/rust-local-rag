@@ -157,7 +157,10 @@ impl RagEngine {
 
         let text = self.extract_pdf_text(data.to_vec()).await?;
         if text.trim().is_empty() {
-            return Err(anyhow::anyhow!("No text extracted from PDF"));
+            return Err(rag_core::EngineError::validation_no_chunk(
+                rag_core::ValidationKind::EmptyText,
+            )
+            .into());
         }
 
         self.core
@@ -313,6 +316,19 @@ impl RagEngine {
                     "Pure-Rust PDF extraction failed, falling back to pdftotext"
                 );
 
+                let lopdf_empty = lopdf_err
+                    .downcast_ref::<rag_core::EngineError>()
+                    .map(|e| {
+                        matches!(
+                            e,
+                            rag_core::EngineError::Validation {
+                                kind: rag_core::ValidationKind::EmptyText,
+                                ..
+                            }
+                        )
+                    })
+                    .unwrap_or(false);
+
                 let pdftotext_result = tokio::task::spawn_blocking(move || {
                     Self::pdftotext_extract_sync(&data_for_fallback)
                 })
@@ -328,6 +344,31 @@ impl RagEngine {
                         Ok(text)
                     }
                     Err(pdftotext_err) => {
+                        // Check if pdftotext also returned EmptyText
+                        let pdftotext_empty = pdftotext_err
+                            .downcast_ref::<rag_core::EngineError>()
+                            .map(|e| {
+                                matches!(
+                                    e,
+                                    rag_core::EngineError::Validation {
+                                        kind: rag_core::ValidationKind::EmptyText,
+                                        ..
+                                    }
+                                )
+                            })
+                            .unwrap_or(false);
+
+                        if pdftotext_empty {
+                            return Err(pdftotext_err);
+                        }
+
+                        if lopdf_empty {
+                            return Err(rag_core::EngineError::validation_no_chunk(
+                                rag_core::ValidationKind::EmptyText,
+                            )
+                            .into());
+                        }
+
                         tracing::error!(
                             lopdf_error = %lopdf_err,
                             pdftotext_error = %pdftotext_err,
@@ -372,7 +413,10 @@ impl RagEngine {
         }
 
         if all_text.trim().is_empty() {
-            return Err(anyhow::anyhow!("lopdf extracted no text from PDF"));
+            return Err(rag_core::EngineError::validation_no_chunk(
+                rag_core::ValidationKind::EmptyText,
+            )
+            .into());
         }
 
         Ok(all_text)
@@ -411,7 +455,10 @@ impl RagEngine {
 
                 if text.trim().is_empty() {
                     tracing::warn!("pdftotext extracted 0 characters");
-                    Err(anyhow::anyhow!("pdftotext produced no text output"))
+                    Err(rag_core::EngineError::validation_no_chunk(
+                        rag_core::ValidationKind::EmptyText,
+                    )
+                    .into())
                 } else {
                     Ok(text)
                 }
@@ -522,6 +569,134 @@ impl ResolvedWeights {
             lexical: resolve_weight(weights.and_then(|w| w.lexical), get_lexical_weight()),
             reranker: resolve_weight(weights.and_then(|w| w.reranker), get_reranker_weight()),
             initial: resolve_weight(weights.and_then(|w| w.initial), get_initial_score_weight()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::content::Content;
+    use lopdf::{Dictionary, Document, Object, Stream};
+
+    // Helper to create a PDF with no text
+    fn create_empty_pdf() -> Vec<u8> {
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+
+        // Create an empty page content stream
+        let content = Content { operations: vec![] };
+        let stream = Stream::new(Dictionary::new(), content.encode().unwrap());
+        let stream_id = doc.add_object(stream);
+
+        // Create page dictionary
+        let page_id = doc.add_object(Dictionary::from_iter(vec![
+            ("Type", "Page".into()),
+            ("Parent", pages_id.into()),
+            ("Contents", stream_id.into()),
+        ]));
+
+        // Create pages dictionary
+        let pages = Dictionary::from_iter(vec![
+            ("Type", "Pages".into()),
+            ("Kids", vec![page_id.into()].into()),
+            ("Count", 1.into()),
+        ]);
+        doc.objects.insert(pages_id, Object::Dictionary(pages));
+
+        // Create catalog
+        let catalog_id = doc.add_object(Dictionary::from_iter(vec![
+            ("Type", "Catalog".into()),
+            ("Pages", pages_id.into()),
+        ]));
+
+        doc.trailer.set("Root", catalog_id);
+
+        let mut buffer = Vec::new();
+        doc.save_to(&mut buffer).unwrap();
+        buffer
+    }
+
+    #[tokio::test]
+    async fn test_prepare_document_empty_text_returns_validation_error() {
+        // Setup simple config
+        let config = Config::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        // Use wiremock to mock Ollama if needed.
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Safe to set env var in test because serial_test or separate process,
+        // but here assuming it's okay for unit test.
+        // Actually better to use unsafe block if strictly needed or just Config.
+        // But EmbeddingService reads from env vars directly in new() if I recall?
+        // Let's check config usage.
+
+        unsafe {
+            std::env::set_var("OLLAMA_URL", mock_server.uri());
+            std::env::set_var("OLLAMA_EMBEDDING_MODEL", "test-model");
+        }
+
+        // Mock response for any embedding call
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "embedding": vec![0.0; 384]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock tags response for initialization
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "name": "test-model:latest" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let engine = RagEngine::new(data_dir, &config)
+            .await
+            .expect("Failed to create engine");
+
+        let pdf_data = create_empty_pdf();
+
+        let result = engine.prepare_document("empty.pdf", &pdf_data, None).await;
+
+        match result {
+            Ok(_) => panic!("Should have returned error"),
+            Err(e) => {
+                // Check if it is EngineError::Validation
+                if let Some(engine_error) = e.downcast_ref::<rag_core::EngineError>() {
+                    match engine_error {
+                        rag_core::EngineError::Validation {
+                            kind: rag_core::ValidationKind::EmptyText,
+                            ..
+                        } => {
+                            // Success
+                        }
+                        _ => panic!("Expected Validation(EmptyText), got {:?}", engine_error),
+                    }
+                } else {
+                    let msg = e.to_string();
+                    if msg.contains("No text extracted from PDF")
+                        || msg.contains("lopdf extracted no text")
+                        || msg.contains("pdftotext produced no text")
+                    {
+                        panic!(
+                            "Got old string error, expected EngineError::Validation: {}",
+                            msg
+                        );
+                    } else {
+                        panic!("Got unexpected error type/msg: {:?}", e);
+                    }
+                }
+            }
         }
     }
 }
