@@ -570,7 +570,7 @@ mod tests {
         let spec = QuerySpec::new("test").with_weights(weights);
 
         assert!(spec.weights.is_some());
-        let w = spec.weights.unwrap();
+        let w = spec.weights.as_ref().expect("Weights should be present");
         assert!((w.embedding - 0.9).abs() < f32::EPSILON);
         assert!((w.lexical - 0.1).abs() < f32::EPSILON);
     }
@@ -775,7 +775,7 @@ mod tests {
             .with_resolution(ResolutionSpec::new().with_strategy(SearchStrategy::CoarseToFine));
 
         assert!(spec.resolution_spec.is_some());
-        let res_spec = spec.resolution_spec.unwrap();
+        let res_spec = spec.resolution_spec.as_ref().expect("Resolution spec should be present");
         assert_eq!(res_spec.strategy, SearchStrategy::CoarseToFine);
     }
 
