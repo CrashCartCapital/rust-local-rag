@@ -411,8 +411,43 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len())))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights)))]
     async fn search_internal(
+        &self,
+        query: &str,
+        top_k: usize,
+        weights: SearchWeights,
+    ) -> Result<Vec<SearchResultWithEmbedding>>
+    where
+        R: Rerank,
+    {
+        #[cfg(feature = "tracing")]
+        let start_time = std::time::Instant::now();
+
+        let result = self.search_internal_impl(query, top_k, weights).await;
+
+        #[cfg(feature = "tracing")]
+        match &result {
+            Ok(res) => {
+                tracing::info!(
+                    duration_ms = start_time.elapsed().as_millis(),
+                    result_count = res.len(),
+                    "Search internal completed successfully"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    duration_ms = start_time.elapsed().as_millis(),
+                    error = ?e,
+                    "Search internal failed"
+                );
+            }
+        }
+
+        result
+    }
+
+    async fn search_internal_impl(
         &self,
         query: &str,
         top_k: usize,
