@@ -39,7 +39,7 @@ pub(crate) fn chunk_text(
     chunk_tokens: usize,
     sentence_overlap: usize,
 ) -> Vec<ChunkFragment> {
-    let sentences = extract_sentences(text);
+    let sentences = extract_sentences(text, Some(chunk_tokens));
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
@@ -154,7 +154,7 @@ fn finalize_chunk(
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
+fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<SentenceInfo> {
     let splitter = sentence_splitter();
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
@@ -214,6 +214,28 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
                 if tokens == 0 {
                     continue;
                 }
+
+                if let Some(limit) = hard_token_limit {
+                    if tokens > limit {
+                        let sub_parts = hard_split(part, limit);
+                        for sub_part in sub_parts {
+                            let sub_tokens = approximate_token_count(&sub_part);
+                            if sub_tokens == 0 {
+                                continue;
+                            }
+                            sentences.push(SentenceInfo {
+                                text: sub_part,
+                                tokens: sub_tokens,
+                                page: page_number,
+                                heading: last_heading.clone(),
+                                index: sentence_index,
+                            });
+                            sentence_index += 1;
+                        }
+                        continue;
+                    }
+                }
+
                 sentences.push(SentenceInfo {
                     text: part.to_string(),
                     tokens,
@@ -245,6 +267,56 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
     tracing::trace!("Extracted {} sentences", sentences.len());
 
     sentences
+}
+
+fn hard_split(text: &str, limit: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current_chunk = String::new();
+
+    for word in text.split_whitespace() {
+        // Simpler approach: build up string, check total tokens.
+        let next_chunk = if current_chunk.is_empty() {
+            word.to_string()
+        } else {
+            format!("{} {}", current_chunk, word)
+        };
+
+        let next_tokens = approximate_token_count(&next_chunk);
+
+        if next_tokens > limit {
+            if !current_chunk.is_empty() {
+                parts.push(current_chunk);
+                current_chunk = String::new();
+            }
+
+            // Check if the word itself is too big
+            let single_word_tokens = approximate_token_count(word);
+            if single_word_tokens > limit {
+                // Hard split by chars if a single word is massive
+                // Fallback to char chunking (bytes)
+                // approximate_token_count is roughly chars/4. So limit*4 chars.
+                let char_limit = limit * 4;
+                let mut start = 0;
+                let chars: Vec<char> = word.chars().collect();
+                while start < chars.len() {
+                    let end = (start + char_limit).min(chars.len());
+                    let chunk: String = chars[start..end].iter().collect();
+                    parts.push(chunk);
+                    start = end;
+                }
+            } else {
+                current_chunk = word.to_string();
+            }
+        } else {
+            current_chunk = next_chunk;
+        }
+    }
+
+    if !current_chunk.is_empty() {
+        parts.push(current_chunk);
+    }
+
+    parts
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -357,7 +429,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text, None);
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -370,7 +442,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text, None);
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -468,8 +540,21 @@ mod tests {
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
         let chunks = chunk_text(text, 5, 0);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, text);
+
+        // Expect hard splitting to kick in
+        assert!(
+            chunks.len() > 1,
+            "Should split massive sentence. Got: {:?}",
+            chunks
+        );
+        let joined = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Depending on splitting logic, it might introduce spaces or keep them.
+        // Since original text has spaces, `join(" ")` should look similar to `normalize_whitespace`.
+        assert_eq!(normalize_whitespace(&joined), normalize_whitespace(text));
     }
 
     #[test]
