@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use tracing::instrument;
-use uuid::Uuid;
 
 use crate::{
     config::Config,
@@ -313,11 +312,8 @@ impl RagEngine {
                     "Pure-Rust PDF extraction failed, falling back to pdftotext"
                 );
 
-                let pdftotext_result = tokio::task::spawn_blocking(move || {
-                    Self::pdftotext_extract_sync(&data_for_fallback)
-                })
-                .await
-                .context("pdftotext extraction task failed")?;
+                // Use async version directly
+                let pdftotext_result = Self::pdftotext_extract(&data_for_fallback).await;
 
                 match pdftotext_result {
                     Ok(text) => {
@@ -378,56 +374,66 @@ impl RagEngine {
         Ok(all_text)
     }
 
-    /// Synchronous PDF extraction using pdftotext binary.
-    /// Uses UUID for temp filename to prevent race conditions in concurrent calls.
-    fn pdftotext_extract_sync(data: &[u8]) -> Result<String> {
-        use std::process::Command;
+    /// Async PDF extraction using pdftotext binary with strict timeout.
+    /// Uses stdin/stdout to avoid temporary files.
+    async fn pdftotext_extract(data: &[u8]) -> Result<String> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
 
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("temp_pdf_{}.pdf", Uuid::new_v4()));
+        // INVARIANT: External process execution must have a timeout
+        const PDF_EXTRACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-        std::fs::write(&temp_file, data)
-            .map_err(|e| anyhow::anyhow!("Failed to write temp PDF: {}", e))?;
-
-        let output = Command::new("pdftotext")
+        let mut command = Command::new("pdftotext");
+        command
             .arg("-layout")
             .arg("-enc")
             .arg("UTF-8")
-            .arg(&temp_file)
-            .arg("-")
-            .output();
-        if let Err(e) = std::fs::remove_file(&temp_file) {
-            tracing::debug!(
-                error = %e,
-                path = %temp_file.display(),
-                "Failed to remove temp file after pdftotext"
-            );
+            .arg("-") // Read from stdin
+            .arg("-") // Write to stdout
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true); // Ensure process is killed if future is dropped/times out
+
+        let mut child = command.spawn().context("Failed to spawn pdftotext")?;
+
+        // Write data to stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(data)
+                .await
+                .context("Failed to write to pdftotext stdin")?;
+            drop(stdin); // Close stdin to signal EOF
         }
 
-        match output {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8(output.stdout)
-                    .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).to_string());
-
-                if text.trim().is_empty() {
-                    tracing::warn!("pdftotext extracted 0 characters");
-                    Err(anyhow::anyhow!("pdftotext produced no text output"))
-                } else {
-                    Ok(text)
+        // Wait for output with timeout
+        let output =
+            match tokio::time::timeout(PDF_EXTRACTION_TIMEOUT, child.wait_with_output()).await {
+                Ok(result) => result.context("Failed to wait for pdftotext")?,
+                Err(_) => {
+                    // Timeout occurred
+                    return Err(anyhow::anyhow!(
+                        "pdftotext extraction timed out after {:?}",
+                        PDF_EXTRACTION_TIMEOUT
+                    ));
                 }
+            };
+
+        if output.status.success() {
+            let text = String::from_utf8(output.stdout)
+                .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).to_string());
+
+            if text.trim().is_empty() {
+                tracing::warn!("pdftotext extracted 0 characters");
+                Err(anyhow::anyhow!("pdftotext produced no text output"))
+            } else {
+                Ok(text)
             }
-            Ok(output) => {
-                let error_msg = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("pdftotext failed with error: {}", error_msg);
-                Err(anyhow::anyhow!("pdftotext failed: {}", error_msg))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to run pdftotext command: {}", e);
-                Err(anyhow::anyhow!(
-                    "pdftotext command failed: {} (is poppler installed?)",
-                    e
-                ))
-            }
+        } else {
+            let error_msg = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("pdftotext failed with error: {}", error_msg);
+            Err(anyhow::anyhow!("pdftotext failed: {}", error_msg))
         }
     }
 }
@@ -523,5 +529,53 @@ impl ResolvedWeights {
             reranker: resolve_weight(weights.and_then(|w| w.reranker), get_reranker_weight()),
             initial: resolve_weight(weights.and_then(|w| w.initial), get_initial_score_weight()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    /// Test that external processes can be timed out using the same pattern as pdftotext_extract.
+    /// This validates the invariant without requiring pdftotext to be installed.
+    #[tokio::test]
+    async fn test_process_timeout_invariant() {
+        // Try to find a command that sleeps. 'sleep' is standard on unix.
+        let mut command = Command::new("sleep");
+        command.arg("2").kill_on_drop(true);
+
+        // We use a timeout shorter than the sleep duration
+        let timeout_duration = Duration::from_millis(500);
+
+        let mut child = command.spawn().expect("failed to spawn sleep");
+
+        let result = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+        assert!(
+            result.is_err(),
+            "Process should have timed out, but it completed"
+        );
+    }
+
+    /// Test that external processes complete successfully when within timeout.
+    #[tokio::test]
+    async fn test_process_success_invariant() {
+        let mut command = Command::new("echo");
+        command.arg("hello").kill_on_drop(true);
+
+        let timeout_duration = Duration::from_secs(5);
+        let mut child = command.spawn().expect("failed to spawn echo");
+
+        let result = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+        assert!(
+            result.is_ok(),
+            "Process should have completed, but it timed out"
+        );
+        assert!(
+            result.unwrap().unwrap().success(),
+            "Process should have exited successfully"
+        );
     }
 }
