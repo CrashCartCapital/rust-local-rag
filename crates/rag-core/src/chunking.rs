@@ -153,98 +153,134 @@ fn finalize_chunk(
     Some((chunk_text, metadata))
 }
 
-#[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
-    let splitter = sentence_splitter();
-    let mut sentences: Vec<SentenceInfo> = Vec::new();
-    let mut sentence_index = 0usize;
+struct SentenceExtractor<'a> {
+    splitter: &'a srx::Rules,
+    sentences: Vec<SentenceInfo>,
+    sentence_index: usize,
+    last_heading: Option<String>,
+}
 
-    for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
-        let page_number = page_idx + 1;
-        let mut last_heading: Option<String> = None;
+impl<'a> SentenceExtractor<'a> {
+    fn new() -> Self {
+        Self {
+            splitter: sentence_splitter(),
+            sentences: Vec::new(),
+            sentence_index: 0,
+            last_heading: None,
+        }
+    }
 
+    fn extract(&mut self, text: &str) {
+        for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
+            let page_number = page_idx + 1;
+            // Heading context resets per page
+            self.last_heading = None;
+            self.process_page(page_text, page_number);
+        }
+
+        // Fallback: if no sentences were found but text exists, treat as one blob
+        if self.sentences.is_empty() {
+            let normalized = normalize_whitespace(text);
+            if !normalized.is_empty() {
+                #[cfg(feature = "tracing")]
+                tracing::debug!("Fallback: treating entire text as single sentence");
+                self.push_sentence(normalized, 1, None);
+            }
+        }
+    }
+
+    fn process_page(&mut self, page_text: &str, page_number: usize) {
         for block in page_text.split("\n\n") {
             let block = block.trim();
             if block.is_empty() {
                 continue;
             }
-
-            let lines: Vec<&str> = block.lines().collect();
-            if lines.len() == 1 && is_heading(lines[0]) {
-                last_heading = Some(lines[0].trim().to_string());
-                continue;
-            }
-
-            let mut paragraph_lines = Vec::new();
-            for line in lines {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if paragraph_lines.is_empty() && is_heading(trimmed) {
-                    last_heading = Some(trimmed.to_string());
-                    continue;
-                }
-                paragraph_lines.push(trimmed);
-            }
-
-            if paragraph_lines.is_empty() {
-                continue;
-            }
-
-            let normalized = normalize_from_parts(&paragraph_lines);
-            if normalized.is_empty() {
-                continue;
-            }
-
-            let splits: Vec<&str> = splitter
-                .split(&normalized)
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .collect();
-
-            let parts = if splits.is_empty() {
-                vec![normalized.as_str()]
-            } else {
-                splits
-            };
-
-            for part in parts {
-                let tokens = approximate_token_count(part);
-                if tokens == 0 {
-                    continue;
-                }
-                sentences.push(SentenceInfo {
-                    text: part.to_string(),
-                    tokens,
-                    page: page_number,
-                    heading: last_heading.clone(),
-                    index: sentence_index,
-                });
-                sentence_index += 1;
-            }
+            self.process_block(block, page_number);
         }
     }
 
-    if sentences.is_empty() {
-        let normalized = normalize_whitespace(text);
-        if !normalized.is_empty() {
-            #[cfg(feature = "tracing")]
-            tracing::debug!("Fallback: treating entire text as single sentence");
-            sentences.push(SentenceInfo {
-                text: normalized.clone(),
-                tokens: approximate_token_count(&normalized),
-                page: 1,
-                heading: None,
-                index: 0,
-            });
+    fn process_block(&mut self, block: &str, page_number: usize) {
+        let lines: Vec<&str> = block.lines().collect();
+
+        // Case 1: Block is just a heading
+        if lines.len() == 1 && is_heading(lines[0]) {
+            self.last_heading = Some(lines[0].trim().to_string());
+            return;
+        }
+
+        // Case 2: Block contains paragraph text, possibly starting with heading
+        let mut paragraph_lines = Vec::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // If the first line of what we thought was a paragraph is actually a heading
+            if paragraph_lines.is_empty() && is_heading(trimmed) {
+                self.last_heading = Some(trimmed.to_string());
+                continue;
+            }
+            paragraph_lines.push(trimmed);
+        }
+
+        if paragraph_lines.is_empty() {
+            return;
+        }
+
+        self.process_paragraph(&paragraph_lines, page_number);
+    }
+
+    fn process_paragraph(&mut self, lines: &[&str], page_number: usize) {
+        let normalized = normalize_from_parts(lines);
+        if normalized.is_empty() {
+            return;
+        }
+
+        let splits: Vec<&str> = self
+            .splitter
+            .split(&normalized)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+
+        let parts = if splits.is_empty() {
+            vec![normalized.as_str()]
+        } else {
+            splits
+        };
+
+        for part in parts {
+            let heading = self.last_heading.clone();
+            self.push_sentence(part.to_string(), page_number, heading);
         }
     }
+
+    fn push_sentence(&mut self, text: String, page: usize, heading: Option<String>) {
+        let tokens = approximate_token_count(&text);
+        if tokens == 0 {
+            return;
+        }
+
+        self.sentences.push(SentenceInfo {
+            text,
+            tokens,
+            page,
+            heading,
+            index: self.sentence_index,
+        });
+        self.sentence_index += 1;
+    }
+}
+
+#[cfg_attr(feature = "tracing", instrument(skip(text)))]
+fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
+    let mut extractor = SentenceExtractor::new();
+    extractor.extract(text);
 
     #[cfg(feature = "tracing")]
-    tracing::trace!("Extracted {} sentences", sentences.len());
+    tracing::trace!("Extracted {} sentences", extractor.sentences.len());
 
-    sentences
+    extractor.sentences
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -480,5 +516,57 @@ mod tests {
         let chunks = chunk_text(text, 1, 0);
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+
+    #[test]
+    fn test_heading_behavior() {
+        let text = "Heading 1\n\nBody text.\n\nHeading 2\nBody text 2.";
+        let sentences = extract_sentences(text);
+
+        // Debug output to see what we actually get
+        for (i, s) in sentences.iter().enumerate() {
+            println!("Sentence {}: '{}', heading: {:?}", i, s.text, s.heading);
+        }
+
+        // Based on current logic:
+        // "Heading 1" is a block. split("\n\n").
+        // lines.len() == 1. is_heading("Heading 1") -> true (short, mixed case/numeric?).
+        // Actually "Heading 1" has uppercase H, lowercase eading.
+        // is_heading checks:
+        //  - word_count (2) <= 12.
+        //  - uppercase > 0.
+        //  - lowercase > 0.
+        //  - word_count <= 4 && uppercase >= lowercase? "Heading 1": 2 words. "H" "1"? No.
+        //  - heading_regex?
+
+        // Wait, "Heading 1" might not match is_heading logic if not careful.
+        // "Heading 1" has 1 uppercase ('H'). 6 lowercase.
+        // uppercase >= lowercase? 1 >= 6 False.
+        // heading_regex? "^\d+\.\s". No.
+
+        // Let's use a clearer heading: "1. Introduction"
+
+        let text_clear = "1. Introduction\n\nBody text.\n\n2. Conclusion\nBody text 2.";
+        let sentences = extract_sentences(text_clear);
+
+        assert_eq!(sentences.len(), 2);
+        assert_eq!(sentences[0].text, "Body text.");
+        assert_eq!(sentences[0].heading, Some("1. Introduction".to_string()));
+
+        assert_eq!(sentences[1].text, "Body text 2.");
+        // "2. Conclusion" is followed by "\nBody text 2." in the SAME block?
+        // No, I used "\n\n" in the string literal.
+        // "2. Conclusion\nBody text 2." -> This is ONE block if split by "\n\n".
+        // Inside block:
+        // Line 1: "2. Conclusion". is_heading -> true.
+        // last_heading updated. continue.
+        // Line 2: "Body text 2.". Added to paragraph_lines.
+
+        assert_eq!(sentences[1].heading, Some("2. Conclusion".to_string()));
     }
 }
