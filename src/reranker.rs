@@ -16,6 +16,7 @@ struct DetailedScore {
 }
 
 /// Calibration statistics for determining optimal timeout
+#[derive(Debug, Clone)]
 pub struct CalibrationStats {
     pub mean_ms: f64,
     pub median_ms: f64,
@@ -635,11 +636,12 @@ Answer:"#
         // Process remaining candidates as futures complete
         while let Some((duration, result)) = futures.next().await {
             let duration_ms = duration.as_millis() as f64;
-            durations_ms.push(duration_ms);
 
             match result {
                 Ok(_) => {
                     tracing::debug!("Calibration sample completed in {:.0}ms", duration_ms);
+                    // Only count successful requests for timeout calibration
+                    durations_ms.push(duration_ms);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -656,6 +658,10 @@ Answer:"#
             }
         }
 
+        if durations_ms.is_empty() {
+            return Err(anyhow::anyhow!("All calibration samples failed"));
+        }
+
         // Calculate statistics
         durations_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -669,7 +675,9 @@ Answer:"#
         let p99_idx = ((0.99 * (n - 1) as f64).round() as usize).min(n - 1);
         let p95_ms = durations_ms[p95_idx];
         let p99_ms = durations_ms[p99_idx];
-        let max_ms = *durations_ms.last().unwrap();
+        let max_ms = *durations_ms
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("All calibration samples failed"))?;
 
         let stats = CalibrationStats {
             mean_ms,
