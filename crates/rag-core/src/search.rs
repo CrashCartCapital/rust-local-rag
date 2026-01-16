@@ -430,12 +430,18 @@ impl LexicalIndex {
         // instead of sorting the whole vector in O(N log N).
         if limit > 0 && results.len() > limit {
             results.select_nth_unstable_by(limit, |a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
             });
             results.truncate(limit);
         }
 
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         results
     }
 
@@ -1305,5 +1311,26 @@ mod tests {
         // With equal scores, should be sorted alphabetically by chunk_id
         let ids: Vec<&str> = candidates.iter().map(|c| c.chunk_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_lexical_index_stability() {
+        let mut index = LexicalIndex::new();
+
+        // Add multiple chunks with identical content (same score)
+        let chunks = vec!["a", "b", "c", "d", "e", "f", "g", "h"];
+        for id in &chunks {
+            index.add_chunk(id, "common text content");
+        }
+
+        // Search with limit < total chunks
+        // With deterministic tie-breaking (ID asc), we should get the first 3 alphabetically
+        let limit = 3;
+        let results = index.score("common", limit);
+
+        assert_eq!(results.len(), limit);
+
+        let ids: Vec<String> = results.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 }
