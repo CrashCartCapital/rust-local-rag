@@ -245,6 +245,7 @@ Answer:"#
             b.relevance
                 .partial_cmp(&a.relevance)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
         Ok(results)
