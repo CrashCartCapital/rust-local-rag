@@ -390,7 +390,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             }
         }
 
-        scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.0.total_cmp(&a.0));
 
         let candidates: Vec<RerankerCandidate> = scores
             .into_iter()
@@ -480,7 +480,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .fold(0.0_f32, f32::max)
             .max(f32::EPSILON);
 
-        let mut scores: Vec<(f32, f32, f32, DocumentChunk)> = Vec::new();
+        let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.chunks.get(&chunk_id) {
@@ -493,12 +493,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 let combined_score =
                     weights.embedding * embedding_score + weights.lexical * lexical_score;
 
-                scores.push((
-                    combined_score,
-                    embedding_score,
-                    lexical_score,
-                    chunk.clone(),
-                ));
+                scores.push((combined_score, embedding_score, lexical_score, chunk));
             }
         }
 
@@ -624,8 +619,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             ordered_results.sort_by(|a, b| {
                 b.result
                     .score
-                    .partial_cmp(&a.result.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.result.score)
                     .then_with(|| a.result.chunk_id.cmp(&b.result.chunk_id))
             });
 
@@ -636,8 +630,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             let mut fallback_candidates: Vec<_> = candidate_map.values().collect();
             fallback_candidates.sort_by(|a, b| {
                 b.initial_score
-                    .partial_cmp(&a.initial_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.initial_score)
                     .then_with(|| a.chunk_id.cmp(&b.chunk_id))
             });
             for candidate in fallback_candidates {
@@ -1072,5 +1065,30 @@ mod tests {
                 current.score
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_search_truncation_optimization() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        // Add 20 documents
+        for i in 0..20 {
+            engine
+                .upsert_document(
+                    &format!("doc{}.txt", i),
+                    "Cats are great pets.",
+                    Some(format!("h{}", i)),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Search for top 5.
+        // This triggers the path where candidates (20) > top_k (5).
+        // It ensures that sorting/truncating of reference-based `scores` works correctly
+        // before converting to owned `SearchCandidate`s.
+        let results = engine.search("cats", 5, None).await.unwrap();
+
+        assert_eq!(results.len(), 5);
     }
 }
