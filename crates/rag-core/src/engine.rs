@@ -169,7 +169,10 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             return Ok(None);
         }
 
-        let fragments = chunk_text(text, self.config.chunk_tokens, self.config.sentence_overlap);
+        let fragments = chunk_text(text, self.config.chunk_tokens, self.config.sentence_overlap)
+            .map_err(|e| {
+                EngineError::validation_no_chunk(crate::error::ValidationKind::Other(e.to_string()))
+            })?;
 
         let filtered: Vec<(usize, ChunkFragment)> = fragments
             .into_iter()

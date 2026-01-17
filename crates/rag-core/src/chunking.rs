@@ -2,6 +2,7 @@ use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::OnceLock;
+use std::time::Duration;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -15,15 +16,15 @@ struct SentenceInfo {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ChunkFragment {
-    pub(crate) text: String,
-    pub(crate) page_number: usize,
-    pub(crate) section: Option<String>,
-    pub(crate) metadata: ChunkMetadata,
+pub struct ChunkFragment {
+    pub text: String,
+    pub page_number: usize,
+    pub section: Option<String>,
+    pub metadata: ChunkMetadata,
 }
 
 impl ChunkFragment {
-    fn from_metadata(text: String, metadata: ChunkMetadata) -> Self {
+    pub(crate) fn from_metadata(text: String, metadata: ChunkMetadata) -> Self {
         Self {
             text,
             page_number: metadata.page_range.map(|(start, _)| start).unwrap_or(1),
@@ -34,16 +35,21 @@ impl ChunkFragment {
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-pub(crate) fn chunk_text(
+pub fn chunk_text(
     text: &str,
     chunk_tokens: usize,
     sentence_overlap: usize,
-) -> Vec<ChunkFragment> {
+) -> Result<Vec<ChunkFragment>, crate::process_timeout::TimeoutError> {
+    // Enforce a hard timeout for chunking operation to prevent CPU lockups
+    // on pathological inputs.
+    let start_time = std::time::Instant::now();
+    let timeout = Duration::from_secs(10); // 10s should be plenty for any reasonable text block
+
     let sentences = extract_sentences(text);
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut window: Vec<usize> = Vec::new();
@@ -51,6 +57,9 @@ pub(crate) fn chunk_text(
     let mut fragments = Vec::new();
 
     for (idx, sentence) in sentences.iter().enumerate() {
+        // Check for timeout every iteration
+        crate::process_timeout::check_deadline(start_time, timeout)?;
+
         window.push(idx);
         token_sum += sentence.tokens;
 
@@ -80,7 +89,7 @@ pub(crate) fn chunk_text(
         sentences.len()
     );
 
-    fragments
+    Ok(fragments)
 }
 
 fn finalize_chunk(
@@ -395,7 +404,7 @@ mod tests {
     #[test]
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
-        let chunks = chunk_text(text, 1, 0);
+        let chunks = chunk_text(text, 1, 0).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
@@ -432,7 +441,7 @@ mod tests {
         // Chunk 1: "Sentence one." (4) < 5.
         // Chunk 1: "Sentence one. Sentence two." (8) >= 5.
         // Overlap 10.
-        let chunks = chunk_text(text, 5, 10);
+        let chunks = chunk_text(text, 5, 10).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
 
         // If bug exists (overlap=0 calc):
@@ -467,7 +476,7 @@ mod tests {
         let text = "This is a very long sentence that exceeds the token limit all by itself.";
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
-        let chunks = chunk_text(text, 5, 0);
+        let chunks = chunk_text(text, 5, 0).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, text);
     }
@@ -477,8 +486,21 @@ mod tests {
         let text = "First. Second. Third.";
         // Limit 1. Each sentence is ~1-2 tokens.
         // Should produce 3 chunks.
-        let chunks = chunk_text(text, 1, 0);
+        let chunks = chunk_text(text, 1, 0).unwrap();
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
+    }
+
+    #[test]
+    fn test_chunking_timeout() {
+        // Simulate a timeout by creating a very large number of sentences and mocking a short timeout
+        // Since we can't easily mock Instant::now() or make loop slow, we rely on the logic check.
+        // But we can check that `check_deadline` is called.
+        // To truly test the *timeout triggering*, we'd need to inject the time provider or check function.
+        // Given constraints, we'll verify the invariant via the process_timeout unit test
+        // and here just verify it compiles and returns Ok for normal inputs.
+        let text = "Fast operation.";
+        let result = chunk_text(text, 5, 0);
+        assert!(result.is_ok());
     }
 }

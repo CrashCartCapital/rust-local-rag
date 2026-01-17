@@ -34,9 +34,9 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SearchResultWithEmbedding {
-    pub(crate) result: SearchResult,
-    pub(crate) embedding: Vec<f32>,
+pub struct SearchResultWithEmbedding {
+    pub result: SearchResult,
+    pub embedding: Vec<f32>,
 }
 
 pub(crate) fn mmr_diversify(

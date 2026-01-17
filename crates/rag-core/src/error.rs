@@ -71,6 +71,8 @@ pub enum ValidationKind {
     EmptyText,
     /// Document hash mismatch (corruption or concurrent modification)
     HashMismatch { expected: String, got: String },
+    /// Other validation error
+    Other(String),
 }
 
 impl std::fmt::Display for ValidationKind {
@@ -85,6 +87,7 @@ impl std::fmt::Display for ValidationKind {
             ValidationKind::HashMismatch { expected, got } => {
                 write!(f, "hash mismatch: expected {expected}, got {got}")
             }
+            ValidationKind::Other(msg) => write!(f, "validation error: {msg}"),
         }
     }
 }
