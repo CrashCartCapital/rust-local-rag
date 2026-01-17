@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## PRD Rules
+
+**NO TIME ESTIMATES IN PRDs.** Multiple AI pair coders work on this codebase - time estimates are meaningless. Focus on:
+- What needs to be done (requirements, tasks)
+- Why it matters (priorities, dependencies)
+- How to verify it's done (acceptance criteria, tests)
+
+Never include hours, days, or "Wave X" duration labels.
+
 ## Essential References
 
 - **MCP Tools & AI Ensemble**: See @~/.claude/MCP_TOOLS_REF.md for complete tool inventory, AI ensemble patterns, and workflow methodology
