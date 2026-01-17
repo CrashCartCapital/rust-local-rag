@@ -1,7 +1,7 @@
 use crate::job_manager::JobManager;
 use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
-use rag_core::{EmbeddingError, EngineError};
+use rag_core::{EmbeddingError, EngineError, RerankError};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{Instrument, instrument};
@@ -80,6 +80,37 @@ fn api_error(
     )
 }
 
+fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
+    match e {
+        EngineError::Validation { kind, .. } => {
+            (axum::http::StatusCode::BAD_REQUEST, kind.to_string())
+        }
+        EngineError::DocumentNotFound(name) => (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Document {name} not found"),
+        ),
+        EngineError::Embedding(EmbeddingError::Timeout(_)) => {
+            (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
+        }
+        EngineError::Embedding(EmbeddingError::Connection(_)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+        }
+        EngineError::Embedding(EmbeddingError::Api(_)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+        }
+        EngineError::Embedding(EmbeddingError::ModelNotFound(_)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+        }
+        EngineError::Rerank(RerankError::Unavailable(_)) => {
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+        EngineError::Rerank(RerankError::InvalidResponse(_)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+        }
+        _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 #[instrument(skip(app_state), fields(query_len = request.query.len(), top_k = %request.top_k, diversity = %request.diversity_factor))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
@@ -125,25 +156,7 @@ async fn http_search(
         Err(e) => {
             tracing::error!("Search error: {}", e);
             if let Some(engine_error) = e.downcast_ref::<EngineError>() {
-                let (status, msg) = match engine_error {
-                    EngineError::Validation { kind, .. } => {
-                        (axum::http::StatusCode::BAD_REQUEST, kind.to_string())
-                    }
-                    EngineError::DocumentNotFound(name) => (
-                        axum::http::StatusCode::NOT_FOUND,
-                        format!("Document {name} not found"),
-                    ),
-                    EngineError::Embedding(EmbeddingError::Timeout(_)) => {
-                        (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
-                    }
-                    EngineError::Embedding(EmbeddingError::Connection(_)) => {
-                        (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
-                    }
-                    EngineError::Embedding(EmbeddingError::Api(_)) => {
-                        (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
-                    }
-                    _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-                };
+                let (status, msg) = map_engine_error(engine_error);
                 Err(api_error(status, msg))
             } else {
                 Err(api_error(
@@ -300,4 +313,54 @@ pub(crate) fn create_api_router() -> axum::Router<AppState> {
         .route("/jobs/active", axum::routing::get(http_get_active_job))
         .route("/jobs/{job_id}", axum::routing::get(http_get_job_status))
         .layer(axum::middleware::from_fn(trace_request))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rag_core::ValidationKind;
+
+    #[test]
+    fn test_map_engine_error() {
+        // Test Validation mapping
+        let err = EngineError::Validation {
+            chunk_id: None,
+            kind: ValidationKind::EmptyText,
+        };
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Test DocumentNotFound mapping
+        let err = EngineError::DocumentNotFound("test.pdf".to_string());
+        let (status, msg) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert!(msg.contains("Document test.pdf not found"));
+
+        // Test Embedding Timeout
+        let err =
+            EngineError::Embedding(EmbeddingError::Timeout(std::time::Duration::from_secs(5)));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::GATEWAY_TIMEOUT);
+
+        // Test Embedding ModelNotFound (New)
+        let err = EngineError::Embedding(EmbeddingError::ModelNotFound("gpt-42".to_string()));
+        let (status, msg) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert!(msg.contains("model not found"));
+
+        // Test Rerank Unavailable (New)
+        let err = EngineError::Rerank(RerankError::Unavailable("down".to_string()));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Test Rerank InvalidResponse (New)
+        let err = EngineError::Rerank(RerankError::InvalidResponse("bad json".to_string()));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+
+        // Test Default/Generic
+        let err = EngineError::Config("bad config".to_string());
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
