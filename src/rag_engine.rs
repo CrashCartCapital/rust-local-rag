@@ -578,6 +578,7 @@ mod tests {
     use super::*;
     use lopdf::content::Content;
     use lopdf::{Dictionary, Document, Object, Stream};
+    use serial_test::serial;
 
     // Helper to create a PDF with no text
     fn create_empty_pdf() -> Vec<u8> {
@@ -618,7 +619,34 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_prepare_document_empty_text_returns_validation_error() {
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: &str) -> Self {
+                let original = std::env::var_os(key);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+                Self { key, original }
+            }
+        }
+
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
         // Setup simple config
         let config = Config::default();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -630,16 +658,8 @@ mod tests {
 
         let mock_server = MockServer::start().await;
 
-        // Safe to set env var in test because serial_test or separate process,
-        // but here assuming it's okay for unit test.
-        // Actually better to use unsafe block if strictly needed or just Config.
-        // But EmbeddingService reads from env vars directly in new() if I recall?
-        // Let's check config usage.
-
-        unsafe {
-            std::env::set_var("OLLAMA_URL", mock_server.uri());
-            std::env::set_var("OLLAMA_EMBEDDING_MODEL", "test-model");
-        }
+        let _ollama_url = EnvVarGuard::set("OLLAMA_URL", &mock_server.uri());
+        let _ollama_embedding_model = EnvVarGuard::set("OLLAMA_EMBEDDING_MODEL", "test-model");
 
         // Mock response for any embedding call
         Mock::given(method("POST"))
