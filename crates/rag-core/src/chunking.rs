@@ -399,7 +399,7 @@ fn split_part_hard(text: &str, limit: usize) -> Vec<String> {
         let candidate = if current_chunk.is_empty() {
             word.to_string()
         } else {
-            format!("{} {}", current_chunk, word)
+            format!("{current_chunk} {word}")
         };
 
         if approximate_token_count(&candidate) > limit {
