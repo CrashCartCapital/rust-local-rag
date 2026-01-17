@@ -39,7 +39,7 @@ pub(crate) fn chunk_text(
     chunk_tokens: usize,
     sentence_overlap: usize,
 ) -> Vec<ChunkFragment> {
-    let sentences = extract_sentences(text);
+    let sentences = extract_sentences(text, Some(chunk_tokens));
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
@@ -154,7 +154,7 @@ fn finalize_chunk(
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
+fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<SentenceInfo> {
     let splitter = sentence_splitter();
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
@@ -214,6 +214,28 @@ fn extract_sentences(text: &str) -> Vec<SentenceInfo> {
                 if tokens == 0 {
                     continue;
                 }
+
+                if let Some(limit) = hard_token_limit {
+                    if tokens > limit {
+                        let sub_parts = split_part_hard(part, limit);
+                        for sub in sub_parts {
+                            let sub_tokens = approximate_token_count(&sub);
+                            if sub_tokens == 0 {
+                                continue;
+                            }
+                            sentences.push(SentenceInfo {
+                                text: sub,
+                                tokens: sub_tokens,
+                                page: page_number,
+                                heading: last_heading.clone(),
+                                index: sentence_index,
+                            });
+                            sentence_index += 1;
+                        }
+                        continue;
+                    }
+                }
+
                 sentences.push(SentenceInfo {
                     text: part.to_string(),
                     tokens,
@@ -349,6 +371,84 @@ fn sentence_splitter() -> &'static srx::Rules {
     })
 }
 
+fn split_part_hard(text: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return vec![text.to_string()];
+    }
+    // First try splitting by whitespace
+    let mut result = Vec::new();
+    let words: Vec<&str> = text.split_whitespace().collect();
+
+    // If it's a single word (no whitespace) or just one word
+    if words.len() <= 1 {
+        return split_massive_word(text, limit);
+    }
+
+    let mut current_chunk = String::new();
+    for word in words {
+        let word_tokens = approximate_token_count(word);
+        if word_tokens > limit {
+            if !current_chunk.is_empty() {
+                result.push(current_chunk);
+                current_chunk = String::new();
+            }
+            result.extend(split_massive_word(word, limit));
+            continue;
+        }
+
+        let candidate = if current_chunk.is_empty() {
+            word.to_string()
+        } else {
+            format!("{} {}", current_chunk, word)
+        };
+
+        if approximate_token_count(&candidate) > limit {
+            if !current_chunk.is_empty() {
+                result.push(current_chunk);
+            }
+            current_chunk = word.to_string();
+        } else {
+            current_chunk = candidate;
+        }
+    }
+    if !current_chunk.is_empty() {
+        result.push(current_chunk);
+    }
+    result
+}
+
+fn split_massive_word(text: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return vec![text.to_string()];
+    }
+    let mut result = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+
+    while start < chars.len() {
+        let mut end = (start + limit * 4).min(chars.len());
+
+        loop {
+            let slice: String = chars[start..end].iter().collect();
+            let tokens = approximate_token_count(&slice);
+
+            if tokens <= limit {
+                result.push(slice);
+                start = end;
+                break;
+            } else {
+                if end - start <= 1 {
+                    result.push(slice);
+                    start = end;
+                    break;
+                }
+                end -= 1;
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,7 +457,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text, None);
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -370,7 +470,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text);
+        let sentences = extract_sentences(test_text, None);
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -395,7 +495,8 @@ mod tests {
     #[test]
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
-        let chunks = chunk_text(text, 1, 0);
+        // Limit 4 is exactly enough for one sentence (~4 tokens).
+        let chunks = chunk_text(text, 4, 0);
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
@@ -468,17 +569,54 @@ mod tests {
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
         let chunks = chunk_text(text, 5, 0);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, text);
+        // Should be split into multiple chunks
+        assert!(chunks.len() > 1);
+        for chunk in chunks {
+            // Chunks can exceed limit by one sentence size. Since max sentence size is limit,
+            // max chunk size is roughly 2 * limit.
+            assert!(
+                chunk.metadata.token_count <= 10,
+                "Chunk exceeded relaxed limit (2x): {}",
+                chunk.metadata.token_count
+            );
+        }
     }
 
     #[test]
     fn test_chunking_tiny_limit() {
         let text = "First. Second. Third.";
-        // Limit 1. Each sentence is ~1-2 tokens.
+        // Limit 2. Each sentence is ~1-2 tokens.
         // Should produce 3 chunks.
-        let chunks = chunk_text(text, 1, 0);
+        let chunks = chunk_text(text, 2, 0);
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
+    }
+
+    #[test]
+    fn test_chunking_massive_token_splitting() {
+        // Create a string that is effectively one giant word
+        let limit = 10;
+        // Each char is 0.25 tokens. We want > 10 tokens.
+        // 100 chars -> 25 tokens.
+        let text = "a".repeat(100);
+
+        let chunks = chunk_text(&text, limit, 0);
+
+        // Currently this returns 1 chunk of size 25.
+        // We want it to split.
+        // With limit 10, we expect roughly 3 chunks.
+        assert!(
+            chunks.len() > 1,
+            "Should split massive token. Got: {}",
+            chunks.len()
+        );
+        for chunk in chunks {
+            assert!(
+                chunk.metadata.token_count <= limit,
+                "Chunk token count {} exceeds limit {}",
+                chunk.metadata.token_count,
+                limit
+            );
+        }
     }
 }
