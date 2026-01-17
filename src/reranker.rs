@@ -522,12 +522,12 @@ Answer:"#
 
             if clean_token == "yes" {
                 // Take the highest (least negative) yes logprob
-                if yes_logprob.is_none() || prob.logprob > yes_logprob.unwrap() {
+                if yes_logprob.map_or(true, |current| prob.logprob > current) {
                     yes_logprob = Some(prob.logprob);
                 }
             } else if clean_token == "no" {
                 // Take the highest (least negative) no logprob
-                if no_logprob.is_none() || prob.logprob > no_logprob.unwrap() {
+                if no_logprob.map_or(true, |current| prob.logprob > current) {
                     no_logprob = Some(prob.logprob);
                 }
             }
@@ -539,11 +539,11 @@ Answer:"#
         let clean_generated = generated_trimmed.trim_matches(|c: char| !c.is_alphabetic());
 
         if clean_generated == "yes"
-            && (yes_logprob.is_none() || first_token.logprob > yes_logprob.unwrap())
+            && yes_logprob.map_or(true, |current| first_token.logprob > current)
         {
             yes_logprob = Some(first_token.logprob);
         } else if clean_generated == "no"
-            && (no_logprob.is_none() || first_token.logprob > no_logprob.unwrap())
+            && no_logprob.map_or(true, |current| first_token.logprob > current)
         {
             no_logprob = Some(first_token.logprob);
         }
@@ -669,7 +669,7 @@ Answer:"#
         let p99_idx = ((0.99 * (n - 1) as f64).round() as usize).min(n - 1);
         let p95_ms = durations_ms[p95_idx];
         let p99_ms = durations_ms[p99_idx];
-        let max_ms = *durations_ms.last().unwrap();
+        let max_ms = *durations_ms.last().unwrap_or(&0.0);
 
         let stats = CalibrationStats {
             mean_ms,
