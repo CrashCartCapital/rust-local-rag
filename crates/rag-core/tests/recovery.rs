@@ -29,6 +29,7 @@ impl EmbeddingBackend for MockBackend {
     }
 }
 
+#[cfg(feature = "persistence")]
 #[tokio::test]
 async fn test_load_corrupted_index_triggers_reindex() {
     // 1. Setup temp dir
@@ -44,9 +45,6 @@ async fn test_load_corrupted_index_triggers_reindex() {
     // 3. Initialize engine and attempt load
     let mut engine = RagEngine::new(MockBackend);
 
-    // We explicitly enable persistence feature in Cargo.toml for tests usually,
-    // but here we are calling load_from_dir which is guarded by #[cfg(feature = "persistence")]
-    // so we assume the test runs with --all-features or persistence enabled.
     let result = engine.load_from_dir(data_dir);
 
     // 4. Verification
