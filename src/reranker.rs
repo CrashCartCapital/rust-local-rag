@@ -669,7 +669,9 @@ Answer:"#
         let p99_idx = ((0.99 * (n - 1) as f64).round() as usize).min(n - 1);
         let p95_ms = durations_ms[p95_idx];
         let p99_ms = durations_ms[p99_idx];
-        let max_ms = *durations_ms.last().unwrap();
+        let max_ms = *durations_ms
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("No calibration data collected"))?;
 
         let stats = CalibrationStats {
             mean_ms,
@@ -816,5 +818,64 @@ mod tests {
         }
 
         assert!(template.contains("Consider semantic meaning"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_calibrate_timeout_happy_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock tags endpoint for init
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{ "name": "rerank-model" }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock generate endpoint for calibration
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": "yes"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        unsafe {
+            std::env::set_var("OLLAMA_URL", mock_server.uri());
+            std::env::set_var("OLLAMA_RERANK_MODEL", "rerank-model");
+        }
+
+        let config = Config::default();
+        let service = RerankerService::new(&config)
+            .await
+            .expect("Failed to create service");
+
+        let candidate = RerankerCandidate {
+            chunk_id: "test".to_string(),
+            document: "doc".to_string(),
+            text: "text".to_string(),
+            page_number: 1,
+            section: None,
+            initial_score: 0.5,
+        };
+
+        let stats = service
+            .calibrate_timeout("query", &[candidate], 1)
+            .await
+            .expect("Calibration failed");
+
+        assert!(stats.sample_size > 0);
+        assert!(stats.max_ms >= 0.0);
+
+        unsafe {
+            std::env::remove_var("OLLAMA_URL");
+            std::env::remove_var("OLLAMA_RERANK_MODEL");
+        }
     }
 }
