@@ -411,7 +411,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len())))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
     async fn search_internal(
         &self,
         query: &str,
@@ -466,6 +466,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         tracing::debug!(
             ann_candidates = ann_count,
             lexical_candidates = lexical_map.len(),
+            candidates_overlap =
+                (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
             total_unique_candidates = candidate_ids.len(),
             "Candidate selection complete"
         );
@@ -661,10 +663,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(
-            "Search internal finished with {} results",
-            ordered_results.len()
-        );
+        if let Some(first) = ordered_results.first() {
+            tracing::debug!(
+                top_match_id = %first.result.chunk_id,
+                top_match_score = %first.result.score,
+                top_match_doc = %first.result.document,
+                result_count = ordered_results.len(),
+                "Search internal finished"
+            );
+        } else {
+            tracing::debug!("Search internal finished with 0 results");
+        }
 
         Ok(ordered_results)
     }
