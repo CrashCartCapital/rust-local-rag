@@ -13,12 +13,17 @@ This guide covers building, running, and contributing to `rust-local-rag`.
 We use `make` for common tasks.
 
 ```bash
-# Development run (console logging)
-make run
+# Development
+make run                    # Run application (DEV=true)
+make dev-start              # Start Ollama + Run application
+make watch                  # Watch for changes and run checks
+make logs                   # View application logs
+make kill                   # Kill all rust-local-rag processes
 
-# Build only
+# Build
 make build                  # Debug build
 make release                # Optimized release build
+make clean                  # Clean build artifacts
 
 # Testing
 make test                   # Run tests
@@ -30,6 +35,10 @@ make lint                   # Clippy
 make clippy                 # Clippy with warnings as errors
 make fmt                    # Format code
 
+# Maintenance
+make update                 # Update dependencies
+make fix                    # Auto-fix clippy issues
+
 # Full CI Pipeline
 make ci                     # check + lint + test + build
 ```
@@ -37,8 +46,8 @@ make ci                     # check + lint + test + build
 ## Installation
 
 ```bash
-make install                # Install debug binary to ~/.cargo/bin
-make install-release        # Install optimized binary
+make install                # Install release binary to ~/.cargo/bin
+make install-release        # Install optimized release binary (explicit profile)
 make install-production     # Build release + install
 make uninstall              # Remove from system
 make which-installed        # Check if installed and location
