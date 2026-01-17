@@ -48,6 +48,13 @@ impl Config {
         }
 
         if let Some(value) = parse_env_f64("RAG_DEFAULT_LOGPROB")? {
+            if !value.is_finite() || value > 0.0 {
+                return Err(ConfigError {
+                    var: "RAG_DEFAULT_LOGPROB",
+                    value: value.to_string(),
+                    message: "must be finite and <= 0.0".to_string(),
+                });
+            }
             config.default_logprob_fallback = value;
         }
 
@@ -139,5 +146,73 @@ fn parse_env_nonzero_usize(var: &'static str) -> Result<Option<NonZeroUsize>, Co
             value: String::new(),
             message: e.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_env_var<F>(key: &str, value: &str, f: F)
+    where
+        F: FnOnce(),
+    {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: We hold the mutex so no other test in this module can access the environment.
+        // However, this is still not thread-safe if other threads outside this module access env.
+        // Given this is a unit test and we don't have other threads accessing env in tests, it's acceptable.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            std::env::remove_var(key);
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    fn test_rag_default_logprob_valid() {
+        with_env_var("RAG_DEFAULT_LOGPROB", "-5.5", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.default_logprob_fallback, -5.5);
+        });
+    }
+
+    #[test]
+    fn test_rag_default_logprob_zero() {
+        with_env_var("RAG_DEFAULT_LOGPROB", "0.0", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.default_logprob_fallback, 0.0);
+        });
+    }
+
+    #[test]
+    fn test_rag_default_logprob_positive() {
+        with_env_var("RAG_DEFAULT_LOGPROB", "0.1", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and <= 0.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_default_logprob_nan() {
+        with_env_var("RAG_DEFAULT_LOGPROB", "NaN", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and <= 0.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_default_logprob_inf() {
+        with_env_var("RAG_DEFAULT_LOGPROB", "inf", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and <= 0.0"));
+        });
     }
 }
