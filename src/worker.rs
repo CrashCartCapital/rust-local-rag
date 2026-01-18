@@ -5,10 +5,15 @@ use anyhow::{Context, Result};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, RwLockWriteGuard, Semaphore, mpsc};
 use tracing::Instrument;
 use tracing::instrument;
+
+/// Global timeout for lock acquisition in milliseconds.
+/// Can be reduced in tests to verify timeout behavior.
+static LOCK_TIMEOUT_MS: AtomicU64 = AtomicU64::new(30_000);
 
 struct ReindexOutcome {
     total_docs: i64,
@@ -70,8 +75,25 @@ pub struct TimedWriteLockGuard<'a, T> {
 impl<'a, T> TimedWriteLockGuard<'a, T> {
     /// Acquire an instrumented write lock.
     pub async fn acquire(lock: &'a RwLock<T>, context: impl Into<String>) -> Self {
+        let context_str = context.into();
         let wait_start = Instant::now();
-        let guard = lock.write().await;
+        // Enforce timeout for lock acquisition to prevent deadlocks
+        let timeout_ms = LOCK_TIMEOUT_MS.load(Ordering::Relaxed);
+        let guard =
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), lock.write()).await {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::error!(
+                        context = %context_str,
+                        timeout_ms = timeout_ms,
+                        "Failed to acquire write lock within timeout - potential deadlock"
+                    );
+                    panic!(
+                        "Deadlock protection: Timed out acquiring write lock for {}",
+                        context_str
+                    );
+                }
+            };
         let wait_ms = wait_start.elapsed().as_millis() as u64;
 
         if wait_ms > 100 {
@@ -81,7 +103,7 @@ impl<'a, T> TimedWriteLockGuard<'a, T> {
         Self {
             guard,
             start: Instant::now(),
-            context: context.into(),
+            context: context_str,
         }
     }
 }
@@ -750,5 +772,47 @@ mod tests {
             "Max should be at least 30ms from second lock, got {max_ms}ms"
         );
         assert!(max_ms < 60, "Max should be less than 60ms, got {max_ms}ms");
+    }
+
+    struct Defer<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for Defer<F> {
+        fn drop(&mut self) {
+            if let Some(f) = self.0.take() {
+                f();
+            }
+        }
+    }
+    // Simple defer macro/helper
+    macro_rules! defer {
+        ($($body:tt)*) => {
+            let _defer = Defer(Some(|| { $($body)* }));
+        };
+    }
+
+    #[tokio::test]
+    async fn test_lock_acquisition_timeout() {
+        // Lower timeout for test
+        let old_timeout = LOCK_TIMEOUT_MS.swap(100, Ordering::Relaxed);
+        defer! {
+            LOCK_TIMEOUT_MS.store(old_timeout, Ordering::Relaxed);
+        }
+
+        let data = Arc::new(RwLock::new(0));
+        let data_clone = data.clone();
+
+        // Hold lock indefinitely
+        let _guard = data.write().await;
+
+        // Spawn task to acquire lock - should panic after timeout
+        let handle = tokio::spawn(async move {
+            TimedWriteLockGuard::acquire(&data_clone, "test_timeout").await;
+        });
+
+        // Wait for real time (since we can't use pause/advance)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let res = handle.await;
+        assert!(res.is_err(), "Task should have failed");
+        assert!(res.unwrap_err().is_panic(), "Task should have panicked");
     }
 }
