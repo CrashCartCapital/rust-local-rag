@@ -426,7 +426,7 @@ fn split_massive_word(text: &str, limit: usize) -> Vec<String> {
     let mut start = 0;
 
     while start < chars.len() {
-        let mut end = (start + limit * 4).min(chars.len());
+        let mut end = (start + limit.saturating_mul(4)).min(chars.len());
 
         loop {
             let slice: String = chars[start..end].iter().collect();
@@ -618,5 +618,47 @@ mod tests {
                 limit
             );
         }
+    }
+
+    #[test]
+    fn test_split_massive_word_overflow() {
+        // `split_massive_word` uses `limit * 4` as an upper bound on chars-per-token.
+        // Make sure this calculation can't overflow.
+        let limit = (usize::MAX / 4) + 1;
+
+        let text = "a".repeat(20);
+        // Should produce 1 chunk because 20 tokens (approx) < massive limit
+        let chunks = split_massive_word(&text, limit);
+
+        assert_eq!(chunks.len(), 1, "Should have 1 chunk for massive limit");
+        assert_eq!(chunks[0], text, "Should preserve text");
+    }
+
+    #[test]
+    fn test_split_massive_word_unicode_boundaries() {
+        let limit = 2;
+        let text = "😀😀😀😀";
+
+        let chunks = split_massive_word(text, limit);
+        assert_eq!(chunks.len(), 1, "Should fit in one chunk");
+
+        // Let's use something that generates more tokens.
+        // "a".repeat(20).
+        // 20 chars -> 5 tokens.
+        // Limit 2.
+        // Should split into ~3 chunks (2 chunks of 8 chars=2tok, 1 chunk of 4 chars=1tok).
+
+        let text = "a".repeat(20);
+        let chunks = split_massive_word(&text, limit);
+        assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn test_split_massive_word_zero_limit_guard() {
+        let text = "test";
+        let chunks = split_massive_word(text, 0);
+        // Existing code guard: returns vec![text]
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "test");
     }
 }
