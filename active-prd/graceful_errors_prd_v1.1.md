@@ -220,7 +220,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
     - Modify: `src/bin/rag_tui/main.rs`
 
 ### Section: Tests
-- [ ] Task 7: Add Regression Tests
+- [x] Task 7: Add Regression Tests
   - **Description**: Create focused tests for common failure modes.
   - **Acceptance Criteria**:
     - Test: bad PDF file (0 bytes, non-PDF) handled gracefully

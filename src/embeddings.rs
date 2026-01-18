@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::config::Config;
+use crate::RagError;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -77,8 +78,28 @@ impl EmbeddingService {
             embedding_timeout: config.embedding_timeout,
         };
 
-        service.test_connection().await?;
-        service.verify_model().await?;
+        service.test_connection().await.map_err(|e| {
+            anyhow::Error::new(RagError::embedding(
+                format!("Failed to connect to Ollama at {}: {}", service.ollama_url, e),
+                format!(
+                    "Start Ollama and ensure it is reachable at '{}' (or set OLLAMA_URL)",
+                    service.ollama_url
+                ),
+            ))
+        })?;
+
+        service.verify_model().await.map_err(|e| {
+            anyhow::Error::new(RagError::embedding(
+                format!(
+                    "Embedding model '{}' is not available from Ollama at {}: {}",
+                    service.model, service.ollama_url, e
+                ),
+                format!(
+                    "Run 'ollama pull {model}' or set OLLAMA_EMBEDDING_MODEL to an installed model",
+                    model = service.model
+                ),
+            ))
+        })?;
 
         Ok(service)
     }

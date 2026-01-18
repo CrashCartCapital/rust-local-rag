@@ -2,16 +2,17 @@
   "prd_file": "active-prd/graceful_errors_prd_v1.1.md",
   "last_updated": "2026-01-18",
   "current_phase": "phase3",
-  "current_section": "TUI",
-  "current_task": "Task 6",
+  "current_section": "Tests",
+  "current_task": "Task 7",
   "completed_tasks": [
     "Task 1",
     "Task 2",
     "Task 3",
     "Task 4",
     "Task 5",
-    "Task 6"
+    "Task 6",
+    "Task 7"
   ],
   "blocked_tasks": [],
-  "notes": "Branch: feat/graceful-errors. Task 6 complete: TUI shows 'Connection lost. Please restart.' on disconnect transition; removed unwrap from model fetch select."
+  "notes": "Branch: feat/graceful-errors. Task 7 complete: added tests/error_handling.rs and mapped missing Ollama init errors to RagError::Embedding."
 }
