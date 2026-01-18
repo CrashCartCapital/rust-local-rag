@@ -154,7 +154,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
 ## Tasks
 
 ### Section: Error Types
-- [ ] Task 1: Create RagError Type
+- [x] Task 1: Create RagError Type
   - **Description**: Create `src/error.rs` with `RagError` enum using `thiserror`.
   - **Acceptance Criteria**:
     - `RagError` variants for: Config, PdfExtraction, Search, Embedding, ModelMismatch, PartialIndexFailure
