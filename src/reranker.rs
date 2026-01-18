@@ -524,12 +524,12 @@ Answer:"#
 
             if clean_token == "yes" {
                 // Take the highest (least negative) yes logprob
-                if yes_logprob.is_none() || prob.logprob > yes_logprob.unwrap() {
+                if yes_logprob.is_none_or(|curr| prob.logprob > curr) {
                     yes_logprob = Some(prob.logprob);
                 }
             } else if clean_token == "no" {
                 // Take the highest (least negative) no logprob
-                if no_logprob.is_none() || prob.logprob > no_logprob.unwrap() {
+                if no_logprob.is_none_or(|curr| prob.logprob > curr) {
                     no_logprob = Some(prob.logprob);
                 }
             }
@@ -540,12 +540,10 @@ Answer:"#
         let generated_trimmed = generated_lower.trim();
         let clean_generated = generated_trimmed.trim_matches(|c: char| !c.is_alphabetic());
 
-        if clean_generated == "yes"
-            && (yes_logprob.is_none() || first_token.logprob > yes_logprob.unwrap())
-        {
+        if clean_generated == "yes" && yes_logprob.is_none_or(|curr| first_token.logprob > curr) {
             yes_logprob = Some(first_token.logprob);
         } else if clean_generated == "no"
-            && (no_logprob.is_none() || first_token.logprob > no_logprob.unwrap())
+            && no_logprob.is_none_or(|curr| first_token.logprob > curr)
         {
             no_logprob = Some(first_token.logprob);
         }
@@ -825,5 +823,91 @@ mod tests {
         }
 
         assert!(template.contains("Consider semantic meaning"));
+    }
+
+    #[test]
+    fn test_compute_score_from_logprobs_logic() {
+        // Construct a dummy service for testing the method
+        let service = RerankerService {
+            client: reqwest::Client::new(),
+            ollama_url: "http://localhost:11434".to_string(),
+            model: "model".to_string(),
+            prompt_template: "prompt".to_string(),
+            timeout_duration: Duration::from_secs(10),
+            concurrency_limit: 1,
+            default_logprob_fallback: -100.0,
+        };
+
+        let chunk_id = "test_chunk";
+
+        // Case 1: Simple Yes/No
+        let logprobs = vec![TokenLogprob {
+            token: "Yes".to_string(),
+            logprob: -0.1,
+            top_logprobs: Some(vec![
+                TopLogprob {
+                    token: "Yes".to_string(),
+                    logprob: -0.1,
+                },
+                TopLogprob {
+                    token: "No".to_string(),
+                    logprob: -2.5,
+                },
+            ]),
+        }];
+
+        let result = service.compute_score_from_logprobs(&logprobs, chunk_id);
+        assert!(result.is_some());
+        let score = result.unwrap();
+        assert!(score.yes_logprob.is_some());
+        assert!(score.no_logprob.is_some());
+        assert!(score.score > 0.5); // Should favor Yes
+
+        // Case 2: Only Yes, no "No" in alternatives (fallback for No)
+        let logprobs = vec![TokenLogprob {
+            token: "Yes".to_string(),
+            logprob: -0.1,
+            top_logprobs: Some(vec![
+                TopLogprob {
+                    token: "Yes".to_string(),
+                    logprob: -0.1,
+                },
+                TopLogprob {
+                    token: "Yeah".to_string(),
+                    logprob: -1.0,
+                },
+            ]),
+        }];
+        let result = service.compute_score_from_logprobs(&logprobs, chunk_id);
+        let score = result.unwrap();
+        // The implementation falls back to default_logprob_fallback for missing No
+        assert_eq!(score.no_logprob.unwrap(), -100.0);
+
+        // Case 3: Verify the specific unwrap/panic logic we want to fix
+        // If yes_logprob is None, checking > unwrap() would panic.
+        // But the loop structure initializes them.
+        // The panic happens if `yes_logprob` is None but we try to unwrap it in the condition:
+        // if yes_logprob.is_none() || prob.logprob > yes_logprob.unwrap()
+        // This is safe because of || short-circuiting.
+        // However, if we change the code wrong, we break it.
+
+        // Let's ensure it handles empty top_logprobs correctly (returns None because `?` propogates)
+        let logprobs = vec![TokenLogprob {
+            token: "Yes".to_string(),
+            logprob: -0.1,
+            top_logprobs: Some(vec![]),
+        }];
+        // If top_logprobs is empty, yes/no logprob remain None.
+        // Then:
+        // clean_generated == "yes" -> checks yes_logprob.unwrap() if yes_logprob.is_none() is FALSE
+        // Here clean_generated IS "yes". yes_logprob is None.
+        // `yes_logprob.is_none()` is true.
+        // `||` short-circuits. `yes_logprob.unwrap()` is NOT called.
+        // So `yes_logprob` becomes `first_token.logprob`.
+
+        let result = service.compute_score_from_logprobs(&logprobs, chunk_id);
+        assert!(result.is_some());
+        let score = result.unwrap();
+        assert_eq!(score.yes_logprob.unwrap(), -0.1);
     }
 }
