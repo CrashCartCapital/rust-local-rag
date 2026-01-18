@@ -74,7 +74,7 @@ pub struct TimedWriteLockGuard<'a, T> {
 
 impl<'a, T> TimedWriteLockGuard<'a, T> {
     /// Acquire an instrumented write lock.
-    pub async fn acquire(lock: &'a RwLock<T>, context: impl Into<String>) -> Self {
+    pub async fn acquire(lock: &'a RwLock<T>, context: impl Into<String>) -> Result<Self> {
         let context_str = context.into();
         let wait_start = Instant::now();
         // Enforce timeout for lock acquisition to prevent deadlocks
@@ -88,10 +88,9 @@ impl<'a, T> TimedWriteLockGuard<'a, T> {
                         timeout_ms = timeout_ms,
                         "Failed to acquire write lock within timeout - potential deadlock"
                     );
-                    panic!(
-                        "Deadlock protection: Timed out acquiring write lock for {}",
-                        context_str
-                    );
+                    return Err(anyhow::anyhow!(
+                        "Timed out acquiring write lock for '{context_str}' after {timeout_ms}ms"
+                    ));
                 }
             };
         let wait_ms = wait_start.elapsed().as_millis() as u64;
@@ -100,11 +99,11 @@ impl<'a, T> TimedWriteLockGuard<'a, T> {
             tracing::debug!(wait_ms = wait_ms, "Write lock wait time");
         }
 
-        Self {
+        Ok(Self {
             guard,
             start: Instant::now(),
             context: context_str,
-        }
+        })
     }
 }
 
@@ -392,7 +391,7 @@ impl WorkerSupervisor {
         .await;
 
         {
-            let mut engine = TimedWriteLockGuard::acquire(rag_engine, "finalize_reindex").await;
+            let mut engine = TimedWriteLockGuard::acquire(rag_engine, "finalize_reindex").await?;
             engine.finalize_reindex().await?;
         }
         save_engine_to_disk(rag_engine).await?;
@@ -477,15 +476,26 @@ impl WorkerSupervisor {
                 Ok(None) => Ok(0),
                 Ok(Some(prepared)) => {
                     let chunk_count = {
-                        let mut engine = TimedWriteLockGuard::acquire(
+                        let mut engine = match TimedWriteLockGuard::acquire(
                             rag_engine,
                             format!("apply_document:{filename}"),
                         )
-                        .await;
-                        engine.apply_prepared_document(prepared).await?
+                        .await
+                        {
+                            Ok(engine) => engine,
+                            Err(e) => return Ok(Some((filename, Err(e)))),
+                        };
+
+                        match engine.apply_prepared_document(prepared).await {
+                            Ok(chunk_count) => chunk_count,
+                            Err(e) => return Ok(Some((filename, Err(e.into())))),
+                        }
                     };
 
-                    save_engine_to_disk(rag_engine).await?;
+                    if let Err(e) = save_engine_to_disk(rag_engine).await {
+                        return Ok(Some((filename, Err(e))));
+                    }
+
                     Ok(chunk_count)
                 }
                 Err(e) => Err(e),
@@ -673,7 +683,9 @@ mod tests {
 
         // Acquire instrumented lock and hold for ~50ms
         {
-            let mut guard = TimedWriteLockGuard::acquire(&data, "test_hold").await;
+            let mut guard = TimedWriteLockGuard::acquire(&data, "test_hold")
+                .await
+                .unwrap();
             *guard += 1;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -697,7 +709,9 @@ mod tests {
 
         // Acquire lock and read via Deref
         {
-            let guard = TimedWriteLockGuard::acquire(&data, "test_deref").await;
+            let guard = TimedWriteLockGuard::acquire(&data, "test_deref")
+                .await
+                .unwrap();
             assert_eq!(guard.len(), 2);
             assert_eq!(guard[0], "a");
         }
@@ -710,7 +724,9 @@ mod tests {
 
         // Acquire lock and modify via DerefMut
         {
-            let mut guard = TimedWriteLockGuard::acquire(&data, "test_deref_mut").await;
+            let mut guard = TimedWriteLockGuard::acquire(&data, "test_deref_mut")
+                .await
+                .unwrap();
             *guard = 100;
         }
 
@@ -728,7 +744,9 @@ mod tests {
 
         // Perform quick operation (no sleep)
         {
-            let mut guard = TimedWriteLockGuard::acquire(&data, "quick_op").await;
+            let mut guard = TimedWriteLockGuard::acquire(&data, "quick_op")
+                .await
+                .unwrap();
             guard.push_str("hello");
         }
 
@@ -749,19 +767,19 @@ mod tests {
 
         // First lock - 10ms
         {
-            let _guard = TimedWriteLockGuard::acquire(&data, "lock1").await;
+            let _guard = TimedWriteLockGuard::acquire(&data, "lock1").await.unwrap();
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         // Second lock - 30ms (should update max)
         {
-            let _guard = TimedWriteLockGuard::acquire(&data, "lock2").await;
+            let _guard = TimedWriteLockGuard::acquire(&data, "lock2").await.unwrap();
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
 
         // Third lock - 15ms (should NOT update max)
         {
-            let _guard = TimedWriteLockGuard::acquire(&data, "lock3").await;
+            let _guard = TimedWriteLockGuard::acquire(&data, "lock3").await.unwrap();
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -774,28 +792,16 @@ mod tests {
         assert!(max_ms < 60, "Max should be less than 60ms, got {max_ms}ms");
     }
 
-    struct Defer<F: FnOnce()>(Option<F>);
-    impl<F: FnOnce()> Drop for Defer<F> {
-        fn drop(&mut self) {
-            if let Some(f) = self.0.take() {
-                f();
-            }
-        }
-    }
-    // Simple defer macro/helper
-    macro_rules! defer {
-        ($($body:tt)*) => {
-            let _defer = Defer(Some(|| { $($body)* }));
-        };
-    }
-
     #[tokio::test]
     async fn test_lock_acquisition_timeout() {
-        // Lower timeout for test
         let old_timeout = LOCK_TIMEOUT_MS.swap(100, Ordering::Relaxed);
-        defer! {
-            LOCK_TIMEOUT_MS.store(old_timeout, Ordering::Relaxed);
+        struct ResetTimeout(u64);
+        impl Drop for ResetTimeout {
+            fn drop(&mut self) {
+                LOCK_TIMEOUT_MS.store(self.0, Ordering::Relaxed);
+            }
         }
+        let _reset = ResetTimeout(old_timeout);
 
         let data = Arc::new(RwLock::new(0));
         let data_clone = data.clone();
@@ -803,16 +809,14 @@ mod tests {
         // Hold lock indefinitely
         let _guard = data.write().await;
 
-        // Spawn task to acquire lock - should panic after timeout
+        // Spawn task to acquire lock - should return an error after timeout
         let handle = tokio::spawn(async move {
-            TimedWriteLockGuard::acquire(&data_clone, "test_timeout").await;
+            TimedWriteLockGuard::acquire(&data_clone, "test_timeout")
+                .await
+                .is_err()
         });
 
-        // Wait for real time (since we can't use pause/advance)
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let res = handle.await;
-        assert!(res.is_err(), "Task should have failed");
-        assert!(res.unwrap_err().is_panic(), "Task should have panicked");
+        let timed_out = handle.await.unwrap();
+        assert!(timed_out, "Expected lock acquisition to time out");
     }
 }
