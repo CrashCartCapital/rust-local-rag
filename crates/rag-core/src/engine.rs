@@ -390,7 +390,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             }
         }
 
-        scores.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
 
         let candidates: Vec<RerankerCandidate> = scores
             .into_iter()
@@ -1099,5 +1099,43 @@ mod tests {
         let results = engine.search("cats", 5, None).await.unwrap();
 
         assert_eq!(results.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_embedding_candidates_stability() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        // Insert documents that will have identical embeddings ("cats" -> [1.0, 0.0])
+        for i in 0..10 {
+            engine
+                .upsert_document(&format!("doc{}.txt", i), "Cats are great pets.", None)
+                .await
+                .unwrap();
+        }
+
+        // Get all candidates
+        let candidates = engine.embedding_candidates("cats", 10).await.unwrap();
+        assert_eq!(candidates.len(), 10);
+
+        // Verify deterministic ordering: Score DESC, then ChunkID ASC
+        for i in 0..candidates.len() - 1 {
+            let current = &candidates[i];
+            let next = &candidates[i + 1];
+
+            // Scores should be identical for this test case
+            assert!(
+                (current.initial_score - next.initial_score).abs() < f32::EPSILON,
+                "Scores should be identical"
+            );
+
+            // IDs should be sorted strictly ASC
+            assert!(
+                current.chunk_id < next.chunk_id,
+                "Candidates not sorted by ID at index {}: {} vs {}",
+                i,
+                current.chunk_id,
+                next.chunk_id
+            );
+        }
     }
 }
