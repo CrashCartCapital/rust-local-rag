@@ -30,7 +30,7 @@ This PRD replaces the rejected "Operational Stability Hardening" v1.0, which was
 
 ---
 
-## 1. Requirements
+## Requirements
 
 ### 1.1 Functional Requirements
 
@@ -62,7 +62,7 @@ These items from v1.0 are **intentionally excluded** as over-engineering for a l
 
 ---
 
-## 2. Design
+## Design
 
 ### 2.1 Error Architecture
 
@@ -151,115 +151,100 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
 
 ---
 
-## 3. Tasks
+## Tasks
 
-### Task 1: Create RagError Type
+### Section: Error Types
+- [ ] Task 1: Create RagError Type
+  - **Description**: Create `src/error.rs` with `RagError` enum using `thiserror`.
+  - **Acceptance Criteria**:
+    - `RagError` variants for: Config, PdfExtraction, Search, Embedding, ModelMismatch, PartialIndexFailure
+    - Each variant includes actionable fix suggestion
+    - Unit tests for error formatting
+  - **Files**:
+    - Create: `src/error.rs`
+    - Modify: `src/lib.rs` (add `pub mod error;`)
 
-**Description**: Create `src/error.rs` with `RagError` enum using `thiserror`.
+### Section: Configuration
+- [ ] Task 2: Replace Panics in Config Loading
+  - **Description**: Audit `src/config.rs` and replace `unwrap`/`expect` with `Result<Config, RagError>`.
+  - **Acceptance Criteria**:
+    - Missing required env vars return `RagError::Config` with fix suggestion
+    - Invalid values (non-numeric ports, etc.) return descriptive errors
+    - Test: intentionally missing `DATA_DIR` returns helpful error
+  - **Files**:
+    - Modify: `src/config.rs`
+    - Modify: `src/main.rs` (handle Config error at startup)
 
-**Acceptance Criteria**:
-- `RagError` variants for: Config, PdfExtraction, Search, Embedding, ModelMismatch, PartialIndexFailure
-- Each variant includes actionable fix suggestion
-- Unit tests for error formatting
+### Section: RagEngine (PDF + Index)
+- [ ] Task 3: Replace Panics in PDF/Index Operations
+  - **Description**: Audit `src/rag_engine.rs` for `unwrap`/`expect` in:
+    - PDF extraction (`add_document`)
+    - Index loading (`load_from_disk`)
+    - Index saving (`save_to_disk`)
+  - **Acceptance Criteria**:
+    - PDF extraction errors return `RagError::PdfExtraction` with filename
+    - Index JSON parse errors return `RagError::Config` with path
+    - Test: corrupt index file returns helpful error
+  - **Files**:
+    - Modify: `src/rag_engine.rs`
 
-**Files**:
-- Create: `src/error.rs`
-- Modify: `src/lib.rs` (add `pub mod error;`)
+- [ ] Task 5: Model Mismatch Warning
+  - **Description**: Add lightweight mismatch detection to `load_from_disk()`.
+  - **Acceptance Criteria**:
+    - Startup logs warning if stored model != configured model
+    - Warning includes remediation: "Run reindex or update OLLAMA_EMBEDDING_MODEL"
+    - Test: create index with model A, load with model B, verify warning
+  - **Files**:
+    - Modify: `src/rag_engine.rs`
 
----
+### Section: Indexing Jobs
+- [ ] Task 4: Per-Document Failure Isolation
+  - **Description**: Modify `src/worker.rs` so indexing continues when individual documents fail.
+  - **Acceptance Criteria**:
+    - One bad PDF doesn't abort entire reindex
+    - Job completes with `IndexingSummary` containing successes and failures
+    - MCP `get_job_status` returns failure details
+    - Test: place intentionally corrupt PDF in test directory, verify other PDFs indexed
+  - **Files**:
+    - Modify: `src/worker.rs`
+    - Modify: `src/job_manager.rs` (store failure details in job record)
 
-### Task 2: Replace Panics in Config Loading
+### Section: TUI
+- [ ] Task 6: TUI Graceful Exit
+  - **Description**: Handle channel receiver errors in TUI without panic.
+  - **Acceptance Criteria**:
+    - TUI exits gracefully on server disconnect
+    - User sees "Connection lost. Please restart." instead of panic
+    - Test: manual verification
+  - **Files**:
+    - Modify: `src/bin/rag_tui/main.rs`
 
-**Description**: Audit `src/config.rs` and replace `unwrap`/`expect` with `Result<Config, RagError>`.
-
-**Acceptance Criteria**:
-- Missing required env vars return `RagError::Config` with fix suggestion
-- Invalid values (non-numeric ports, etc.) return descriptive errors
-- Test: intentionally missing `DATA_DIR` returns helpful error
-
-**Files**:
-- Modify: `src/config.rs`
-- Modify: `src/main.rs` (handle Config error at startup)
-
----
-
-### Task 3: Replace Panics in PDF/Index Operations
-
-**Description**: Audit `src/rag_engine.rs` for `unwrap`/`expect` in:
-- PDF extraction (`add_document`)
-- Index loading (`load_from_disk`)
-- Index saving (`save_to_disk`)
-
-**Acceptance Criteria**:
-- PDF extraction errors return `RagError::PdfExtraction` with filename
-- Index JSON parse errors return `RagError::Config` with path
-- Test: corrupt index file returns helpful error
-
-**Files**:
-- Modify: `src/rag_engine.rs`
-
----
-
-### Task 4: Per-Document Failure Isolation
-
-**Description**: Modify `src/worker.rs` so indexing continues when individual documents fail.
-
-**Acceptance Criteria**:
-- One bad PDF doesn't abort entire reindex
-- Job completes with `IndexingSummary` containing successes and failures
-- MCP `get_job_status` returns failure details
-- Test: place intentionally corrupt PDF in test directory, verify other PDFs indexed
-
-**Files**:
-- Modify: `src/worker.rs`
-- Modify: `src/job_manager.rs` (store failure details in job record)
-
----
-
-### Task 5: Model Mismatch Warning
-
-**Description**: Add lightweight mismatch detection to `load_from_disk()`.
-
-**Acceptance Criteria**:
-- Startup logs warning if stored model != configured model
-- Warning includes remediation: "Run reindex or update OLLAMA_EMBEDDING_MODEL"
-- Test: create index with model A, load with model B, verify warning
-
-**Files**:
-- Modify: `src/rag_engine.rs`
-
----
-
-### Task 6: TUI Graceful Exit
-
-**Description**: Handle channel receiver errors in TUI without panic.
-
-**Acceptance Criteria**:
-- TUI exits gracefully on server disconnect
-- User sees "Connection lost. Please restart." instead of panic
-- Test: manual verification
-
-**Files**:
-- Modify: `src/bin/rag_tui/main.rs`
+### Section: Tests
+- [ ] Task 7: Add Regression Tests
+  - **Description**: Create focused tests for common failure modes.
+  - **Acceptance Criteria**:
+    - Test: bad PDF file (0 bytes, non-PDF) handled gracefully
+    - Test: missing Ollama (connection refused) handled gracefully
+    - Test: corrupt index JSON handled gracefully
+    - All tests in `tests/error_handling.rs`
+  - **Files**:
+    - Create: `tests/error_handling.rs`
 
 ---
 
-### Task 7: Add Regression Tests
+## Testing Strategy
 
-**Description**: Create focused tests for common failure modes.
+PRD Size: Medium (7 tasks, user-facing stability changes).
 
-**Acceptance Criteria**:
-- Test: bad PDF file (0 bytes, non-PDF) handled gracefully
-- Test: missing Ollama (connection refused) handled gracefully
-- Test: corrupt index JSON handled gracefully
-- All tests in `tests/error_handling.rs`
-
-**Files**:
-- Create: `tests/error_handling.rs`
+- Unit: `src/error.rs` formatting + config parsing error cases.
+- Integration: `tests/error_handling.rs` covers corrupt PDF, corrupt index JSON, and missing Ollama error propagation.
+- E2E: N/A (covered by integration tests + manual TUI disconnect check).
 
 ---
 
-## 4. Task Dependencies
+## Addenda
+
+### Task Dependencies
 
 ```
 Task 1 (RagError) ─┬─> Task 2 (Config)
@@ -273,7 +258,7 @@ Task 6 (TUI Exit) ─> Independent
 
 ---
 
-## 5. Success Metrics
+### Success Metrics
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
@@ -285,7 +270,7 @@ Task 6 (TUI Exit) ─> Independent
 
 ---
 
-## 6. Deferred to Future Work
+### Deferred to Future Work
 
 These items may be revisited if evidence emerges:
 
@@ -299,7 +284,7 @@ These items may be revisited if evidence emerges:
 
 ---
 
-## 7. Validation Gate
+### Validation Gate
 
 Before implementation, verify:
 
