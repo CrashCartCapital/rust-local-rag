@@ -8,7 +8,7 @@ use crate::types::{
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tracing")]
-use tracing::instrument;
+use tracing::{field, instrument};
 use uuid::Uuid;
 
 pub struct RagEngine<B: EmbeddingBackend, R = ()> {
@@ -155,7 +155,23 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(removed_ids.len())
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, text, batch_callback)))]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self, text, batch_callback),
+            fields(
+                doc = document_name,
+                text_len = text.len(),
+                chunk_tokens = self.config.chunk_tokens,
+                overlap = self.config.sentence_overlap,
+                chunks_generated = field::Empty,
+                chunks_filtered = field::Empty,
+                chunking_ms = field::Empty,
+                embedding_ms = field::Empty
+            ),
+            err
+        )
+    )]
     pub async fn prepare_document(
         &self,
         document_name: &str,
@@ -166,10 +182,22 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         if let Some(hash) = document_hash
             && self.is_document_unchanged(document_name, hash)
         {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Document unchanged, skipping");
             return Ok(None);
         }
 
+        #[cfg(feature = "tracing")]
+        let chunk_start = std::time::Instant::now();
+
         let fragments = chunk_text(text, self.config.chunk_tokens, self.config.sentence_overlap);
+
+        #[cfg(feature = "tracing")]
+        {
+            let elapsed = chunk_start.elapsed().as_millis();
+            tracing::Span::current().record("chunking_ms", elapsed);
+            tracing::Span::current().record("chunks_generated", fragments.len());
+        }
 
         let filtered: Vec<(usize, ChunkFragment)> = fragments
             .into_iter()
@@ -183,7 +211,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("chunks_filtered", filtered.len());
+
         if filtered.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("No valid chunks after filtering (min length 10)");
             return Ok(Some(PreparedDocument {
                 document_name: document_name.to_string(),
                 document_hash: document_hash.map(ToString::to_string),
@@ -198,12 +231,25 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let batch_count = total_chunks.div_ceil(batch_size);
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(total_chunks);
 
+        #[cfg(feature = "tracing")]
+        let embed_start = std::time::Instant::now();
+
         for (batch_idx, batch) in chunk_texts.chunks(batch_size).enumerate() {
             if let Some(cb) = batch_callback.as_deref_mut() {
                 cb(batch_idx + 1, batch_count, total_chunks, batch.len());
             }
 
-            let batch_embeddings = self.backend.embed_batch(batch).await?;
+            let batch_embeddings = self.backend.embed_batch(batch).await.map_err(|e| {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    error = ?e,
+                    batch_idx,
+                    batch_size = batch.len(),
+                    "Failed to embed batch"
+                );
+                e
+            })?;
+
             if batch_embeddings.len() != batch.len() {
                 return Err(EngineError::Embedding(EmbeddingError::Api(format!(
                     "Received {} embeddings for {} texts",
@@ -212,6 +258,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 ))));
             }
             embeddings.extend(batch_embeddings);
+        }
+
+        #[cfg(feature = "tracing")]
+        {
+            let elapsed = embed_start.elapsed().as_millis();
+            tracing::Span::current().record("embedding_ms", elapsed);
         }
 
         if embeddings.len() != total_chunks {
