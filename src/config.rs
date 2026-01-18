@@ -27,6 +27,13 @@ impl Config {
         let mut config = Self::default();
 
         if let Some(timeout_secs) = parse_env_u64("RAG_EMBEDDING_TIMEOUT_SECS")? {
+            if timeout_secs == 0 || timeout_secs > 3600 {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_TIMEOUT_SECS",
+                    value: timeout_secs.to_string(),
+                    message: "must be > 0 and <= 3600".to_string(),
+                });
+            }
             config.embedding_timeout = Duration::from_secs(timeout_secs);
         }
         if let Some(cache_size) = parse_env_nonzero_usize("RAG_EMBEDDING_CACHE_SIZE")? {
@@ -174,6 +181,30 @@ mod tests {
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
+    }
+
+    #[test]
+    fn test_rag_embedding_timeout_valid() {
+        with_env_var("RAG_EMBEDDING_TIMEOUT_SECS", "60", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.embedding_timeout.as_secs(), 60);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_timeout_zero() {
+        with_env_var("RAG_EMBEDDING_TIMEOUT_SECS", "0", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0 and <= 3600"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_timeout_too_large() {
+        with_env_var("RAG_EMBEDDING_TIMEOUT_SECS", "3601", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0 and <= 3600"));
+        });
     }
 
     #[test]
