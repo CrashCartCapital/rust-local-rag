@@ -198,7 +198,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
     - Modify: `src/rag_engine.rs`
 
 ### Section: Indexing Jobs
-- [ ] Task 4: Per-Document Failure Isolation
+- [x] Task 4: Per-Document Failure Isolation
   - **Description**: Modify `src/worker.rs` so indexing continues when individual documents fail.
   - **Acceptance Criteria**:
     - One bad PDF doesn't abort entire reindex

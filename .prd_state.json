@@ -2,14 +2,15 @@
   "prd_file": "active-prd/graceful_errors_prd_v1.1.md",
   "last_updated": "2026-01-18",
   "current_phase": "phase3",
-  "current_section": "RagEngine (PDF + Index)",
-  "current_task": "Task 5",
+  "current_section": "Indexing Jobs",
+  "current_task": "Task 4",
   "completed_tasks": [
     "Task 1",
     "Task 2",
     "Task 3",
+    "Task 4",
     "Task 5"
   ],
   "blocked_tasks": [],
-  "notes": "Branch: feat/graceful-errors. Task 5 complete: startup warns when other chunks_*.json index files exist for different models."
+  "notes": "Branch: feat/graceful-errors. Task 4 verified: per-document failures do not abort reindex; job summary includes failed filenames."
 }
