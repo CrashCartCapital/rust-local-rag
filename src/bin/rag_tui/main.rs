@@ -119,6 +119,10 @@ async fn run_app(
 
         // Handle events with timeout to allow polling
         // biased; ensures input events are checked first to prevent dropped keystrokes
+        // If we have a pending model fetch oneshot receiver, take it out of App so we can
+        // await it safely in select! and restore it if another branch wins.
+        let mut model_fetch_rx = app.take_model_fetch_rx();
+
         tokio::select! {
             biased;
 
@@ -538,10 +542,14 @@ async fn run_app(
             // Receive model fetch results (for settings dropdowns)
             // Uses if-guard pattern: branch only active when receiver exists
             result = async {
-                app.model_fetch_rx.as_mut().unwrap().await
-            }, if app.model_fetch_rx.is_some() => {
-                // Clear the receiver since it's consumed
-                app.model_fetch_rx = None;
+                if let Some(rx) = model_fetch_rx.as_mut() {
+                    rx.await
+                } else {
+                    std::future::pending().await
+                }
+            }, if model_fetch_rx.is_some() => {
+                // Receiver consumed in this branch; do not restore it after select!
+                model_fetch_rx = None;
                 match result {
                     Ok(models_result) => {
                         app.handle_model_fetch_result(models_result);
@@ -606,6 +614,10 @@ async fn run_app(
                     }
                 }
             }
+        }
+
+        if let Some(rx) = model_fetch_rx.take() {
+            app.restore_model_fetch_rx(rx);
         }
 
         if app.should_quit {

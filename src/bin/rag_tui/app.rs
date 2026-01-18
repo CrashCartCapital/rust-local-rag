@@ -414,13 +414,13 @@ impl App {
     }
 
     pub fn set_connected(&mut self, connected: bool) {
-        let was_disconnected = !self.connected;
+        let was_connected = self.connected;
         self.connected = connected;
-        if connected && was_disconnected {
+        if connected && !was_connected {
             // Clear error on reconnection
             self.last_error = None;
-        } else if !connected {
-            self.last_error = Some("Connection lost".to_string());
+        } else if !connected && was_connected {
+            self.last_error = Some("Connection lost. Please restart.".to_string());
         }
     }
 
@@ -1012,6 +1012,31 @@ mod tests {
         assert_eq!(app.results.len(), 1);
         assert_eq!(app.results[0].document, "current.pdf");
         assert!(!app.search_in_progress);
+    }
+
+    #[test]
+    fn test_set_connected_shows_message_on_disconnect_transition() {
+        let mut app = App::new("http://localhost:8140".to_string());
+        assert!(!app.connected);
+        assert!(app.last_error.is_none());
+
+        app.set_connected(true);
+        assert!(app.connected);
+        assert!(app.last_error.is_none());
+
+        app.set_connected(false);
+        assert!(!app.connected);
+        assert_eq!(
+            app.last_error.as_deref(),
+            Some("Connection lost. Please restart.")
+        );
+
+        // No additional change if already disconnected
+        app.set_connected(false);
+        assert_eq!(
+            app.last_error.as_deref(),
+            Some("Connection lost. Please restart.")
+        );
     }
 
     #[test]

@@ -210,7 +210,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
     - Modify: `src/job_manager.rs` (store failure details in job record)
 
 ### Section: TUI
-- [ ] Task 6: TUI Graceful Exit
+- [x] Task 6: TUI Graceful Exit
   - **Description**: Handle channel receiver errors in TUI without panic.
   - **Acceptance Criteria**:
     - TUI exits gracefully on server disconnect
