@@ -82,9 +82,14 @@ cargo install --path . --profile release
 
 ### 3. Verify Installation
 
+Ensure the binary is installed and available in your PATH.
+
 ```bash
-rust-local-rag --help
+which rust-local-rag
+# Output should be something like: /home/user/.cargo/bin/rust-local-rag
 ```
+
+Note: `rust-local-rag` is a server application designed to be run by the Claude Desktop MCP client or via `make run`. It does not have a CLI interface for help (`--help` will not work).
 
 ## Next Steps
 
