@@ -5,8 +5,8 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::{
-    config::Config,
     RagError,
+    config::Config,
     embeddings::EmbeddingService,
     reranker::{RerankerCandidate, RerankerService},
 };
@@ -115,8 +115,8 @@ impl RagEngine {
         let mismatches = tokio::task::spawn_blocking(move || {
             find_mismatching_index_files(&data_dir_string, &configured_model_for_scan)
         })
-                .await
-                .unwrap_or_default();
+        .await
+        .unwrap_or_default();
         if !mismatches.is_empty() {
             tracing::warn!(
                 stored = %mismatches.join(", "),
@@ -709,12 +709,14 @@ mod tests {
         let mismatches = find_mismatching_index_files(data_dir.to_str().unwrap(), current_model);
         assert_eq!(
             mismatches,
-            vec![other_path
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string()]
+            vec![
+                other_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            ]
         );
     }
 

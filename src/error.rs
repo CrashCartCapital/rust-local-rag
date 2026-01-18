@@ -34,7 +34,11 @@ pub enum RagError {
 }
 
 impl RagError {
-    pub fn config(message: impl Into<String>, cause: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub fn config(
+        message: impl Into<String>,
+        cause: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
         Self::Config {
             message: message.into(),
             cause: cause.into(),
@@ -98,7 +102,11 @@ impl RagError {
 impl fmt::Display for RagError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RagError::Config { message, cause, fix } => write!(
+            RagError::Config {
+                message,
+                cause,
+                fix,
+            } => write!(
                 f,
                 "Configuration error: {message}\n  Cause: {cause}\n  Fix: {fix}"
             ),
@@ -175,9 +183,10 @@ mod tests {
             "model-b",
             "Run reindex or update OLLAMA_EMBEDDING_MODEL",
         );
-        assert!(err
-            .to_string()
-            .contains("stored model 'model-a' differs from configured 'model-b'"));
+        assert!(
+            err.to_string()
+                .contains("stored model 'model-a' differs from configured 'model-b'")
+        );
     }
 
     #[test]
@@ -191,7 +200,9 @@ mod tests {
 
         let err = returns_anyhow_error().unwrap_err();
         assert!(err.is::<RagError>());
-        assert!(err.to_string().contains("Search failed: backend unavailable"));
+        assert!(
+            err.to_string()
+                .contains("Search failed: backend unavailable")
+        );
     }
 }
-

@@ -1,6 +1,6 @@
 pub mod config;
-pub mod error;
 pub mod embeddings;
+pub mod error;
 pub mod job_manager;
 mod mcp;
 pub mod mcp_server;

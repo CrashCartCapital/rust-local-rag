@@ -56,9 +56,7 @@ async fn test_bad_pdf_returns_actionable_error() {
         .await
         .unwrap_err();
 
-    let rag_err = err
-        .downcast_ref::<RagError>()
-        .expect("expected RagError");
+    let rag_err = err.downcast_ref::<RagError>().expect("expected RagError");
     assert!(matches!(rag_err, RagError::PdfExtraction { .. }));
     let msg = rag_err.to_string();
     assert!(msg.contains("bad.pdf"));
@@ -79,9 +77,7 @@ async fn test_missing_ollama_returns_actionable_error() {
         .err()
         .expect("expected engine init to fail");
 
-    let rag_err = err
-        .downcast_ref::<RagError>()
-        .expect("expected RagError");
+    let rag_err = err.downcast_ref::<RagError>().expect("expected RagError");
     assert!(matches!(rag_err, RagError::Embedding { .. }));
 
     let msg = rag_err.to_string();

@@ -6,8 +6,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::instrument;
 
-use crate::config::Config;
 use crate::RagError;
+use crate::config::Config;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -80,7 +80,10 @@ impl EmbeddingService {
 
         service.test_connection().await.map_err(|e| {
             anyhow::Error::new(RagError::embedding(
-                format!("Failed to connect to Ollama at {}: {}", service.ollama_url, e),
+                format!(
+                    "Failed to connect to Ollama at {}: {}",
+                    service.ollama_url, e
+                ),
                 format!(
                     "Start Ollama and ensure it is reachable at '{}' (or set OLLAMA_URL)",
                     service.ollama_url
