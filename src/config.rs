@@ -36,7 +36,7 @@ impl Config {
                 return Err(RagError::config(
                     "Invalid value for RAG_EMBEDDING_CACHE_SIZE",
                     format!("got {}, which exceeds 10000", cache_size.get()),
-                    "Set RAG_EMBEDDING_CACHE_SIZE to an integer in [1, 10000]",
+                    "Set RAG_EMBEDDING_CACHE_SIZE to an integer (must be <= 10000)",
                 ));
             }
             config.embedding_cache_size = cache_size;
