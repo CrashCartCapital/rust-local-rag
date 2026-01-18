@@ -165,7 +165,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
     - Modify: `src/lib.rs` (add `pub mod error;`)
 
 ### Section: Configuration
-- [ ] Task 2: Replace Panics in Config Loading
+- [x] Task 2: Replace Panics in Config Loading
   - **Description**: Audit `src/config.rs` and replace `unwrap`/`expect` with `Result<Config, RagError>`.
   - **Acceptance Criteria**:
     - Missing required env vars return `RagError::Config` with fix suggestion
