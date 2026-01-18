@@ -188,7 +188,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
   - **Files**:
     - Modify: `src/rag_engine.rs`
 
-- [ ] Task 5: Model Mismatch Warning
+- [x] Task 5: Model Mismatch Warning
   - **Description**: Add lightweight mismatch detection to `load_from_disk()`.
   - **Acceptance Criteria**:
     - Startup logs warning if stored model != configured model

@@ -35,6 +35,42 @@ pub struct RagEngine {
     start_time: std::time::Instant,
 }
 
+fn find_mismatching_index_files(data_dir: &str, current_model: &str) -> Vec<String> {
+    let current_path = rag_core::persistence::index_path(data_dir, current_model);
+    let current_name = current_path.file_name().and_then(|n| n.to_str());
+
+    let mut mismatches = Vec::new();
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return mismatches;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+            continue;
+        };
+
+        if !name.starts_with("chunks_") || !name.ends_with(".json") {
+            continue;
+        }
+
+        if current_name.is_some_and(|current| current == name) {
+            continue;
+        }
+
+        mismatches.push(name);
+    }
+
+    mismatches.sort();
+    mismatches
+}
+
 impl RagEngine {
     pub async fn new(data_dir: &str, config: &Config) -> Result<Self> {
         let embedding_service = EmbeddingService::new(config).await?;
@@ -71,6 +107,22 @@ impl RagEngine {
 
         if let Err(e) = core.load_from_dir(data_dir) {
             tracing::warn!("Could not load existing data: {}", e);
+        }
+
+        let data_dir_string = data_dir.to_string();
+        let configured_model = core.embedding_model().to_string();
+        let configured_model_for_scan = configured_model.clone();
+        let mismatches = tokio::task::spawn_blocking(move || {
+            find_mismatching_index_files(&data_dir_string, &configured_model_for_scan)
+        })
+                .await
+                .unwrap_or_default();
+        if !mismatches.is_empty() {
+            tracing::warn!(
+                stored = %mismatches.join(", "),
+                configured = %configured_model,
+                "Index mismatch detected (other model index files exist). Fix: Run reindex or update OLLAMA_EMBEDDING_MODEL"
+            );
         }
 
         Ok(Self {
@@ -640,6 +692,30 @@ mod tests {
 
     fn create_invalid_pdf() -> Vec<u8> {
         b"this is not a pdf".to_vec()
+    }
+
+    #[test]
+    fn test_find_mismatching_index_files_detects_other_models() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let current_model = "model-b";
+        let current_path = rag_core::persistence::index_path(data_dir, current_model);
+        std::fs::write(&current_path, "{}").unwrap();
+
+        let other_path = rag_core::persistence::index_path(data_dir, "model-a");
+        std::fs::write(&other_path, "{}").unwrap();
+
+        let mismatches = find_mismatching_index_files(data_dir.to_str().unwrap(), current_model);
+        assert_eq!(
+            mismatches,
+            vec![other_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()]
+        );
     }
 
     #[tokio::test]
