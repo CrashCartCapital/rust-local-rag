@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
+    RagError,
     embeddings::EmbeddingService,
     reranker::{RerankerCandidate, RerankerService},
 };
@@ -155,7 +156,7 @@ impl RagEngine {
             return Ok(None);
         }
 
-        let text = self.extract_pdf_text(data.to_vec()).await?;
+        let text = self.extract_pdf_text(filename, data.to_vec()).await?;
         if text.trim().is_empty() {
             return Err(rag_core::EngineError::validation_no_chunk(
                 rag_core::ValidationKind::EmptyText,
@@ -280,9 +281,16 @@ impl RagEngine {
     }
 
     pub(crate) fn save_to_disk_sync(&self) -> Result<()> {
-        self.core
-            .save_to_dir(&self.data_dir)
-            .context("Failed to save index to disk")?;
+        self.core.save_to_dir(&self.data_dir).map_err(|e| {
+            anyhow::Error::new(RagError::config(
+                "Failed to save index to disk",
+                e.to_string(),
+                format!(
+                    "Ensure '{}' exists and is writable, then retry (or set DATA_DIR to a writable path)",
+                    self.data_dir
+                ),
+            ))
+        })?;
         Ok(())
     }
 
@@ -291,7 +299,7 @@ impl RagEngine {
     /// Uses a two-stage fallback strategy:
     /// 1. Try pure-Rust extraction (lopdf) first for deployment flexibility
     /// 2. Fall back to pdftotext binary if lopdf fails
-    async fn extract_pdf_text(&self, data: Vec<u8>) -> Result<String> {
+    async fn extract_pdf_text(&self, filename: &str, data: Vec<u8>) -> Result<String> {
         // Use Arc to share data between fallback tasks without cloning the underlying buffer
         let shared_data = std::sync::Arc::new(data);
         let data_for_lopdf = std::sync::Arc::clone(&shared_data);
@@ -374,11 +382,23 @@ impl RagEngine {
                             pdftotext_error = %pdftotext_err,
                             "Both PDF extraction backends failed"
                         );
-                        Err(anyhow::anyhow!(
-                            "PDF extraction failed: lopdf error: {}, pdftotext error: {}",
-                            lopdf_err,
-                            pdftotext_err
-                        ))
+
+                        let fix = if pdftotext_err.to_string().contains("poppler") {
+                            "Install poppler (provides 'pdftotext'), or ensure 'pdftotext' is on PATH"
+                                .to_string()
+                        } else {
+                            "Ensure the file is a valid PDF (try re-downloading or regenerating it)"
+                                .to_string()
+                        };
+
+                        Err(anyhow::Error::new(RagError::pdf_extraction(
+                            filename.to_string(),
+                            format!(
+                                "lopdf error: {}; pdftotext error: {}",
+                                lopdf_err, pdftotext_err
+                            ),
+                            fix,
+                        )))
                     }
                 }
             }
@@ -618,6 +638,10 @@ mod tests {
         buffer
     }
 
+    fn create_invalid_pdf() -> Vec<u8> {
+        b"this is not a pdf".to_vec()
+    }
+
     #[tokio::test]
     #[serial]
     async fn test_prepare_document_empty_text_returns_validation_error() {
@@ -718,5 +742,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_prepare_document_invalid_pdf_returns_pdf_extraction_error() {
+        struct EnvVarGuard {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: &str) -> Self {
+                let original = std::env::var_os(key);
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+                Self { key, original }
+            }
+        }
+
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.original {
+                        Some(value) => std::env::set_var(self.key, value),
+                        None => std::env::remove_var(self.key),
+                    }
+                }
+            }
+        }
+
+        let config = Config::default();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let _ollama_url = EnvVarGuard::set("OLLAMA_URL", &mock_server.uri());
+        let _ollama_embedding_model = EnvVarGuard::set("OLLAMA_EMBEDDING_MODEL", "test-model");
+
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "name": "test-model:latest" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let engine = RagEngine::new(data_dir, &config)
+            .await
+            .expect("Failed to create engine");
+
+        let pdf_data = create_invalid_pdf();
+        let result = engine.prepare_document("broken.pdf", &pdf_data, None).await;
+
+        let err = result.unwrap_err();
+        assert!(err.is::<RagError>(), "expected RagError, got: {err:?}");
+        let rag_err = err.downcast_ref::<RagError>().unwrap();
+        assert!(matches!(rag_err, RagError::PdfExtraction { .. }));
+        assert!(rag_err.to_string().contains("broken.pdf"));
     }
 }

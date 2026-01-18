@@ -176,7 +176,7 @@ if let Some(stored_model) = persisted_chunks.model.as_ref() {
     - Modify: `src/main.rs` (handle Config error at startup)
 
 ### Section: RagEngine (PDF + Index)
-- [ ] Task 3: Replace Panics in PDF/Index Operations
+- [x] Task 3: Replace Panics in PDF/Index Operations
   - **Description**: Audit `src/rag_engine.rs` for `unwrap`/`expect` in:
     - PDF extraction (`add_document`)
     - Index loading (`load_from_disk`)

@@ -2,12 +2,13 @@
   "prd_file": "active-prd/graceful_errors_prd_v1.1.md",
   "last_updated": "2026-01-18",
   "current_phase": "phase3",
-  "current_section": "Configuration",
-  "current_task": "Task 2",
+  "current_section": "RagEngine (PDF + Index)",
+  "current_task": "Task 3",
   "completed_tasks": [
     "Task 1",
-    "Task 2"
+    "Task 2",
+    "Task 3"
   ],
   "blocked_tasks": [],
-  "notes": "Branch: feat/graceful-errors. Task 2 complete: Config::from_env returns RagError with actionable messages."
+  "notes": "Branch: feat/graceful-errors. Task 3 complete: PDF extraction failures are wrapped with RagError::PdfExtraction; index save failures map to RagError::Config."
 }
