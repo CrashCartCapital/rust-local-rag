@@ -622,10 +622,9 @@ mod tests {
 
     #[test]
     fn test_split_massive_word_overflow() {
-        // limit * 4 overflows to 4
-        // usize::MAX is 18446744073709551615
-        // (2^64 / 4) + 1 = 4611686018427387905
-        let limit = 4611686018427387905usize;
+        // `split_massive_word` uses `limit * 4` as an upper bound on chars-per-token.
+        // Make sure this calculation can't overflow.
+        let limit = (usize::MAX / 4) + 1;
 
         let text = "a".repeat(20);
         // Should produce 1 chunk because 20 tokens (approx) < massive limit
@@ -638,12 +637,10 @@ mod tests {
     #[test]
     fn test_split_massive_word_unicode_boundaries() {
         let limit = 2;
-        // 1 emoji ~ 1 token (4 bytes chars, div 4, max 1)
-        // 4 emojis
         let text = "😀😀😀😀";
 
         let chunks = split_massive_word(text, limit);
-        assert_eq!(chunks.len(), 1, "Should fit in one chunk as 4 emojis ~ 1 token <= limit 2");
+        assert_eq!(chunks.len(), 1, "Should fit in one chunk");
 
         // Let's use something that generates more tokens.
         // "a".repeat(20).
