@@ -244,7 +244,14 @@ impl PersistenceBackend for JsonFileBackend {
             let data = std::fs::read_to_string(&path)?;
             match serde_json::from_str::<EngineState>(&data) {
                 Ok(state) => return Ok(Some(state)),
-                Err(_) => {
+                Err(_e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        "Failed to parse index file at {:?}: {}. Starting fresh.",
+                        path,
+                        _e
+                    );
+
                     // Try legacy format
                     if let Ok(legacy) = serde_json::from_str::<LegacyState>(&data) {
                         return Ok(Some(legacy.into_engine_state(&self.model_name)));
@@ -477,6 +484,28 @@ mod tests {
             assert!(
                 result.is_none(),
                 "Corrupted file should return None, not error"
+            );
+        }
+
+        #[test]
+        fn test_json_file_backend_corruption_recovery() {
+            let temp_dir = TempDir::new().unwrap();
+            let backend = JsonFileBackend::new(temp_dir.path(), "test-model");
+
+            // Write truncated JSON (simulating crash during write)
+            let path = backend.index_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                r#"{"schema_version": 2, "embedding_model_id": "test-model""#,
+            )
+            .unwrap();
+
+            // Load should return None (graceful degradation/automatic rebuild)
+            let result = backend.load().unwrap();
+            assert!(
+                result.is_none(),
+                "Truncated file should trigger automatic recovery (return None)"
             );
         }
 
