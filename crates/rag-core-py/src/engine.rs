@@ -441,13 +441,13 @@ impl PyRagEngine {
                     &query_spec.query,
                     query_spec.top_k,
                     query_spec.diversity_factor,
-                    query_spec.weights.clone(),
+                    query_spec.weights,
                 ))
             } else {
                 runtime().block_on(engine.search(
                     &query_spec.query,
                     query_spec.top_k,
-                    query_spec.weights.clone(),
+                    query_spec.weights,
                 ))
             };
 
@@ -518,13 +518,13 @@ impl PyRagEngine {
                         &query_spec.query,
                         query_spec.top_k,
                         query_spec.diversity_factor,
-                        query_spec.weights.clone(),
+                        query_spec.weights,
                     ))
                 } else {
                     runtime().block_on(engine.search(
                         &query_spec.query,
                         query_spec.top_k,
-                        query_spec.weights.clone(),
+                        query_spec.weights,
                     ))
                 };
 

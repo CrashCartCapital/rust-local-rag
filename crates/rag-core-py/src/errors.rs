@@ -60,136 +60,132 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Extracts structured metadata from error variants and attaches them as
 /// exception attributes for programmatic error handling in Python.
 pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
-    Python::with_gil(|py| {
-        let pyerr = match &err {
-            EngineError::Embedding(emb_err) => {
-                let pyerr = EmbeddingError::new_err(err.to_string());
-                // Set embedding error subtype
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let kind = match emb_err {
-                        rag_core::EmbeddingError::Connection(_) => "connection",
-                        rag_core::EmbeddingError::ModelNotFound(_) => "model_not_found",
-                        rag_core::EmbeddingError::Api(_) => "api",
-                        rag_core::EmbeddingError::Timeout(_) => "timeout",
-                        rag_core::EmbeddingError::Validation(_) => "validation",
-                    };
-                    let _ = exc.setattr("kind", kind);
+    Python::with_gil(|py| match &err {
+        EngineError::Embedding(emb_err) => {
+            let pyerr = EmbeddingError::new_err(err.to_string());
+            // Set embedding error subtype
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let kind = match emb_err {
+                    rag_core::EmbeddingError::Connection(_) => "connection",
+                    rag_core::EmbeddingError::ModelNotFound(_) => "model_not_found",
+                    rag_core::EmbeddingError::Api(_) => "api",
+                    rag_core::EmbeddingError::Timeout(_) => "timeout",
+                    rag_core::EmbeddingError::Validation(_) => "validation",
+                };
+                let _ = exc.setattr("kind", kind);
 
-                    // Set timeout duration if applicable
-                    if let rag_core::EmbeddingError::Timeout(duration) = emb_err {
-                        let _ = exc.setattr("timeout_secs", duration.as_secs_f64());
+                // Set timeout duration if applicable
+                if let rag_core::EmbeddingError::Timeout(duration) = emb_err {
+                    let _ = exc.setattr("timeout_secs", duration.as_secs_f64());
+                }
+            }
+            pyerr
+        }
+
+        EngineError::Rerank(rerank_err) => {
+            let pyerr = RerankError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let kind = match rerank_err {
+                    rag_core::RerankError::Error(_) => "error",
+                    rag_core::RerankError::Unavailable(_) => "unavailable",
+                    rag_core::RerankError::InvalidResponse(_) => "invalid_response",
+                };
+                let _ = exc.setattr("kind", kind);
+            }
+            pyerr
+        }
+
+        EngineError::Persistence {
+            path,
+            operation,
+            source,
+        } => {
+            let pyerr = IndexError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let _ = exc.setattr("path", path.to_string_lossy().to_string());
+                let _ = exc.setattr("operation", operation.to_string());
+
+                // Set source error info
+                // Note: rag-core-py always enables persistence feature in rag-core
+                let source_kind = match source {
+                    rag_core::PersistenceError::Io(_) => "io",
+                    rag_core::PersistenceError::Json(_) => "json",
+                    rag_core::PersistenceError::VersionMismatch { .. } => "version_mismatch",
+                    rag_core::PersistenceError::NotFound(_) => "not_found",
+                };
+                let _ = exc.setattr("source_kind", source_kind);
+
+                // Chain __cause__ with source error string
+                let cause_err = PyErr::new::<RagError, _>(source.to_string());
+                let _ = exc.setattr("__cause__", cause_err.value(py));
+            }
+            pyerr
+        }
+
+        EngineError::DocumentNotFound(doc_name) => {
+            let pyerr = IndexError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let _ = exc.setattr("document_name", doc_name.as_str());
+                let _ = exc.setattr("kind", "document_not_found");
+            }
+            pyerr
+        }
+
+        EngineError::IndexSync { message } => {
+            let pyerr = IndexError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let _ = exc.setattr("kind", "sync");
+                let _ = exc.setattr("sync_message", message.as_str());
+            }
+            pyerr
+        }
+
+        EngineError::Config(msg) => {
+            let pyerr = ConfigError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                let _ = exc.setattr("config_message", msg.as_str());
+            }
+            pyerr
+        }
+
+        EngineError::Validation { chunk_id, kind } => {
+            let pyerr = ValidationError::new_err(err.to_string());
+            if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
+                // Set chunk_id (may be None)
+                match chunk_id {
+                    Some(id) => {
+                        let _ = exc.setattr("chunk_id", id.as_str());
+                    }
+                    None => {
+                        let _ = exc.setattr("chunk_id", py.None());
                     }
                 }
-                pyerr
-            }
 
-            EngineError::Rerank(rerank_err) => {
-                let pyerr = RerankError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let kind = match rerank_err {
-                        rag_core::RerankError::Error(_) => "error",
-                        rag_core::RerankError::Unavailable(_) => "unavailable",
-                        rag_core::RerankError::InvalidResponse(_) => "invalid_response",
-                    };
-                    let _ = exc.setattr("kind", kind);
-                }
-                pyerr
-            }
-
-            EngineError::Persistence {
-                path,
-                operation,
-                source,
-            } => {
-                let pyerr = IndexError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let _ = exc.setattr("path", path.to_string_lossy().to_string());
-                    let _ = exc.setattr("operation", operation.to_string());
-
-                    // Set source error info
-                    // Note: rag-core-py always enables persistence feature in rag-core
-                    let source_kind = match source {
-                        rag_core::PersistenceError::Io(_) => "io",
-                        rag_core::PersistenceError::Json(_) => "json",
-                        rag_core::PersistenceError::VersionMismatch { .. } => "version_mismatch",
-                        rag_core::PersistenceError::NotFound(_) => "not_found",
-                    };
-                    let _ = exc.setattr("source_kind", source_kind);
-
-                    // Chain __cause__ with source error string
-                    let cause_err = PyErr::new::<RagError, _>(source.to_string());
-                    let _ = exc.setattr("__cause__", cause_err.value(py));
-                }
-                pyerr
-            }
-
-            EngineError::DocumentNotFound(doc_name) => {
-                let pyerr = IndexError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let _ = exc.setattr("document_name", doc_name.as_str());
-                    let _ = exc.setattr("kind", "document_not_found");
-                }
-                pyerr
-            }
-
-            EngineError::IndexSync { message } => {
-                let pyerr = IndexError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let _ = exc.setattr("kind", "sync");
-                    let _ = exc.setattr("sync_message", message.as_str());
-                }
-                pyerr
-            }
-
-            EngineError::Config(msg) => {
-                let pyerr = ConfigError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    let _ = exc.setattr("config_message", msg.as_str());
-                }
-                pyerr
-            }
-
-            EngineError::Validation { chunk_id, kind } => {
-                let pyerr = ValidationError::new_err(err.to_string());
-                if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
-                    // Set chunk_id (may be None)
-                    match chunk_id {
-                        Some(id) => {
-                            let _ = exc.setattr("chunk_id", id.as_str());
-                        }
-                        None => {
-                            let _ = exc.setattr("chunk_id", py.None());
-                        }
+                // Set validation kind and specific fields
+                match kind {
+                    ValidationKind::NaN => {
+                        let _ = exc.setattr("kind", "nan");
                     }
-
-                    // Set validation kind and specific fields
-                    match kind {
-                        ValidationKind::NaN => {
-                            let _ = exc.setattr("kind", "nan");
-                        }
-                        ValidationKind::Inf => {
-                            let _ = exc.setattr("kind", "inf");
-                        }
-                        ValidationKind::DimensionMismatch { expected, got } => {
-                            let _ = exc.setattr("kind", "dimension_mismatch");
-                            let _ = exc.setattr("expected", *expected);
-                            let _ = exc.setattr("got", *got);
-                        }
-                        ValidationKind::EmptyText => {
-                            let _ = exc.setattr("kind", "empty_text");
-                        }
-                        ValidationKind::HashMismatch { expected, got } => {
-                            let _ = exc.setattr("kind", "hash_mismatch");
-                            let _ = exc.setattr("expected_hash", expected.as_str());
-                            let _ = exc.setattr("got_hash", got.as_str());
-                        }
+                    ValidationKind::Inf => {
+                        let _ = exc.setattr("kind", "inf");
+                    }
+                    ValidationKind::DimensionMismatch { expected, got } => {
+                        let _ = exc.setattr("kind", "dimension_mismatch");
+                        let _ = exc.setattr("expected", *expected);
+                        let _ = exc.setattr("got", *got);
+                    }
+                    ValidationKind::EmptyText => {
+                        let _ = exc.setattr("kind", "empty_text");
+                    }
+                    ValidationKind::HashMismatch { expected, got } => {
+                        let _ = exc.setattr("kind", "hash_mismatch");
+                        let _ = exc.setattr("expected_hash", expected.as_str());
+                        let _ = exc.setattr("got_hash", got.as_str());
                     }
                 }
-                pyerr
             }
-        };
-
-        pyerr
+            pyerr
+        }
     })
 }
 
