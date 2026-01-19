@@ -48,6 +48,13 @@ impl Config {
         }
 
         if let Some(timeout_secs) = parse_env_u64("RAG_RERANKER_TIMEOUT_SECS")? {
+            if timeout_secs == 0 || timeout_secs > 600 {
+                return Err(ConfigError {
+                    var: "RAG_RERANKER_TIMEOUT_SECS",
+                    value: timeout_secs.to_string(),
+                    message: "must be > 0 and <= 600".to_string(),
+                });
+            }
             config.reranker_timeout = Duration::from_secs(timeout_secs);
         }
         if let Some(concurrency) = parse_env_nonzero_usize("RAG_RERANKER_CONCURRENCY")? {
@@ -244,6 +251,30 @@ mod tests {
         with_env_var("RAG_DEFAULT_LOGPROB", "inf", || {
             let err = Config::from_env().unwrap_err();
             assert!(err.message.contains("must be finite and <= 0.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_timeout_valid() {
+        with_env_var("RAG_RERANKER_TIMEOUT_SECS", "30", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.reranker_timeout.as_secs(), 30);
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_timeout_zero() {
+        with_env_var("RAG_RERANKER_TIMEOUT_SECS", "0", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0 and <= 600"));
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_timeout_too_large() {
+        with_env_var("RAG_RERANKER_TIMEOUT_SECS", "601", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0 and <= 600"));
         });
     }
 }
