@@ -1,6 +1,8 @@
 use crate::error::{EngineError, ValidationKind};
 use crate::types::SearchResult;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// Normalize a vector to unit length in-place.
 /// If the vector has zero or very small norm, it is left unchanged.
@@ -39,6 +41,17 @@ pub(crate) struct SearchResultWithEmbedding {
     pub(crate) embedding: Vec<f32>,
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    instrument(
+        skip(candidates),
+        fields(
+            candidate_count = candidates.len(),
+            top_k = top_k,
+            diversity = diversity_factor
+        )
+    )
+)]
 pub(crate) fn mmr_diversify(
     candidates: Vec<SearchResultWithEmbedding>,
     top_k: usize,
