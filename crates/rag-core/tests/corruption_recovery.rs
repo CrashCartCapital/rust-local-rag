@@ -1,6 +1,6 @@
-use rag_core::{EmbeddingBackend, EmbeddingError, RagEngine};
-use tempfile::TempDir;
+use rag_core::{EmbeddingBackend, EmbeddingError};
 
+#[allow(dead_code)]
 struct MockBackend;
 
 impl EmbeddingBackend for MockBackend {
@@ -30,9 +30,9 @@ impl EmbeddingBackend for MockBackend {
 #[cfg(feature = "persistence")]
 #[tokio::test]
 async fn test_load_from_dir_handles_corrupted_index() {
-    let temp_dir = TempDir::new().unwrap();
+    let temp_dir = tempfile::TempDir::new().unwrap();
     let backend = MockBackend;
-    let mut engine = RagEngine::new(backend);
+    let mut engine = rag_core::RagEngine::new(backend);
 
     // Create a corrupted index file
     // The index path is determined by rag_core::persistence::index_path

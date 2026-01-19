@@ -488,7 +488,7 @@ impl WorkerSupervisor {
 
                         match engine.apply_prepared_document(prepared).await {
                             Ok(chunk_count) => chunk_count,
-                            Err(e) => return Ok(Some((filename, Err(e.into())))),
+                            Err(e) => return Ok(Some((filename, Err(e)))),
                         }
                     };
 

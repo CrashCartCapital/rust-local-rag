@@ -1,6 +1,6 @@
-use rag_core::{RagEngine, error::EmbeddingError, traits::EmbeddingBackend};
-use tempfile::TempDir;
+use rag_core::{error::EmbeddingError, traits::EmbeddingBackend};
 
+#[allow(dead_code)]
 struct MockBackend;
 
 impl EmbeddingBackend for MockBackend {
@@ -33,7 +33,7 @@ impl EmbeddingBackend for MockBackend {
 #[tokio::test]
 async fn test_load_corrupted_index_triggers_reindex() {
     // 1. Setup temp dir
-    let temp_dir = TempDir::new().unwrap();
+    let temp_dir = tempfile::TempDir::new().unwrap();
     let data_dir = temp_dir.path();
 
     // 2. Create a corrupted index file
@@ -43,7 +43,7 @@ async fn test_load_corrupted_index_triggers_reindex() {
     std::fs::write(&index_path, "{ corrupted_json: true, ").unwrap();
 
     // 3. Initialize engine and attempt load
-    let mut engine = RagEngine::new(MockBackend);
+    let mut engine = rag_core::RagEngine::new(MockBackend);
 
     let result = engine.load_from_dir(data_dir);
 

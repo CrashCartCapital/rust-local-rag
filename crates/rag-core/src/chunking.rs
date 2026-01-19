@@ -1,7 +1,9 @@
+use crate::error::{EngineError, Result};
 use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -12,6 +14,18 @@ struct SentenceInfo {
     page: usize,
     heading: Option<String>,
     index: usize,
+}
+
+// Helper to check deadline
+fn check_deadline(deadline: Option<Instant>, timeout: Option<Duration>) -> Result<()> {
+    if let Some(d) = deadline {
+        if Instant::now() > d {
+            return Err(EngineError::Timeout(
+                timeout.unwrap_or(Duration::from_secs(30)),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -38,12 +52,15 @@ pub(crate) fn chunk_text(
     text: &str,
     chunk_tokens: usize,
     sentence_overlap: usize,
-) -> Vec<ChunkFragment> {
-    let sentences = extract_sentences(text, Some(chunk_tokens));
+    timeout: Option<Duration>,
+) -> Result<Vec<ChunkFragment>> {
+    let deadline = timeout.map(|t| Instant::now() + t);
+
+    let sentences = extract_sentences(text, Some(chunk_tokens), deadline, timeout)?;
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut window: Vec<usize> = Vec::new();
@@ -51,6 +68,11 @@ pub(crate) fn chunk_text(
     let mut fragments = Vec::new();
 
     for (idx, sentence) in sentences.iter().enumerate() {
+        // Periodic deadline check in loop
+        if idx % 100 == 0 {
+            check_deadline(deadline, timeout)?;
+        }
+
         window.push(idx);
         token_sum += sentence.tokens;
 
@@ -80,7 +102,7 @@ pub(crate) fn chunk_text(
         sentences.len()
     );
 
-    fragments
+    Ok(fragments)
 }
 
 fn finalize_chunk(
@@ -154,12 +176,20 @@ fn finalize_chunk(
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<SentenceInfo> {
+fn extract_sentences(
+    text: &str,
+    hard_token_limit: Option<usize>,
+    deadline: Option<Instant>,
+    timeout: Option<Duration>,
+) -> Result<Vec<SentenceInfo>> {
     let splitter = sentence_splitter();
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
 
     for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
+        // Check deadline periodically (per page)
+        check_deadline(deadline, timeout)?;
+
         let page_number = page_idx + 1;
         let mut last_heading: Option<String> = None;
 
@@ -266,7 +296,7 @@ fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<Sentenc
     #[cfg(feature = "tracing")]
     tracing::trace!("Extracted {} sentences", sentences.len());
 
-    sentences
+    Ok(sentences)
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -457,7 +487,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text, None);
+        let sentences = extract_sentences(test_text, None, None, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -470,7 +500,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text, None);
+        let sentences = extract_sentences(test_text, None, None, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -496,7 +526,7 @@ mod tests {
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
         // Limit 4 is exactly enough for one sentence (~4 tokens).
-        let chunks = chunk_text(text, 4, 0);
+        let chunks = chunk_text(text, 4, 0, None).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
@@ -533,7 +563,7 @@ mod tests {
         // Chunk 1: "Sentence one." (4) < 5.
         // Chunk 1: "Sentence one. Sentence two." (8) >= 5.
         // Overlap 10.
-        let chunks = chunk_text(text, 5, 10);
+        let chunks = chunk_text(text, 5, 10, None).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
 
         // If bug exists (overlap=0 calc):
@@ -568,7 +598,7 @@ mod tests {
         let text = "This is a very long sentence that exceeds the token limit all by itself.";
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
-        let chunks = chunk_text(text, 5, 0);
+        let chunks = chunk_text(text, 5, 0, None).unwrap();
         // Should be split into multiple chunks
         assert!(chunks.len() > 1);
         for chunk in chunks {
@@ -587,7 +617,7 @@ mod tests {
         let text = "First. Second. Third.";
         // Limit 2. Each sentence is ~1-2 tokens.
         // Should produce 3 chunks.
-        let chunks = chunk_text(text, 2, 0);
+        let chunks = chunk_text(text, 2, 0, None).unwrap();
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
     }
@@ -600,7 +630,7 @@ mod tests {
         // 100 chars -> 25 tokens.
         let text = "a".repeat(100);
 
-        let chunks = chunk_text(&text, limit, 0);
+        let chunks = chunk_text(&text, limit, 0, None).unwrap();
 
         // Currently this returns 1 chunk of size 25.
         // We want it to split.
@@ -617,6 +647,23 @@ mod tests {
                 chunk.metadata.token_count,
                 limit
             );
+        }
+    }
+
+    #[test]
+    fn test_chunking_timeout() {
+        let text = "a ".repeat(100_000); // 100k words
+        let timeout = Duration::from_nanos(1); // Extremely short timeout
+
+        let result = chunk_text(&text, 10, 0, Some(timeout));
+        assert!(
+            result.is_err(),
+            "Should timeout on large input with tiny deadline"
+        );
+
+        match result {
+            Err(EngineError::Timeout(_)) => {}
+            _ => panic!("Expected Timeout error"),
         }
     }
 
