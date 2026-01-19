@@ -6,7 +6,37 @@ use tracing::instrument;
 
 use crate::config::Config;
 
-pub use rag_core::{RerankedResult, RerankerCandidate};
+pub use rag_core::{RerankError, RerankedResult, RerankerCandidate};
+
+fn is_fatal_error(err: &anyhow::Error) -> bool {
+    match err.root_cause().downcast_ref::<reqwest::Error>() {
+        Some(e) if e.is_connect() => true,
+        _ => {
+            // Fallback for cases where reqwest doesn't classify it as connect error but it is
+            let s = err.to_string();
+            s.contains("connection refused") || s.contains("Connection refused")
+        }
+    }
+}
+
+fn map_rerank_error(err: anyhow::Error) -> RerankError {
+    match err.root_cause().downcast_ref::<reqwest::Error>() {
+        Some(e) if e.is_connect() => RerankError::Unavailable(e.to_string()),
+        _ => {
+            let s = err.to_string();
+            if s.contains("connection refused") || s.contains("Connection refused") {
+                RerankError::Unavailable(s)
+            } else {
+                RerankError::Error(s)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn map_rerank_error_for_test(err: anyhow::Error) -> RerankError {
+    map_rerank_error(err)
+}
 
 /// Detailed score result including logprobs for transparency
 struct DetailedScore {
@@ -233,7 +263,7 @@ Answer:"#
 
         // Process remaining candidates as futures complete
         while let Some(result) = futures.next().await {
-            results.push(result);
+            results.push(result?);
 
             // Add next candidate if available
             if let Some(candidate) = candidate_iter.next() {
@@ -258,43 +288,46 @@ Answer:"#
         query: &str,
         candidate: &RerankerCandidate,
         timeout_duration: Duration,
-    ) -> RerankedResult {
+    ) -> Result<RerankedResult> {
         let chunk_id = candidate.chunk_id.clone();
         let initial_score = candidate.initial_score;
 
         let score_result = timeout(timeout_duration, self.score_candidate(query, candidate)).await;
 
         match score_result {
-            Ok(Ok(detailed)) => RerankedResult {
+            Ok(Ok(detailed)) => Ok(RerankedResult {
                 chunk_id,
                 relevance: detailed.score,
                 yes_logprob: detailed.yes_logprob,
                 no_logprob: detailed.no_logprob,
-            },
+            }),
             Ok(Err(err)) => {
+                if is_fatal_error(&err) {
+                    return Err(err);
+                }
                 tracing::warn!(
                     "Reranking failed for chunk {}, falling back to embedding score: {}",
                     chunk_id,
                     err
                 );
-                RerankedResult {
+                Ok(RerankedResult {
                     chunk_id,
                     relevance: initial_score,
                     yes_logprob: None,
                     no_logprob: None,
-                }
+                })
             }
             Err(_) => {
                 tracing::warn!(
                     "Reranking timeout for chunk {}, falling back to embedding score",
                     chunk_id
                 );
-                RerankedResult {
+                Ok(RerankedResult {
                     chunk_id,
                     relevance: initial_score,
                     yes_logprob: None,
                     no_logprob: None,
-                }
+                })
             }
         }
     }
@@ -790,7 +823,7 @@ impl rag_core::Rerank for RerankerService {
     ) -> std::result::Result<Vec<RerankedResult>, rag_core::RerankError> {
         RerankerService::rerank(self, query, candidates)
             .await
-            .map_err(|e| rag_core::RerankError::Error(e.to_string()))
+            .map_err(map_rerank_error)
     }
 }
 
@@ -798,6 +831,23 @@ impl rag_core::Rerank for RerankerService {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn test_map_rerank_error_logic() {
+        use rag_core::RerankError;
+        let err = anyhow::anyhow!("Generic error");
+        let mapped = map_rerank_error_for_test(err);
+        assert!(matches!(mapped, RerankError::Error(_)));
+
+        // Cannot easily construct reqwest::Error manually to test Unavailable path
+        // without actual reqwest call or mocking, but we tested the fallback string match
+        let err_str = anyhow::anyhow!("some connection refused error");
+        let mapped_str = map_rerank_error_for_test(err_str);
+        match mapped_str {
+            RerankError::Unavailable(msg) => assert!(msg.contains("connection refused")),
+            _ => panic!("Expected Unavailable for string match"),
+        }
+    }
 
     #[tokio::test]
     #[serial]
