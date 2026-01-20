@@ -1,3 +1,5 @@
+#![cfg(feature = "persistence")]
+
 use rag_core::{RagEngine, error::EmbeddingError, traits::EmbeddingBackend};
 use tempfile::TempDir;
 
@@ -8,20 +10,15 @@ impl EmbeddingBackend for MockBackend {
         "mock-embed"
     }
 
-    fn embed(
-        &self,
-        _text: &str,
-    ) -> impl std::future::Future<Output = std::result::Result<Vec<f32>, EmbeddingError>> + Send
-    {
-        async move { Ok(vec![0.0]) }
+    async fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, EmbeddingError> {
+        Ok(vec![0.0])
     }
 
-    fn embed_batch(
+    async fn embed_batch(
         &self,
         texts: &[String],
-    ) -> impl std::future::Future<Output = std::result::Result<Vec<Vec<f32>>, EmbeddingError>> + Send
-    {
-        async move { Ok(vec![vec![0.0]; texts.len()]) }
+    ) -> std::result::Result<Vec<Vec<f32>>, EmbeddingError> {
+        Ok(vec![vec![0.0]; texts.len()])
     }
 
     fn dimension(&self) -> usize {
@@ -29,7 +26,6 @@ impl EmbeddingBackend for MockBackend {
     }
 }
 
-#[cfg(feature = "persistence")]
 #[tokio::test]
 async fn test_load_corrupted_index_triggers_reindex() {
     // 1. Setup temp dir

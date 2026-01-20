@@ -1,3 +1,5 @@
+#![cfg(feature = "persistence")]
+
 use rag_core::{EmbeddingBackend, EmbeddingError, RagEngine};
 use tempfile::TempDir;
 
@@ -12,22 +14,15 @@ impl EmbeddingBackend for MockBackend {
         2
     }
 
-    fn embed(
-        &self,
-        _text: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<f32>, EmbeddingError>> + Send {
-        async { Ok(vec![0.0, 0.0]) }
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        Ok(vec![0.0, 0.0])
     }
 
-    fn embed_batch(
-        &self,
-        texts: &[String],
-    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, EmbeddingError>> + Send {
-        async move { Ok(vec![vec![0.0, 0.0]; texts.len()]) }
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        Ok(vec![vec![0.0, 0.0]; texts.len()])
     }
 }
 
-#[cfg(feature = "persistence")]
 #[tokio::test]
 async fn test_load_from_dir_handles_corrupted_index() {
     let temp_dir = TempDir::new().unwrap();
