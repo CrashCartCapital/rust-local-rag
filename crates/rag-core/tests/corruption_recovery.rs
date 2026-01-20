@@ -1,3 +1,5 @@
+#![cfg(feature = "persistence")]
+
 use rag_core::{EmbeddingBackend, EmbeddingError, RagEngine};
 use tempfile::TempDir;
 
@@ -21,7 +23,6 @@ impl EmbeddingBackend for MockBackend {
     }
 }
 
-#[cfg(feature = "persistence")]
 #[tokio::test]
 async fn test_load_from_dir_handles_corrupted_index() {
     let temp_dir = TempDir::new().unwrap();
