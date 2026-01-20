@@ -335,12 +335,24 @@ fn is_heading(line: &str) -> bool {
         return true;
     }
 
-    heading_regex().is_match(trimmed)
+    match heading_regex() {
+        Ok(re) => re.is_match(trimmed),
+        Err(_e) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!("Regex invalid: {}", _e);
+            false
+        }
+    }
 }
 
-fn heading_regex() -> &'static Regex {
-    static HEADING_REGEX: OnceLock<Regex> = OnceLock::new();
-    HEADING_REGEX.get_or_init(|| Regex::new(r"^\d+\.\s").expect("valid heading regex pattern"))
+fn heading_regex() -> Result<&'static Regex, &'static str> {
+    static HEADING_REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
+    HEADING_REGEX
+        .get_or_init(|| {
+            Regex::new(r"^\d+\.\s").map_err(|e| format!("valid heading regex pattern: {}", e))
+        })
+        .as_ref()
+        .map_err(|e| e.as_str())
 }
 
 fn approximate_token_count(value: &str) -> usize {
@@ -794,5 +806,13 @@ mod tests {
         assert_eq!(chunks3.len(), 2, "Should emit tail chunk with new content");
         assert_eq!(chunks3[0].text, format!("{} {}", s1_big, s2_big));
         assert_eq!(chunks3[1].text, format!("{} {}", s2_big, s3_small));
+    }
+
+    #[test]
+    fn test_heading_regex_compilation() {
+        assert!(
+            heading_regex().is_ok(),
+            "Heading regex should compile successfully"
+        );
     }
 }
