@@ -2,7 +2,7 @@ use crate::error::{EngineError, ValidationKind};
 use crate::types::SearchResult;
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tracing")]
-use tracing::instrument;
+use tracing::{field, instrument};
 
 /// Normalize a vector to unit length in-place.
 /// If the vector has zero or very small norm, it is left unchanged.
@@ -392,13 +392,34 @@ impl LexicalIndex {
         }
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self, query),
+            fields(
+                query_len = query.len(),
+                limit = limit,
+                total_docs = self.total_docs,
+                query_tokens = field::Empty,
+                matched_docs = field::Empty,
+                max_score = field::Empty,
+            )
+        )
+    )]
     pub(crate) fn score(&self, query: &str, limit: usize) -> Vec<(String, f32)> {
         if self.total_docs == 0 {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Lexical search skipped: index is empty");
             return Vec::new();
         }
 
         let tokens = tokenize(query);
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("query_tokens", tokens.len());
+
         if tokens.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Lexical search skipped: no tokens extracted from query");
             return Vec::new();
         }
 
@@ -461,6 +482,15 @@ impl LexicalIndex {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
+
+        #[cfg(feature = "tracing")]
+        {
+            tracing::Span::current().record("matched_docs", results.len());
+            if let Some((_, score)) = results.first() {
+                tracing::Span::current().record("max_score", score);
+            }
+        }
+
         results
     }
 
