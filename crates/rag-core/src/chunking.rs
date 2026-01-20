@@ -461,7 +461,9 @@ fn split_massive_word(text: &str, limit: usize) -> Vec<String> {
     let mut start = 0;
 
     while start < chars.len() {
-        let mut end = (start + limit.saturating_mul(4)).min(chars.len());
+        // Use saturating_add to prevent overflow if limit is very large (e.g. usize::MAX / 4)
+        // Although unlikely, start + limit*4 could wrap around in release mode without this.
+        let mut end = (start.saturating_add(limit.saturating_mul(4))).min(chars.len());
 
         loop {
             let slice: String = chars[start..end].iter().collect();
@@ -822,5 +824,48 @@ mod tests {
             heading_regex().is_ok(),
             "Heading regex should compile successfully"
         );
+    }
+
+    #[test]
+    fn test_chunking_zero_limit_safe() {
+        let text = "This is a test.";
+        // Limit 0 is technically invalid but should not panic.
+        // Based on logic: extract_sentences calls split_part_hard(limit=0) -> returns full text.
+        // chunk_text loop token_sum >= 0 -> triggers every sentence.
+        // Should produce 1 chunk.
+        let chunks = chunk_text(text, 0, 0);
+        assert!(!chunks.is_empty(), "Should produce at least one chunk");
+        assert_eq!(chunks[0].text, "This is a test.");
+    }
+
+    #[test]
+    fn test_split_massive_word_overflow_protection() {
+        // Simulate a massive limit to test overflow protection in `split_massive_word`.
+        // We can't actually allocate a string that big, but we can verify it doesn't panic
+        // with a small string and huge limit.
+        let limit = usize::MAX / 2;
+        let text = "small";
+        let chunks = split_massive_word(text, limit);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "small");
+    }
+
+    #[test]
+    fn test_split_massive_word_utf8_slicing() {
+        // Ensure we don't slice inside a char boundary.
+        // Emojis are 4 bytes.
+        let text = "😀😃😄😁";
+        // Limit 1.
+        // With current token estimation (chars/4), 4 chars = 1 token.
+        // So this should fit in 1 chunk.
+        let chunks = split_massive_word(text, 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+
+        // Try with 8 emojis -> 2 tokens. Limit 1.
+        let text2 = "😀😃😄😁😀😃😄😁";
+        let chunks2 = split_massive_word(text2, 1);
+        // Should split into 2 chunks of 4 emojis each (approx).
+        assert!(chunks2.len() >= 2);
     }
 }
