@@ -32,14 +32,18 @@ ollama serve > /dev/null 2>&1 &
 curl localhost:11434
 ```
 
-**Install Embedding Model:**
-The system uses `nomic-embed-text` by default.
+**Install Models:**
+The system uses `nomic-embed-text` for embeddings and `dengcao/Qwen3-Reranker-4B:Q5_K_M` for reranking by default.
 
 ```bash
+# Pull embedding model (Required)
 ollama pull nomic-embed-text
+
+# Pull reranker model (Recommended for better accuracy)
+ollama pull dengcao/Qwen3-Reranker-4B:Q5_K_M
 ```
 
-> **Tip:** You can also use `make setup-ollama` (after cloning) to automate starting Ollama and pulling the model.
+> **Tip:** `make setup-ollama` (available after cloning) automates starting Ollama and pulling the **embedding model only**. You should pull the reranker manually if desired.
 
 ### 3. Install Poppler (Optional)
 
