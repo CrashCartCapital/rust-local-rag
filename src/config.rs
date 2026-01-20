@@ -58,6 +58,13 @@ impl Config {
             config.reranker_timeout = Duration::from_secs(timeout_secs);
         }
         if let Some(concurrency) = parse_env_nonzero_usize("RAG_RERANKER_CONCURRENCY")? {
+            if concurrency.get() > 256 {
+                return Err(ConfigError {
+                    var: "RAG_RERANKER_CONCURRENCY",
+                    value: concurrency.to_string(),
+                    message: "must be <= 256".to_string(),
+                });
+            }
             config.reranker_concurrency = concurrency;
         }
 
@@ -275,6 +282,38 @@ mod tests {
         with_env_var("RAG_RERANKER_TIMEOUT_SECS", "3601", || {
             let err = Config::from_env().unwrap_err();
             assert!(err.message.contains("must be > 0 and <= 3600"));
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_concurrency_valid() {
+        with_env_var("RAG_RERANKER_CONCURRENCY", "4", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.reranker_concurrency.get(), 4);
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_concurrency_zero() {
+        with_env_var("RAG_RERANKER_CONCURRENCY", "0", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_concurrency_too_large() {
+        with_env_var("RAG_RERANKER_CONCURRENCY", "257", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be <= 256"));
+        });
+    }
+
+    #[test]
+    fn test_rag_reranker_concurrency_invalid() {
+        with_env_var("RAG_RERANKER_CONCURRENCY", "invalid", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("invalid digit"));
         });
     }
 }
