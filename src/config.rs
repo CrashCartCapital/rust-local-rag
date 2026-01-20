@@ -48,11 +48,11 @@ impl Config {
         }
 
         if let Some(timeout_secs) = parse_env_u64("RAG_RERANKER_TIMEOUT_SECS")? {
-            if timeout_secs == 0 || timeout_secs > 600 {
+            if timeout_secs == 0 || timeout_secs > 3600 {
                 return Err(ConfigError {
                     var: "RAG_RERANKER_TIMEOUT_SECS",
                     value: timeout_secs.to_string(),
-                    message: "must be > 0 and <= 600".to_string(),
+                    message: "must be > 0 and <= 3600".to_string(),
                 });
             }
             config.reranker_timeout = Duration::from_secs(timeout_secs);
@@ -266,15 +266,15 @@ mod tests {
     fn test_rag_reranker_timeout_zero() {
         with_env_var("RAG_RERANKER_TIMEOUT_SECS", "0", || {
             let err = Config::from_env().unwrap_err();
-            assert!(err.message.contains("must be > 0 and <= 600"));
+            assert!(err.message.contains("must be > 0 and <= 3600"));
         });
     }
 
     #[test]
     fn test_rag_reranker_timeout_too_large() {
-        with_env_var("RAG_RERANKER_TIMEOUT_SECS", "601", || {
+        with_env_var("RAG_RERANKER_TIMEOUT_SECS", "3601", || {
             let err = Config::from_env().unwrap_err();
-            assert!(err.message.contains("must be > 0 and <= 600"));
+            assert!(err.message.contains("must be > 0 and <= 3600"));
         });
     }
 }
