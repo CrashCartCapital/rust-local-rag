@@ -1,6 +1,8 @@
 use crate::error::{EngineError, ValidationKind};
 use crate::types::SearchResult;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
 /// Normalize a vector to unit length in-place.
 /// If the vector has zero or very small norm, it is left unchanged.
@@ -39,6 +41,17 @@ pub(crate) struct SearchResultWithEmbedding {
     pub(crate) embedding: Vec<f32>,
 }
 
+#[cfg_attr(
+    feature = "tracing",
+    instrument(
+        skip(candidates),
+        fields(
+            candidate_count = candidates.len(),
+            top_k = top_k,
+            diversity = diversity_factor
+        )
+    )
+)]
 pub(crate) fn mmr_diversify(
     candidates: Vec<SearchResultWithEmbedding>,
     top_k: usize,
@@ -206,18 +219,24 @@ impl AnnIndex {
         }
 
         if candidates.len() < max_candidates {
-            for (hash, bucket) in &self.buckets {
+            // Sort keys for deterministic fallback iteration
+            let mut all_hashes: Vec<&u64> = self.buckets.keys().collect();
+            all_hashes.sort();
+
+            for hash in all_hashes {
                 if candidates.len() >= max_candidates {
                     break;
                 }
                 if visited.contains(hash) {
                     continue;
                 }
-                for id in bucket {
-                    if candidates.len() >= max_candidates {
-                        break;
+                if let Some(bucket) = self.buckets.get(hash) {
+                    for id in bucket {
+                        if candidates.len() >= max_candidates {
+                            break;
+                        }
+                        candidates.push(id.clone());
                     }
-                    candidates.push(id.clone());
                 }
             }
         }
@@ -1332,5 +1351,44 @@ mod tests {
 
         let ids: Vec<String> = results.into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn test_ann_index_deterministic_fallback() {
+        // This test verifies that the fallback search (scanning all buckets)
+        // returns candidates in a deterministic order.
+
+        // We run the experiment multiple times with new indices to ensure
+        // we are not just getting lucky with the same HashMap seed.
+        // (Though SimpleRng for hyperplanes is seeded constantly).
+
+        let query = vec![0.5, 0.5, 0.5, 0.5];
+        let mut first_results = None;
+
+        for _ in 0..5 {
+            let mut index = AnnIndex::new(4);
+            // Insert enough items to create multiple buckets
+            for i in 0..100 {
+                let v = vec![
+                    (i % 2) as f32,
+                    ((i / 2) % 2) as f32,
+                    ((i / 4) % 2) as f32,
+                    ((i / 8) % 2) as f32,
+                ];
+                index.insert(&format!("id-{}", i), &v);
+            }
+
+            // Limit = 20 forces us to pick a subset of buckets in the fallback loop
+            let results = index.search(&query, 20);
+
+            if let Some(ref first) = first_results {
+                assert_eq!(
+                    first, &results,
+                    "Results should be deterministic across runs"
+                );
+            } else {
+                first_results = Some(results);
+            }
+        }
     }
 }
