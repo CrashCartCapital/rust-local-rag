@@ -190,7 +190,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         #[cfg(feature = "tracing")]
         let chunk_start = std::time::Instant::now();
 
-        let fragments = chunk_text(text, self.config.chunk_tokens, self.config.sentence_overlap);
+        let fragments = chunk_text(
+            text,
+            self.config.chunk_tokens,
+            self.config.sentence_overlap,
+            Some(std::time::Duration::from_secs(10)),
+        )?;
 
         #[cfg(feature = "tracing")]
         {

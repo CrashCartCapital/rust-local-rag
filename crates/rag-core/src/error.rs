@@ -178,6 +178,9 @@ pub enum EngineError {
 
     #[error("index synchronization error: {message}")]
     IndexSync { message: String },
+
+    #[error("operation timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
