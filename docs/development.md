@@ -67,21 +67,30 @@ make ollama-models          # Pull required models
 
 ## Repository Layout
 
-*   `src/main.rs`: Entrypoint; env + logging; initializes engine + job system.
+### Source Code
+*   `src/main.rs`: Application entrypoint; env + logging; initializes engine + job system.
 *   `src/lib.rs`: Library definitions and module exports.
 *   `src/config.rs`: Centralized configuration loading.
-*   `src/mcp_server.rs`: MCP server entrypoint (facade).
-*   `src/mcp/*`: MCP implementation (HTTP, tools, models).
-*   `crates/rag-core/src/*`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `src/mcp_server.rs`: MCP server entrypoint (re-exports `src/mcp`).
+*   `src/mcp/`: MCP implementation (HTTP, tools, models).
 *   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
-*   `src/progress_logger.rs`: Structured logging for long-running operations.
-*   `src/bin/rag_tui/*`: TUI client.
-*   `docs/*`: Documentation.
-*   `eval/*`: Python evaluation harness.
+*   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `src/bin/rag_tui/`: TUI client application.
+
+### Data & Configuration
+*   `documents/`: Directory for PDF documents to be indexed.
+*   `data/`: Local data storage (SQLite DB, embeddings).
+*   `logs/`: Application logs.
+*   `prompts/`: System prompts (e.g. for reranker).
+
+### Documentation & Analysis
+*   `docs/`: User and developer documentation.
+*   `analysis/`: Product Requirements Documents (PRDs) and technical debt analysis.
+*   `eval/`: Python evaluation harness and configs.
 
 ## Testing & Evaluation
 

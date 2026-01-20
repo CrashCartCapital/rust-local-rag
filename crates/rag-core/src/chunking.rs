@@ -49,6 +49,7 @@ pub(crate) fn chunk_text(
     let mut window: Vec<usize> = Vec::new();
     let mut token_sum = 0usize;
     let mut fragments = Vec::new();
+    let mut max_emitted_index: Option<usize> = None;
 
     for (idx, sentence) in sentences.iter().enumerate() {
         window.push(idx);
@@ -58,6 +59,9 @@ pub(crate) fn chunk_text(
             if let Some((chunk_text, metadata)) =
                 finalize_chunk(&window, &sentences, sentence_overlap)
             {
+                if let Some((_, end)) = metadata.sentence_range {
+                    max_emitted_index = Some(max_emitted_index.map_or(end, |m| m.max(end)));
+                }
                 fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
             }
 
@@ -67,10 +71,21 @@ pub(crate) fn chunk_text(
         }
     }
 
-    if !window.is_empty()
-        && let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0)
-    {
-        fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
+    if !window.is_empty() {
+        let last_idx = window.last().copied().unwrap_or(0);
+        let last_sentence_index = sentences[last_idx].index;
+
+        let is_redundant = if let Some(max_idx) = max_emitted_index {
+            last_sentence_index <= max_idx
+        } else {
+            false
+        };
+
+        if !is_redundant {
+            if let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0) {
+                fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
+            }
+        }
     }
 
     #[cfg(feature = "tracing")]
@@ -672,6 +687,125 @@ mod tests {
         // Existing code guard: returns vec![text]
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "test");
+    }
+
+    #[test]
+    fn test_redundant_tail_chunk_suppression() {
+        let s1 = "First sentence.";
+        let s2 = "Second sentence.";
+        let text = format!("{} {}", s1, s2);
+
+        // Debug sentences
+        let sentences = extract_sentences(&text, None);
+        for s in &sentences {
+            println!("S: '{}' ({})", s.text, s.tokens);
+        }
+        // "First sentence." -> ~3 tokens
+        // "Second sentence." -> ~4 tokens
+
+        // Limit 6.
+        // S1 (3) < 6.
+        // S1 + S2 (7) >= 6. Trigger.
+        // Chunk [S1, S2].
+        // Overlap 1 (S2). Window becomes [S2].
+        // Loop ends.
+
+        // Final window [S2]. Last index is S2.
+        // S2 was part of Chunk 1. Redundant.
+
+        let chunks = chunk_text(&text, 6, 1);
+        for (i, c) in chunks.iter().enumerate() {
+            println!("Chunk {}: {}", i, c.text);
+        }
+
+        assert_eq!(chunks.len(), 1, "Should not emit redundant tail chunk");
+        assert_eq!(chunks[0].text, text, "First chunk should be full text");
+    }
+
+    #[test]
+    fn test_tail_chunk_with_new_content_is_kept() {
+        // S1 (3), S2 (4), S3 (3).
+        let s1 = "First sentence.";
+        let s2 = "Second sentence.";
+        let s3 = "Third sentence.";
+        let text = format!("{} {} {}", s1, s2, s3);
+
+        // Limit 6.
+        // [S1, S2] -> 7 >= 6. Trigger Chunk 1.
+        // Overlap 1 -> [S2].
+        // Add S3 -> [S2, S3] -> 7 >= 6. Trigger Chunk 2.
+        // Overlap 1 -> [S3].
+        // Loop ends.
+        // Final window [S3]. Last is S3.
+        // S3 was included in Chunk 2. Redundant.
+
+        // This setup produces [S1, S2], [S2, S3].
+        // Both are kept. The final residue [S3] is dropped.
+
+        let chunks = chunk_text(&text, 6, 1);
+
+        assert_eq!(chunks.len(), 2, "Should have 2 chunks");
+        assert_eq!(chunks[0].text, format!("{} {}", s1, s2));
+        assert_eq!(chunks[1].text, format!("{} {}", s2, s3));
+
+        // Now try a case where the final chunk is NOT triggered in loop but added at end.
+        // "Longer first sentence here." (4 words, 15+chars -> ~5 tokens)
+        // "Short one." (~2 tokens)
+        // "Tiny." (1 token)
+
+        let s1_long = "Longer first sentence here.";
+        let s2_short = "Short one.";
+        let s3_tiny = "Tiny.";
+        let _text2 = format!("{} {} {}", s1_long, s2_short, s3_tiny);
+
+        // Limit 8.
+        // [S1] (5) < 8.
+        // [S1, S2] (7) < 8.
+        // [S1, S2, S3] (8) >= 8. Trigger Chunk 1.
+        // Overlap 1 -> [S3].
+        // Loop ends.
+        // Final window [S3]. Last is S3.
+        // S3 was emitted? Yes, in Chunk 1.
+        // S3 index (2). Max emitted (2).
+        // Redundant.
+
+        // Wait, we need a case where S3 was NOT emitted fully?
+        // Or where we didn't trigger?
+
+        // Limit 10.
+        // [S1, S2, S3] (8) < 10.
+        // Loop ends.
+        // Final [S1, S2, S3].
+        // Max emitted None.
+        // Not redundant. Emit.
+
+        // We need: Loop triggers chunk, leaves residue that is NEW.
+        // [S1, S2] trigger. [S3] remains and is new.
+        // S1(5), S2(5), S3(1). Limit 8.
+        // [S1, S2] (10) >= 8. Trigger.
+        // Overlap 1 -> [S2].
+        // Add S3 -> [S2, S3] (6) < 8.
+        // Loop ends.
+        // Final [S2, S3].
+        // S3 index > S2 (max emitted).
+        // Emit.
+
+        let s1_big = "This is a significantly longer sentence to occupy space.";
+        let s2_big = "Another significantly long sentence to trigger the limit.";
+        let s3_small = "Small.";
+
+        let text3 = format!("{} {} {}", s1_big, s2_big, s3_small);
+        // Approx: S1 ~10, S2 ~10, S3 ~1.
+        // Limit 15.
+        // [S1, S2] -> 20. Trigger.
+        // Overlap 1 -> [S2].
+        // [S2, S3] -> 11 < 15.
+        // Final emit [S2, S3].
+
+        let chunks3 = chunk_text(&text3, 15, 1);
+        assert_eq!(chunks3.len(), 2, "Should emit tail chunk with new content");
+        assert_eq!(chunks3[0].text, format!("{} {}", s1_big, s2_big));
+        assert_eq!(chunks3[1].text, format!("{} {}", s2_big, s3_small));
     }
 
     #[test]
