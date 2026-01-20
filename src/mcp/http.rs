@@ -104,6 +104,9 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
         EngineError::Rerank(RerankError::Unavailable(_)) => {
             (axum::http::StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
+        EngineError::Rerank(RerankError::Api(_)) => {
+            (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
+        }
         EngineError::Rerank(RerankError::InvalidResponse(_)) => {
             (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
         }
@@ -360,6 +363,11 @@ mod tests {
 
         // Test Rerank InvalidResponse (New)
         let err = EngineError::Rerank(RerankError::InvalidResponse("bad json".to_string()));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+
+        // Test Rerank Api (New)
+        let err = EngineError::Rerank(RerankError::Api("500 internal".to_string()));
         let (status, _) = map_engine_error(&err);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
 

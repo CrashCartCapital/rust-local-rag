@@ -26,6 +26,8 @@ fn map_rerank_error(err: anyhow::Error) -> RerankError {
             let s = err.to_string();
             if s.contains("connection refused") || s.contains("Connection refused") {
                 RerankError::Unavailable(s)
+            } else if s.contains("Reranker API error") {
+                RerankError::Api(s)
             } else {
                 RerankError::Error(s)
             }
@@ -846,6 +848,13 @@ mod tests {
         match mapped_str {
             RerankError::Unavailable(msg) => assert!(msg.contains("connection refused")),
             _ => panic!("Expected Unavailable for string match"),
+        }
+
+        let err_api = anyhow::anyhow!("Reranker API error: 500 - Internal Server Error");
+        let mapped_api = map_rerank_error_for_test(err_api);
+        match mapped_api {
+            RerankError::Api(msg) => assert!(msg.contains("Reranker API error")),
+            _ => panic!("Expected Api for string match"),
         }
     }
 

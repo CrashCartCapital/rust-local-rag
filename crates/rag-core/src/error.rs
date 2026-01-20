@@ -143,6 +143,10 @@ pub enum RerankError {
     #[error("reranker unavailable: {0}")]
     Unavailable(String),
 
+    /// Reranker API error
+    #[error("reranker API error: {0}")]
+    Api(String),
+
     /// Reranker returned invalid response
     #[error("invalid reranker response: {0}")]
     InvalidResponse(String),
