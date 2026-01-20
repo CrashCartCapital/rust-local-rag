@@ -286,6 +286,15 @@ mod tests {
     }
 
     #[test]
+    fn test_rag_embedding_timeout_invalid_format() {
+        with_env_var("RAG_EMBEDDING_TIMEOUT_SECS", "not_a_number", || {
+            let err = Config::from_env().unwrap_err();
+            // Verify that we get a parse error, not a validation error
+            assert!(!err.message.contains("must be"));
+        });
+    }
+
+    #[test]
     fn test_rag_reranker_concurrency_valid() {
         with_env_var("RAG_RERANKER_CONCURRENCY", "4", || {
             let config = Config::from_env().unwrap();
