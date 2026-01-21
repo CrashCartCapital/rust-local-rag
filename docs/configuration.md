@@ -56,7 +56,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `RAG_LEXICAL_WEIGHT` | First-stage lexical/BM25 weight (0.0-1.0) | `0.3` |
 | `RAG_RERANKER_WEIGHT` | Second-stage reranker weight (0.0-1.0) | `0.7` |
 | `RAG_INITIAL_SCORE_WEIGHT` | Second-stage initial score weight (0.0-1.0) | `0.3` |
-| `EMBEDDING_BATCH_SIZE` | Number of chunks to embed in a single batch | `32` |
+| `RAG_EMBEDDING_BATCH_SIZE` | Number of chunks to embed in a single batch | `32` |
 
 > 💡 **Tip**: Set `OLLAMA_EMBEDDING_MODEL` to any embedding model you've installed. The server verifies your choice at startup.
 
