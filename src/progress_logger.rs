@@ -7,7 +7,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
 /// Processing stage for reindexing
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Stage {
     Discover,
     Embedding,
@@ -128,11 +128,13 @@ impl ProgressLogger {
         })
     }
 
-    /// Emit a progress event
-    /// Event types: progress | stage | done | error | batch
-    pub async fn emit(&self, state: &ProgressState, event: &str, note: Option<&str>) -> Result<()> {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-
+    /// Format a progress event line (extracted for testing)
+    fn format_event_line(
+        ts: u128,
+        state: &ProgressState,
+        event: &str,
+        note: Option<&str>,
+    ) -> String {
         let dps = state.docs_per_sec();
         let eta = state.eta_seconds();
         let pct = state.percent();
@@ -152,7 +154,7 @@ impl ProgressLogger {
                 String::new()
             };
 
-        let line = format!(
+        format!(
             "ts={} job={} event={} stage={} done={} total={} success={} failed={} skipped={} embedded={} pct={} dps={:.2} eta_s={} last_doc={} note={}{}\n",
             ts,
             state.job_id,
@@ -170,23 +172,15 @@ impl ProgressLogger {
             last_doc_encoded,
             note_encoded,
             batch_info,
-        );
-
-        let mut guard = self.writer.lock().await;
-        guard.write_all(line.as_bytes()).await?;
-        guard.flush().await?;
-
-        Ok(())
+        )
     }
 
-    /// Emit a batch progress event for incremental updates during embedding
-    pub async fn emit_batch(
-        &self,
+    /// Format a batch event line (extracted for testing)
+    fn format_batch_line(
+        ts: u128,
         state: &ProgressState,
         batch_progress: &BatchProgress,
-    ) -> Result<()> {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-
+    ) -> String {
         let doc_encoded = urlencoding::encode(&batch_progress.document_name);
         let batch_pct = if batch_progress.batch_count > 0 {
             (batch_progress.batch_index * 100) / batch_progress.batch_count
@@ -197,7 +191,7 @@ impl ProgressLogger {
         // Include full counter set for consistency with progress events
         let pct = state.percent();
 
-        let line = format!(
+        format!(
             "ts={} job={} event=batch stage=embedding done={} total={} success={} failed={} skipped={} embedded={} pct={} last_doc={} current_batch={} total_batches={} batch_pct={} total_chunks={} chunks_in_batch={} note=batch%20{}/{}%20complete\n",
             ts,
             state.job_id,
@@ -216,12 +210,109 @@ impl ProgressLogger {
             batch_progress.chunks_in_batch,
             batch_progress.batch_index,
             batch_progress.batch_count,
-        );
+        )
+    }
+
+    /// Emit a progress event
+    /// Event types: progress | stage | done | error | batch
+    pub async fn emit(&self, state: &ProgressState, event: &str, note: Option<&str>) -> Result<()> {
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+        let line = Self::format_event_line(ts, state, event, note);
 
         let mut guard = self.writer.lock().await;
         guard.write_all(line.as_bytes()).await?;
         guard.flush().await?;
 
         Ok(())
+    }
+
+    /// Emit a batch progress event for incremental updates during embedding
+    pub async fn emit_batch(
+        &self,
+        state: &ProgressState,
+        batch_progress: &BatchProgress,
+    ) -> Result<()> {
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+        let line = Self::format_batch_line(ts, state, batch_progress);
+
+        let mut guard = self.writer.lock().await;
+        guard.write_all(line.as_bytes()).await?;
+        guard.flush().await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_progress_logger_emit() {
+        let dir = tempdir().unwrap();
+        let logger = ProgressLogger::new(dir.path().to_str().unwrap()).await.unwrap();
+        let state = ProgressState::new("test_job".to_string(), 100);
+
+        logger.emit(&state, "test_event", Some("test note")).await.unwrap();
+
+        let content = tokio::fs::read_to_string(dir.path().join("progress_tracking.log")).await.unwrap();
+        assert!(content.contains("job=test_job"));
+        assert!(content.contains("event=test_event"));
+        assert!(content.contains("note=test%20note"));
+    }
+
+    #[test]
+    fn test_format_event_line() {
+        let state = ProgressState::new("test_job".to_string(), 100);
+        let line = ProgressLogger::format_event_line(1234567890, &state, "test_event", Some("foo bar"));
+
+        assert!(line.contains("ts=1234567890"));
+        assert!(line.contains("job=test_job"));
+        assert!(line.contains("event=test_event"));
+        assert!(line.contains("note=foo%20bar"));
+        assert!(line.contains("stage=discover"));
+    }
+
+    #[test]
+    fn test_format_batch_line() {
+        let state = ProgressState::new("test_job".to_string(), 100);
+        let batch = BatchProgress {
+            document_name: "test doc.pdf".to_string(),
+            batch_index: 1,
+            batch_count: 4,
+            chunks_in_batch: 5,
+            total_chunks: 20,
+        };
+
+        let line = ProgressLogger::format_batch_line(1234567890, &state, &batch);
+
+        assert!(line.contains("ts=1234567890"));
+        assert!(line.contains("event=batch"));
+        assert!(line.contains("last_doc=test%20doc.pdf"));
+        assert!(line.contains("current_batch=1"));
+        assert!(line.contains("total_batches=4"));
+        assert!(line.contains("batch_pct=25"));
+    }
+
+    #[test]
+    fn test_progress_calculations() {
+        let mut state = ProgressState::new("calc_test".to_string(), 200);
+
+        // Initial state
+        assert_eq!(state.percent(), 0);
+        assert_eq!(state.docs_per_sec(), 0.0);
+
+        // Advance progress
+        state.done_docs = 50;
+        assert_eq!(state.percent(), 25);
+
+        // Wait a bit to test dps (simulated by manual time check if we could inject clock,
+        // but here we just check it doesn't panic and returns plausible values)
+        // Since we can't easily mock Instant without a trait, we just verify the logic matches
+        // what we expect given the elapsed time.
+
+        let dps = state.docs_per_sec();
+        assert!(dps >= 0.0);
     }
 }
