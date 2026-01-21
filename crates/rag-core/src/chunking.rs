@@ -348,7 +348,7 @@ fn heading_regex() -> Result<&'static Regex, &'static str> {
     static HEADING_REGEX: OnceLock<Result<Regex, String>> = OnceLock::new();
     HEADING_REGEX
         .get_or_init(|| {
-            Regex::new(r"^\d+\.\s").map_err(|e| format!("valid heading regex pattern: {}", e))
+            Regex::new(r"^\d+\.\s").map_err(|e| format!("valid heading regex pattern: {e}"))
         })
         .as_ref()
         .map_err(|e| e.as_str())
@@ -394,7 +394,7 @@ fn sentence_splitter() -> Result<&'static srx::Rules, String> {
         .get_or_init(|| {
             const SRX_XML: &str = include_str!("../../../data/segment.srx");
             srx::SRX::from_str(SRX_XML)
-                .map_err(|e| format!("valid SRX rules from embedded segment.srx: {}", e))
+                .map_err(|e| format!("valid SRX rules from embedded segment.srx: {e}"))
                 .map(|srx| srx.language_rules("en"))
         })
         .as_ref()

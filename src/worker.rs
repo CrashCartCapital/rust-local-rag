@@ -22,6 +22,16 @@ struct ReindexOutcome {
     failed_documents: Vec<String>,
 }
 
+#[derive(Clone)]
+struct ProcessDocumentContext {
+    rag_engine: Arc<RwLock<RagEngine>>,
+    index_store: Arc<crate::SqliteIndexStore>,
+    model_id: String,
+    embedding_dim: usize,
+    needs_reindex: bool,
+    total_docs: i64,
+}
+
 impl ReindexOutcome {
     fn failure_summary(&self) -> Option<String> {
         if self.failed_documents.is_empty() {
@@ -201,7 +211,10 @@ impl WorkerSupervisor {
                 // with the current embedding model; mark the rest as failed to avoid confusion.
                 let (current_model_id, current_dim) = {
                     let engine = self.rag_engine.read().await;
-                    (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+                    (
+                        engine.embedding_model().to_string(),
+                        engine.backend_embedding_dim(),
+                    )
                 };
 
                 let mut handled_job_ids: HashSet<String> = HashSet::new();
@@ -237,8 +250,7 @@ impl WorkerSupervisor {
                                 &job.job_id,
                                 JobStatus::Failed,
                                 Some(format!(
-                                    "Invalid documents_dir in payload: '{}'",
-                                    documents_dir
+                                    "Invalid documents_dir in payload: '{documents_dir}'"
                                 )),
                             )
                             .await;
@@ -293,10 +305,8 @@ impl WorkerSupervisor {
                         if job.job_id == selected_job_id || handled_job_ids.contains(&job.job_id) {
                             continue;
                         }
-                        let msg = format!(
-                            "Superseded by newer reindex job {} on startup",
-                            selected_job_id
-                        );
+                        let msg =
+                            format!("Superseded by newer reindex job {selected_job_id} on startup");
                         let _ = self
                             .job_manager
                             .update_status(&job.job_id, JobStatus::Failed, Some(msg))
@@ -318,7 +328,8 @@ impl WorkerSupervisor {
                             selected_job_id,
                             status
                         );
-                        self.spawn_reindex_worker(selected_job_id, documents_dir).await;
+                        self.spawn_reindex_worker(selected_job_id, documents_dir)
+                            .await;
                     }
                 } else {
                     for job in jobs {
@@ -540,16 +551,11 @@ impl WorkerSupervisor {
     }
 
     async fn try_process_single_pdf(
-        rag_engine: &Arc<RwLock<RagEngine>>,
-        index_store: Arc<crate::SqliteIndexStore>,
-        model_id: String,
-        embedding_dim: usize,
-        needs_reindex: bool,
         progress_logger: &Option<ProgressLogger>,
         progress_state: &ProgressState,
+        ctx: &ProcessDocumentContext,
         path: &Path,
         idx: usize,
-        total_docs: i64,
     ) -> Result<Option<(String, Result<usize>)>> {
         let span = tracing::info_span!("process_document", ?path, idx);
 
@@ -574,7 +580,7 @@ impl WorkerSupervisor {
                 "Processing document {} ({}/{})",
                 filename,
                 idx + 1,
-                total_docs
+                ctx.total_docs
             );
 
             let logger_clone = progress_logger.clone();
@@ -611,7 +617,7 @@ impl WorkerSupervisor {
             };
 
             let prepared = {
-                let engine = rag_engine.read().await;
+                let engine = ctx.rag_engine.read().await;
                 engine
                     .prepare_document(&filename, &data, Some(&mut batch_callback))
                     .await
@@ -630,11 +636,12 @@ impl WorkerSupervisor {
                         )));
                     }
 
-                    if let Err(e) = index_store
+                    if let Err(e) = ctx
+                        .index_store
                         .upsert_document_atomic(
-                            &model_id,
-                            embedding_dim,
-                            needs_reindex,
+                            &ctx.model_id,
+                            ctx.embedding_dim,
+                            ctx.needs_reindex,
                             &prepared.document_name,
                             document_hash,
                             &prepared.chunks,
@@ -646,7 +653,7 @@ impl WorkerSupervisor {
 
                     let chunk_count = {
                         let mut engine = match TimedWriteLockGuard::acquire(
-                            rag_engine,
+                            &ctx.rag_engine,
                             format!("apply_document:{filename}"),
                         )
                         .await
@@ -724,7 +731,11 @@ impl WorkerSupervisor {
         // Phase 2: Deletion synchronization - prune indexed docs missing from disk
         let current_docs: HashSet<String> = pdf_paths
             .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         let indexed_docs = {
@@ -797,18 +808,22 @@ impl WorkerSupervisor {
         )
         .await;
 
+        let process_ctx = ProcessDocumentContext {
+            rag_engine: rag_engine.clone(),
+            index_store: index_store.clone(),
+            model_id: model_id.clone(),
+            embedding_dim,
+            needs_reindex,
+            total_docs,
+        };
+
         for (idx, path) in pdf_paths.iter().enumerate() {
             let Some((filename, result)) = Self::try_process_single_pdf(
-                &rag_engine,
-                index_store.clone(),
-                model_id.clone(),
-                embedding_dim,
-                needs_reindex,
                 &progress_logger,
                 &progress_state,
+                &process_ctx,
                 path,
                 idx,
-                total_docs,
             )
             .await?
             else {

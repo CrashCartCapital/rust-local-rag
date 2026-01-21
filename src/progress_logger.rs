@@ -251,12 +251,19 @@ mod tests {
     #[tokio::test]
     async fn test_progress_logger_emit() {
         let dir = tempdir().unwrap();
-        let logger = ProgressLogger::new(dir.path().to_str().unwrap()).await.unwrap();
+        let logger = ProgressLogger::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
         let state = ProgressState::new("test_job".to_string(), 100);
 
-        logger.emit(&state, "test_event", Some("test note")).await.unwrap();
+        logger
+            .emit(&state, "test_event", Some("test note"))
+            .await
+            .unwrap();
 
-        let content = tokio::fs::read_to_string(dir.path().join("progress_tracking.log")).await.unwrap();
+        let content = tokio::fs::read_to_string(dir.path().join("progress_tracking.log"))
+            .await
+            .unwrap();
         assert!(content.contains("job=test_job"));
         assert!(content.contains("event=test_event"));
         assert!(content.contains("note=test%20note"));
@@ -265,7 +272,8 @@ mod tests {
     #[test]
     fn test_format_event_line() {
         let state = ProgressState::new("test_job".to_string(), 100);
-        let line = ProgressLogger::format_event_line(1234567890, &state, "test_event", Some("foo bar"));
+        let line =
+            ProgressLogger::format_event_line(1234567890, &state, "test_event", Some("foo bar"));
 
         assert!(line.contains("ts=1234567890"));
         assert!(line.contains("job=test_job"));

@@ -206,7 +206,7 @@ async fn test_health_endpoint() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://127.0.0.1:{}/health", port))
+        .get(format!("http://127.0.0.1:{port}/health"))
         .send()
         .await
         .unwrap();
@@ -277,7 +277,7 @@ async fn test_documents_endpoint() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://127.0.0.1:{}/documents", port))
+        .get(format!("http://127.0.0.1:{port}/documents"))
         .send()
         .await
         .unwrap();
@@ -448,7 +448,7 @@ async fn test_search_timeout_error() {
 
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("http://127.0.0.1:{}/search", port))
+        .post(format!("http://127.0.0.1:{port}/search"))
         .json(&serde_json::json!({
             "query": "test query"
         }))

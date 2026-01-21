@@ -477,10 +477,7 @@ async fn test_supervisor_fails_stale_jobs_on_startup() {
 
         if j1.status == JobStatus::Failed {
             assert!(
-                j1.error
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains(&job2.job_id),
+                j1.error.as_deref().unwrap_or("").contains(&job2.job_id),
                 "Expected stale job error to mention newer job id"
             );
             assert_ne!(j2.status, JobStatus::Failed, "Newer job should not fail");
@@ -630,7 +627,9 @@ async fn test_reindex_resets_incompatible_index_to_avoid_mixed_dimensions() {
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
 
     // Seed an incompatible 384D index state in SQLite (persisted dim).
-    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     index_store
         .upsert_document_atomic(
             "nomic-embed-text",
@@ -705,7 +704,9 @@ async fn test_reindex_resets_incompatible_index_to_avoid_mixed_dimensions() {
 
     // After reindex, rag_models.embedding_dim should match backend (768),
     // and no 384D embeddings should remain.
-    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     let stored_dim: i64 =
         sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
             .bind("nomic-embed-text")
@@ -785,7 +786,9 @@ async fn test_resume_mid_reindex_completes_without_duplicate_chunks() {
 
     // 3. Seed SQLite with only a.pdf (simulate crash mid-job after a.pdf committed)
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
-    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     index_store
         .upsert_document_atomic(
             "nomic-embed-text",
@@ -869,7 +872,9 @@ async fn test_resume_mid_reindex_completes_without_duplicate_chunks() {
     assert!(docs.contains(&"a.pdf".to_string()));
     assert!(docs.contains(&"b.pdf".to_string()));
 
-    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     let doc_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
             .bind("nomic-embed-text")

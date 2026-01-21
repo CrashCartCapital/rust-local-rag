@@ -69,7 +69,6 @@ async fn test_calibrate_timeout_all_failed() {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("All calibration samples failed"),
-        "Unexpected error: {}",
-        err_msg
+        "Unexpected error: {err_msg}"
     );
 }

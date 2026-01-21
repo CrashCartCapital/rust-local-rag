@@ -22,4 +22,3 @@ pub fn parse_reindex_job_payload(raw: &str) -> ParsedReindexJobPayload {
         Err(_) => ParsedReindexJobPayload::LegacyDocumentsDir(raw.trim().to_string()),
     }
 }
-

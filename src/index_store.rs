@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::TryStreamExt;
-use rag_core::{ChunkMetadata, DocumentChunk, EngineState, Resolution};
 use rag_core::PersistenceBackend;
+use rag_core::{ChunkMetadata, DocumentChunk, EngineState, Resolution};
 use sqlx::{Pool, Row, Sqlite};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -120,10 +120,11 @@ impl SqliteIndexStore {
             .context("rag_models.embedding_dim is not a valid usize")?;
 
         let mut document_hashes: HashMap<String, String> = HashMap::new();
-        let mut docs_rows =
-            sqlx::query("SELECT document_name, document_hash FROM rag_documents WHERE model_id = ?")
-                .bind(model_id)
-                .fetch(&self.pool);
+        let mut docs_rows = sqlx::query(
+            "SELECT document_name, document_hash FROM rag_documents WHERE model_id = ?",
+        )
+        .bind(model_id)
+        .fetch(&self.pool);
         while let Some(row) = docs_rows.try_next().await? {
             let document_name: String = row.get("document_name");
             let document_hash: String = row.get("document_hash");
@@ -256,18 +257,20 @@ impl SqliteIndexStore {
         .execute(&mut *tx)
         .await?;
 
-        let existing_dim: i64 = sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
-            .bind(model_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let existing_dim: i64 =
+            sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
+                .bind(model_id)
+                .fetch_one(&mut *tx)
+                .await?;
         let existing_usize: usize = existing_dim
             .try_into()
             .context("rag_models.embedding_dim is not a valid usize")?;
         if existing_usize != embedding_dim {
-            let doc_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
-                .bind(model_id)
-                .fetch_one(&mut *tx)
-                .await?;
+            let doc_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
+                    .bind(model_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
             if doc_count > 0 {
                 return Err(anyhow::anyhow!(
                     "Embedding dimension changed for model_id '{}': stored {} vs requested {}. Reset/reindex required before upserts.",
@@ -277,12 +280,14 @@ impl SqliteIndexStore {
                 ));
             }
 
-            sqlx::query("UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?")
-                .bind(embedding_dim as i64)
-                .bind(now)
-                .bind(model_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?",
+            )
+            .bind(embedding_dim as i64)
+            .bind(now)
+            .bind(model_id)
+            .execute(&mut *tx)
+            .await?;
         }
 
         sqlx::query("DELETE FROM rag_documents WHERE model_id = ? AND document_name = ?")
@@ -352,7 +357,11 @@ impl SqliteIndexStore {
         Ok(())
     }
 
-    pub async fn delete_document_atomic(&self, model_id: &str, document_name: &str) -> Result<usize> {
+    pub async fn delete_document_atomic(
+        &self,
+        model_id: &str,
+        document_name: &str,
+    ) -> Result<usize> {
         let mut tx = self.pool.begin().await?;
 
         let chunk_count: Option<i64> = sqlx::query_scalar(
@@ -416,12 +425,14 @@ impl SqliteIndexStore {
                     .fetch_one(&mut *tx)
                     .await?;
             if doc_count == 0 {
-                sqlx::query("UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?")
-                    .bind(embedding_dim as i64)
-                    .bind(now)
-                    .bind(model_id)
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(
+                    "UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?",
+                )
+                .bind(embedding_dim as i64)
+                .bind(now)
+                .bind(model_id)
+                .execute(&mut *tx)
+                .await?;
             }
         }
 
@@ -648,9 +659,7 @@ fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>> {
     }
     let mut out = Vec::with_capacity(bytes.len() / 4);
     for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-        ]));
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(out)
 }

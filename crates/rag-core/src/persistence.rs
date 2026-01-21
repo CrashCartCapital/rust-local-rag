@@ -125,7 +125,7 @@ pub struct JsonFileBackend {
 }
 
 #[cfg(feature = "persistence")]
-    impl JsonFileBackend {
+impl JsonFileBackend {
     /// Create a new JsonFileBackend.
     ///
     /// # Arguments

@@ -158,9 +158,7 @@ impl RagEngine {
     pub fn reset_state_for_reindex(&mut self, embedding_dim: usize) -> Result<()> {
         let mut state = rag_core::EngineState::new(self.core.embedding_model(), embedding_dim);
         state.needs_reindex = true;
-        self.core
-            .load_state(state)
-            .map_err(anyhow::Error::new)?;
+        self.core.load_state(state).map_err(anyhow::Error::new)?;
         Ok(())
     }
 
@@ -788,7 +786,7 @@ mod tests {
                         } => {
                             // Success
                         }
-                        _ => panic!("Expected Validation(EmptyText), got {:?}", engine_error),
+                        _ => panic!("Expected Validation(EmptyText), got {engine_error:?}"),
                     }
                 } else {
                     let msg = e.to_string();
@@ -796,12 +794,9 @@ mod tests {
                         || msg.contains("lopdf extracted no text")
                         || msg.contains("pdftotext produced no text")
                     {
-                        panic!(
-                            "Got old string error, expected EngineError::Validation: {}",
-                            msg
-                        );
+                        panic!("Got old string error, expected EngineError::Validation: {msg}");
                     } else {
-                        panic!("Got unexpected error type/msg: {:?}", e);
+                        panic!("Got unexpected error type/msg: {e:?}");
                     }
                 }
             }

@@ -126,7 +126,10 @@ impl RagMcpServer {
         tracing::info!("Starting reindex job");
         let (model_id, embedding_dim) = {
             let engine = self.rag_state.read().await;
-            (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+            (
+                engine.embedding_model().to_string(),
+                engine.backend_embedding_dim(),
+            )
         };
         let payload = serde_json::to_string(&ReindexJobPayload {
             documents_dir: self.documents_dir.clone(),

@@ -321,7 +321,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         if prepared.chunks.is_empty() {
             if let Some(hash) = prepared.document_hash {
-                self.state.document_hashes.insert(prepared.document_name, hash);
+                self.state
+                    .document_hashes
+                    .insert(prepared.document_name, hash);
             }
 
             self.validate_index_sync()?;
@@ -357,7 +359,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         if let Some(hash) = prepared.document_hash {
-            self.state.document_hashes.insert(prepared.document_name, hash);
+            self.state
+                .document_hashes
+                .insert(prepared.document_name, hash);
         }
 
         self.validate_index_sync()?;

@@ -198,7 +198,10 @@ async fn http_start_reindex(
     tracing::info!("HTTP request to start reindex job");
     let (model_id, embedding_dim) = {
         let engine = app_state.rag_state.read().await;
-        (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+        (
+            engine.embedding_model().to_string(),
+            engine.backend_embedding_dim(),
+        )
     };
     let payload = serde_json::to_string(&ReindexJobPayload {
         documents_dir: app_state.documents_dir.clone(),

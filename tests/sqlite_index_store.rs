@@ -43,7 +43,14 @@ async fn test_upsert_document_atomic_rolls_back_on_error_and_preserves_previous_
     // Seed with a valid document.
     let initial_chunks = vec![make_chunk("chunk-1", doc, "hello", embedding_dim, 0)];
     store
-        .upsert_document_atomic(model_id, embedding_dim, false, doc, "hash1", &initial_chunks)
+        .upsert_document_atomic(
+            model_id,
+            embedding_dim,
+            false,
+            doc,
+            "hash1",
+            &initial_chunks,
+        )
         .await
         .unwrap();
 
@@ -53,7 +60,14 @@ async fn test_upsert_document_atomic_rolls_back_on_error_and_preserves_previous_
         make_chunk("dup", doc, "b", embedding_dim, 1),
     ];
     let err = store
-        .upsert_document_atomic(model_id, embedding_dim, false, doc, "hash2", &failing_chunks)
+        .upsert_document_atomic(
+            model_id,
+            embedding_dim,
+            false,
+            doc,
+            "hash2",
+            &failing_chunks,
+        )
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -226,8 +240,12 @@ async fn test_json_migration_imports_and_is_idempotent_and_creates_backup() {
 
     // Create a JSON index using rag-core's own writer (ensures valid format).
     let mut state = EngineState::new(model_id, embedding_dim);
-    state.document_hashes.insert("a.pdf".to_string(), "hash-a".to_string());
-    state.document_hashes.insert("b.pdf".to_string(), "hash-b".to_string());
+    state
+        .document_hashes
+        .insert("a.pdf".to_string(), "hash-a".to_string());
+    state
+        .document_hashes
+        .insert("b.pdf".to_string(), "hash-b".to_string());
     state.chunks.insert(
         "a-1".to_string(),
         make_chunk("a-1", "a.pdf", "hello", embedding_dim, 0),
@@ -252,8 +270,11 @@ async fn test_json_migration_imports_and_is_idempotent_and_creates_backup() {
         "{}.migrated.bak",
         json_path.file_name().and_then(|s| s.to_str()).unwrap()
     ));
-    assert!(!json_path.exists(), "JSON should be renamed after migration");
-    assert!(backup_path.exists(), "Backup should exist: {:?}", backup_path);
+    assert!(
+        !json_path.exists(),
+        "JSON should be renamed after migration"
+    );
+    assert!(backup_path.exists(), "Backup should exist: {backup_path:?}");
 
     // Counts match imported state.
     let doc_count: i64 =
@@ -262,12 +283,11 @@ async fn test_json_migration_imports_and_is_idempotent_and_creates_backup() {
             .fetch_one(&store.pool())
             .await
             .unwrap();
-    let chunk_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM rag_chunks WHERE model_id = ?")
-            .bind(model_id)
-            .fetch_one(&store.pool())
-            .await
-            .unwrap();
+    let chunk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_chunks WHERE model_id = ?")
+        .bind(model_id)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
     assert_eq!(doc_count, 2);
     assert_eq!(chunk_count, 2);
 
@@ -322,7 +342,7 @@ async fn test_json_migration_marks_needs_reindex_when_json_is_unreadable() {
 
 #[tokio::test]
 async fn test_sqlite_busy_timeout_prevents_lock_errors_under_concurrent_writes() {
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = format!("sqlite:{}/jobs.db", temp_dir.path().display());

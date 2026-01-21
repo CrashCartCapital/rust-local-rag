@@ -245,7 +245,9 @@ async fn test_sqlite_hydration_and_deletion_persist_across_restart() {
     let db_path = format!("sqlite:{data_dir}/jobs.db");
 
     // Seed SQLite directly.
-    let store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     store
         .upsert_document_atomic(
             model_id,
@@ -253,7 +255,13 @@ async fn test_sqlite_hydration_and_deletion_persist_across_restart() {
             false,
             "test.pdf",
             "hash123",
-            &[make_chunk("chunk-1", "test.pdf", "Hello World", embedding_dim, 0)],
+            &[make_chunk(
+                "chunk-1",
+                "test.pdf",
+                "Hello World",
+                embedding_dim,
+                0,
+            )],
         )
         .await
         .unwrap();
@@ -264,7 +272,9 @@ async fn test_sqlite_hydration_and_deletion_persist_across_restart() {
     assert_eq!(engine.list_documents(), vec!["test.pdf".to_string()]);
 
     // Delete in SQLite and ensure the next restart reflects it.
-    let store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let store = rust_local_rag::SqliteIndexStore::new(&db_path)
+        .await
+        .unwrap();
     store
         .delete_document_atomic(model_id, "test.pdf")
         .await
