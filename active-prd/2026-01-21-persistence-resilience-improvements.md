@@ -423,7 +423,7 @@ This preserves atomicity (no partial document state), while keeping engine locks
 This phase is mandatory, but intentionally scheduled after Phases 1–4 so we first ship correctness fixes with minimal moving parts.
 
 **Task 5.1: Database file + schema + migrations**
-- [ ] Decide on DB filename (`rag.db` preferred) and migrate from `jobs.db` safely (rename/copy-on-first-run).
+- [ ] Keep using the existing `jobs.db` file as the single SQLite database for both jobs + index tables (avoid a risky filename migration).
 - [ ] Add schema migrations for `rag_models`, `rag_documents`, `rag_chunks` (and any meta tables).
 - [ ] Ensure migrations run at startup (single place, deterministic), and PRAGMAs are enforced per connection.
 
@@ -520,7 +520,12 @@ This phase is mandatory, but intentionally scheduled after Phases 1–4 so we fi
 **Mitigation**: Keep legacy backups; add explicit migration tests; on parse failures, fall back to “needs reindex” rather than crash.
 
 ### Risk 3: SQLite migration or locking regressions
-**Mitigation**: Keep transactions per-document, enforce WAL/PRAGMAs per connection, add retries/backoff for `SQLITE_BUSY`, and ship migration idempotency + rollback backups (`.migrated.bak`).
+**Mitigation**:
+- Keep transactions strictly per-document (short write locks) and enforce WAL/PRAGMAs per connection.
+- Add retries/backoff (or `busy_timeout`) for `SQLITE_BUSY` to avoid surfacing transient lock errors to users.
+- After heavy reindexing, consider an explicit WAL checkpoint (`wal_checkpoint(TRUNCATE)`) to prevent unbounded `jobs.db-wal` growth.
+- Size the SQLite pool to avoid starving job/status reads during indexing.
+- Ship migration idempotency + rollback backups (`.migrated.bak`).
 
 ---
 
@@ -533,7 +538,7 @@ This phase is mandatory, but intentionally scheduled after Phases 1–4 so we fi
    - Recommendation: run on reindex; optionally run on startup if index is loaded and DOCUMENTS_DIR is accessible.
 
 3. **SQLite DB filename**: keep `jobs.db` (now multi-purpose) vs rename to `rag.db`?
-   - Recommendation: rename to `rag.db` with a safe one-time migration (rename/copy), but tolerate `jobs.db` for backward compatibility.
+   - Recommendation: keep `jobs.db` as the single DB file for now (lower risk; no WAL/rename edge cases). Consider a rename in a follow-on PRD only if it becomes operationally valuable.
 
 4. **Document identity**: should the durable key remain basename-only (`document_name`) or become a stable relative path under `DOCUMENTS_DIR` to avoid collisions?
    - Recommendation: keep basename for Phase 5 to avoid user-facing behavior changes; revisit as a follow-on hardening task.
