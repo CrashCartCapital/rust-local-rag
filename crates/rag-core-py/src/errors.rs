@@ -89,6 +89,7 @@ pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
                     let kind = match rerank_err {
                         rag_core::RerankError::Error(_) => "error",
                         rag_core::RerankError::Unavailable(_) => "unavailable",
+                        rag_core::RerankError::Api(_) => "api",
                         rag_core::RerankError::InvalidResponse(_) => "invalid_response",
                     };
                     let _ = exc.setattr("kind", kind);
