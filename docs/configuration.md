@@ -36,7 +36,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 |----------|-------------|---------|
 | `DATA_DIR` | Embeddings and index storage directory | `./data` |
 | `DOCUMENTS_DIR` | PDF documents directory to scan | `./documents` |
-| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` when writable, otherwise `./logs` | Auto-detected |
+| `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` if `/var/log` exists, otherwise `./logs` | Auto-detected |
 | `LOG_LEVEL` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
 | `LOG_MAX_MB` | Max log file size in MB before truncation | `5` |
 | `OLLAMA_URL` | Base URL for the Ollama API | `http://localhost:11434` |
@@ -52,6 +52,11 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `RAG_RERANKER_TIMEOUT_SECS` | Ollama reranker request timeout (seconds) | `60` |
 | `RAG_RERANKER_CONCURRENCY` | Max concurrent reranker requests | `1` |
 | `RAG_DEFAULT_LOGPROB` | Fallback logprob when missing (used for softmax scoring) | `-10.0` |
+| `RAG_EMBEDDING_WEIGHT` | First-stage embedding similarity weight (0.0-1.0) | `0.7` |
+| `RAG_LEXICAL_WEIGHT` | First-stage lexical/BM25 weight (0.0-1.0) | `0.3` |
+| `RAG_RERANKER_WEIGHT` | Second-stage reranker weight (0.0-1.0) | `0.7` |
+| `RAG_INITIAL_SCORE_WEIGHT` | Second-stage initial score weight (0.0-1.0) | `0.3` |
+| `RAG_EMBEDDING_BATCH_SIZE` | Number of chunks to embed in a single batch | `32` |
 
 > 💡 **Tip**: Set `OLLAMA_EMBEDDING_MODEL` to any embedding model you've installed. The server verifies your choice at startup.
 
