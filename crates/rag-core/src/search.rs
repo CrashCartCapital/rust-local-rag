@@ -198,8 +198,24 @@ impl AnnIndex {
         }
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self, vector),
+            fields(
+                dim = vector.len(),
+                max_candidates = max_candidates,
+                primary_hash = field::Empty,
+                candidates_found = field::Empty,
+                neighbors_visited = field::Empty,
+                fallback_triggered = false
+            )
+        )
+    )]
     pub(crate) fn search(&self, vector: &[f32], max_candidates: usize) -> Vec<String> {
         if self.buckets.is_empty() || max_candidates == 0 {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("Search skipped: empty buckets or 0 candidates requested");
             return Vec::new();
         }
 
@@ -207,18 +223,34 @@ impl AnnIndex {
         let mut visited = HashSet::new();
         let primary_hash = self.hash(vector);
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("primary_hash", primary_hash);
+
         self.collect_bucket(primary_hash, &mut candidates, &mut visited, max_candidates);
+
+        #[cfg(feature = "tracing")]
+        let mut neighbor_count = 0;
 
         if candidates.len() < max_candidates {
             for neighbor in self.neighbor_hashes(primary_hash) {
                 if candidates.len() >= max_candidates {
                     break;
                 }
+                #[cfg(feature = "tracing")]
+                {
+                    neighbor_count += 1;
+                }
                 self.collect_bucket(neighbor, &mut candidates, &mut visited, max_candidates);
             }
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("neighbors_visited", neighbor_count);
+
         if candidates.len() < max_candidates {
+            #[cfg(feature = "tracing")]
+            tracing::Span::current().record("fallback_triggered", true);
+
             // Sort keys for deterministic fallback iteration
             let mut all_hashes: Vec<&u64> = self.buckets.keys().collect();
             all_hashes.sort();
@@ -240,6 +272,9 @@ impl AnnIndex {
                 }
             }
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("candidates_found", candidates.len());
 
         candidates
     }
