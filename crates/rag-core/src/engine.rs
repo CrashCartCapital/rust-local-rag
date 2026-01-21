@@ -628,7 +628,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 .max(f32::EPSILON);
             let max_initial = candidates
                 .iter()
-                    .map(|c| c.result.score)
+                .map(|c| c.result.score)
                 .fold(0.0_f32, f32::max)
                 .max(f32::EPSILON);
 
