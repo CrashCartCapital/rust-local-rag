@@ -306,11 +306,23 @@ impl AnnIndex {
         visited.insert(hash);
 
         if let Some(bucket) = self.buckets.get(&hash) {
-            for id in bucket {
-                if candidates.len() >= limit {
-                    break;
+            let needed = limit.saturating_sub(candidates.len());
+            if needed == 0 {
+                return;
+            }
+
+            // If we can take the whole bucket without exceeding the limit, order doesn't matter
+            // for set membership (only truncation matters for stability).
+            if bucket.len() <= needed {
+                candidates.extend_from_slice(bucket);
+            } else {
+                // We need to pick a subset. To ensure stability regardless of insertion order,
+                // we must pick the deterministic subset (e.g., smallest IDs).
+                let mut sorted_refs: Vec<&String> = bucket.iter().collect();
+                sorted_refs.sort();
+                for id in sorted_refs.into_iter().take(needed) {
+                    candidates.push(id.clone());
                 }
-                candidates.push(id.clone());
             }
         }
     }
@@ -1455,5 +1467,37 @@ mod tests {
                 first_results = Some(results);
             }
         }
+    }
+
+    #[test]
+    fn test_ann_index_deterministic_truncation() {
+        let mut index = AnnIndex::new(4);
+        let v = vec![0.1, 0.1, 0.1, 0.1];
+
+        // Insert items in reverse order. They will land in the same bucket (same vector).
+        // Since `bucket` is a Vec, they will likely be in insertion order [z, y, x...]
+        // or reverse depending on implementation.
+        let ids = vec!["z", "y", "x", "w", "a", "b", "c"];
+        for id in &ids {
+            index.insert(id, &v);
+        }
+
+        // Search with limit 3. We should get ["a", "b", "c"] if sorting works,
+        // regardless of insertion order.
+        let mut results = index.search(&v, 3);
+        results.sort(); // Output order of search() isn't guaranteed sorted, but the SET content matters.
+
+        assert_eq!(results, vec!["a", "b", "c"]);
+
+        // Try again with different insertion order
+        let mut index2 = AnnIndex::new(4);
+        let ids2 = vec!["b", "a", "c", "x", "y", "z"];
+        for id in &ids2 {
+            index2.insert(id, &v);
+        }
+
+        let mut results2 = index2.search(&v, 3);
+        results2.sort();
+        assert_eq!(results2, vec!["a", "b", "c"]);
     }
 }
