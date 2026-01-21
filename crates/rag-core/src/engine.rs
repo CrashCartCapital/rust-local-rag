@@ -31,20 +31,6 @@ pub struct PreparedDocument {
     pub chunks: Vec<DocumentChunk>,
 }
 
-#[derive(Debug, Clone)]
-struct SearchCandidate {
-    chunk_id: String,
-    document: DocumentName,
-    text: String,
-    page_number: usize,
-    section: Option<String>,
-    chunk_index: usize,
-    initial_score: f32,
-    embedding_score: f32,
-    lexical_score: f32,
-    embedding: Vec<f32>,
-}
-
 impl<B: EmbeddingBackend> RagEngine<B, ()> {
     pub fn new(backend: B) -> Self {
         Self::with_config(backend, RagConfig::default())
@@ -560,19 +546,25 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
         scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id)));
 
-        let candidates: Vec<SearchCandidate> = scores
+        let candidates: Vec<SearchResultWithEmbedding> = scores
             .into_iter()
             .take(initial_k)
-            .map(|(combined, embed, lex, chunk)| SearchCandidate {
-                chunk_id: chunk.id.clone(),
-                document: chunk.document_name.clone(),
-                text: chunk.text.clone(),
-                page_number: chunk.page_number,
-                section: chunk.section.clone(),
-                chunk_index: chunk.chunk_index,
-                initial_score: combined,
-                embedding_score: embed,
-                lexical_score: lex,
+            .map(|(combined, embed, lex, chunk)| SearchResultWithEmbedding {
+                result: SearchResult {
+                    chunk_id: chunk.id.clone(),
+                    document: chunk.document_name.clone(),
+                    text: chunk.text.clone(),
+                    page_number: chunk.page_number,
+                    section: chunk.section.clone(),
+                    chunk_index: chunk.chunk_index,
+                    score: combined,
+                    initial_score: Some(combined),
+                    embedding_score: Some(embed),
+                    lexical_score: Some(lex),
+                    reranker_score: None,
+                    yes_logprob: None,
+                    no_logprob: None,
+                },
                 embedding: chunk.embedding.clone(),
             })
             .collect();
@@ -581,21 +573,21 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             return Ok(vec![]);
         }
 
-        let candidate_map: HashMap<String, SearchCandidate> = candidates
+        let candidate_map: HashMap<String, SearchResultWithEmbedding> = candidates
             .iter()
             .cloned()
-            .map(|candidate| (candidate.chunk_id.clone(), candidate))
+            .map(|candidate| (candidate.result.chunk_id.clone(), candidate))
             .collect();
 
         let reranker_inputs: Vec<RerankerCandidate> = candidates
             .iter()
             .map(|candidate| RerankerCandidate {
-                chunk_id: candidate.chunk_id.clone(),
-                document: candidate.document.clone(),
-                text: candidate.text.clone(),
-                page_number: candidate.page_number,
-                section: candidate.section.clone(),
-                initial_score: candidate.initial_score,
+                chunk_id: candidate.result.chunk_id.clone(),
+                document: candidate.result.document.clone(),
+                text: candidate.result.text.clone(),
+                page_number: candidate.result.page_number,
+                section: candidate.result.section.clone(),
+                initial_score: candidate.result.score,
             })
             .collect();
 
@@ -636,7 +628,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 .max(f32::EPSILON);
             let max_initial = candidates
                 .iter()
-                .map(|c| c.initial_score)
+                    .map(|c| c.result.score)
                 .fold(0.0_f32, f32::max)
                 .max(f32::EPSILON);
 
@@ -645,22 +637,23 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     && seen.insert(result.chunk_id.clone())
                 {
                     let reranker_norm = result.relevance / max_reranker;
-                    let initial_norm = candidate.initial_score / max_initial;
+                    // candidate.result.score holds the initial score
+                    let initial_norm = candidate.result.score / max_initial;
                     let blended_score =
                         weights.reranker * reranker_norm + weights.initial * initial_norm;
 
                     ordered_results.push(SearchResultWithEmbedding {
                         result: SearchResult {
-                            text: candidate.text.clone(),
+                            text: candidate.result.text.clone(),
                             score: blended_score,
-                            document: candidate.document.clone(),
-                            chunk_id: candidate.chunk_id.clone(),
-                            chunk_index: candidate.chunk_index,
-                            page_number: candidate.page_number,
-                            section: candidate.section.clone(),
-                            embedding_score: Some(candidate.embedding_score),
-                            lexical_score: Some(candidate.lexical_score),
-                            initial_score: Some(candidate.initial_score),
+                            document: candidate.result.document.clone(),
+                            chunk_id: candidate.result.chunk_id.clone(),
+                            chunk_index: candidate.result.chunk_index,
+                            page_number: candidate.result.page_number,
+                            section: candidate.result.section.clone(),
+                            embedding_score: candidate.result.embedding_score,
+                            lexical_score: candidate.result.lexical_score,
+                            initial_score: candidate.result.initial_score,
                             reranker_score: Some(result.relevance),
                             yes_logprob: result.yes_logprob,
                             no_logprob: result.no_logprob,
@@ -683,33 +676,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         if ordered_results.len() < top_k {
             let mut fallback_candidates: Vec<_> = candidate_map.values().collect();
             fallback_candidates.sort_by(|a, b| {
-                b.initial_score
-                    .total_cmp(&a.initial_score)
-                    .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+                b.result
+                    .score
+                    .total_cmp(&a.result.score)
+                    .then_with(|| a.result.chunk_id.cmp(&b.result.chunk_id))
             });
             for candidate in fallback_candidates {
                 if ordered_results.len() == top_k {
                     break;
                 }
-                if seen.insert(candidate.chunk_id.clone()) {
-                    ordered_results.push(SearchResultWithEmbedding {
-                        result: SearchResult {
-                            text: candidate.text.clone(),
-                            score: candidate.initial_score,
-                            document: candidate.document.clone(),
-                            chunk_id: candidate.chunk_id.clone(),
-                            chunk_index: candidate.chunk_index,
-                            page_number: candidate.page_number,
-                            section: candidate.section.clone(),
-                            embedding_score: Some(candidate.embedding_score),
-                            lexical_score: Some(candidate.lexical_score),
-                            initial_score: Some(candidate.initial_score),
-                            reranker_score: None,
-                            yes_logprob: None,
-                            no_logprob: None,
-                        },
-                        embedding: candidate.embedding.clone(),
-                    });
+                if seen.insert(candidate.result.chunk_id.clone()) {
+                    // It's already a SearchResultWithEmbedding, just clone it
+                    ordered_results.push(candidate.clone());
                 }
             }
         }
