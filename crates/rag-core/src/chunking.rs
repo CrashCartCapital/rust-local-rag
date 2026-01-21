@@ -1,3 +1,4 @@
+use crate::error::EngineError;
 use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
@@ -38,12 +39,12 @@ pub(crate) fn chunk_text(
     text: &str,
     chunk_tokens: usize,
     sentence_overlap: usize,
-) -> Vec<ChunkFragment> {
-    let sentences = extract_sentences(text, Some(chunk_tokens));
+) -> Result<Vec<ChunkFragment>, EngineError> {
+    let sentences = extract_sentences(text, Some(chunk_tokens))?;
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut window: Vec<usize> = Vec::new();
@@ -95,7 +96,7 @@ pub(crate) fn chunk_text(
         sentences.len()
     );
 
-    fragments
+    Ok(fragments)
 }
 
 fn finalize_chunk(
@@ -169,8 +170,11 @@ fn finalize_chunk(
 }
 
 #[cfg_attr(feature = "tracing", instrument(skip(text)))]
-fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<SentenceInfo> {
-    let splitter = sentence_splitter();
+fn extract_sentences(
+    text: &str,
+    hard_token_limit: Option<usize>,
+) -> Result<Vec<SentenceInfo>, EngineError> {
+    let splitter = sentence_splitter().map_err(EngineError::Config)?;
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
 
@@ -281,7 +285,7 @@ fn extract_sentences(text: &str, hard_token_limit: Option<usize>) -> Vec<Sentenc
     #[cfg(feature = "tracing")]
     tracing::trace!("Extracted {} sentences", sentences.len());
 
-    sentences
+    Ok(sentences)
 }
 
 fn normalize_whitespace(value: &str) -> String {
@@ -389,13 +393,17 @@ fn approximate_token_count(value: &str) -> usize {
     char_estimate.max(word_estimate).max(1)
 }
 
-fn sentence_splitter() -> &'static srx::Rules {
-    static SPLITTER: OnceLock<srx::Rules> = OnceLock::new();
-    SPLITTER.get_or_init(|| {
-        const SRX_XML: &str = include_str!("../../../data/segment.srx");
-        let srx = srx::SRX::from_str(SRX_XML).expect("valid SRX rules from embedded segment.srx");
-        srx.language_rules("en")
-    })
+fn sentence_splitter() -> Result<&'static srx::Rules, String> {
+    static SPLITTER: OnceLock<Result<srx::Rules, String>> = OnceLock::new();
+    SPLITTER
+        .get_or_init(|| {
+            const SRX_XML: &str = include_str!("../../../data/segment.srx");
+            srx::SRX::from_str(SRX_XML)
+                .map_err(|e| format!("valid SRX rules from embedded segment.srx: {}", e))
+                .map(|srx| srx.language_rules("en"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
 }
 
 fn split_part_hard(text: &str, limit: usize) -> Vec<String> {
@@ -484,7 +492,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text, None);
+        let sentences = extract_sentences(test_text, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -497,7 +505,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text, None);
+        let sentences = extract_sentences(test_text, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -523,7 +531,7 @@ mod tests {
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
         // Limit 4 is exactly enough for one sentence (~4 tokens).
-        let chunks = chunk_text(text, 4, 0);
+        let chunks = chunk_text(text, 4, 0).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
@@ -560,7 +568,7 @@ mod tests {
         // Chunk 1: "Sentence one." (4) < 5.
         // Chunk 1: "Sentence one. Sentence two." (8) >= 5.
         // Overlap 10.
-        let chunks = chunk_text(text, 5, 10);
+        let chunks = chunk_text(text, 5, 10).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
 
         // If bug exists (overlap=0 calc):
@@ -595,7 +603,7 @@ mod tests {
         let text = "This is a very long sentence that exceeds the token limit all by itself.";
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
-        let chunks = chunk_text(text, 5, 0);
+        let chunks = chunk_text(text, 5, 0).unwrap();
         // Should be split into multiple chunks
         assert!(chunks.len() > 1);
         for chunk in chunks {
@@ -614,7 +622,7 @@ mod tests {
         let text = "First. Second. Third.";
         // Limit 2. Each sentence is ~1-2 tokens.
         // Should produce 3 chunks.
-        let chunks = chunk_text(text, 2, 0);
+        let chunks = chunk_text(text, 2, 0).unwrap();
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
     }
@@ -627,7 +635,7 @@ mod tests {
         // 100 chars -> 25 tokens.
         let text = "a".repeat(100);
 
-        let chunks = chunk_text(&text, limit, 0);
+        let chunks = chunk_text(&text, limit, 0).unwrap();
 
         // Currently this returns 1 chunk of size 25.
         // We want it to split.
@@ -696,7 +704,7 @@ mod tests {
         let text = format!("{} {}", s1, s2);
 
         // Debug sentences
-        let sentences = extract_sentences(&text, None);
+        let sentences = extract_sentences(&text, None).unwrap();
         for s in &sentences {
             println!("S: '{}' ({})", s.text, s.tokens);
         }
@@ -713,7 +721,7 @@ mod tests {
         // Final window [S2]. Last index is S2.
         // S2 was part of Chunk 1. Redundant.
 
-        let chunks = chunk_text(&text, 6, 1);
+        let chunks = chunk_text(&text, 6, 1).unwrap();
         for (i, c) in chunks.iter().enumerate() {
             println!("Chunk {}: {}", i, c.text);
         }
@@ -742,7 +750,7 @@ mod tests {
         // This setup produces [S1, S2], [S2, S3].
         // Both are kept. The final residue [S3] is dropped.
 
-        let chunks = chunk_text(&text, 6, 1);
+        let chunks = chunk_text(&text, 6, 1).unwrap();
 
         assert_eq!(chunks.len(), 2, "Should have 2 chunks");
         assert_eq!(chunks[0].text, format!("{} {}", s1, s2));
@@ -802,7 +810,7 @@ mod tests {
         // [S2, S3] -> 11 < 15.
         // Final emit [S2, S3].
 
-        let chunks3 = chunk_text(&text3, 15, 1);
+        let chunks3 = chunk_text(&text3, 15, 1).unwrap();
         assert_eq!(chunks3.len(), 2, "Should emit tail chunk with new content");
         assert_eq!(chunks3[0].text, format!("{} {}", s1_big, s2_big));
         assert_eq!(chunks3[1].text, format!("{} {}", s2_big, s3_small));
