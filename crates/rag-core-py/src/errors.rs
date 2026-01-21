@@ -61,7 +61,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// exception attributes for programmatic error handling in Python.
 pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
     Python::with_gil(|py| {
-        let pyerr = match &err {
+        match &err {
             EngineError::Embedding(emb_err) => {
                 let pyerr = EmbeddingError::new_err(err.to_string());
                 // Set embedding error subtype
@@ -188,9 +188,7 @@ pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
                 }
                 pyerr
             }
-        };
-
-        pyerr
+        }
     })
 }
 

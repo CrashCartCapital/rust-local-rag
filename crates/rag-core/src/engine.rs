@@ -225,15 +225,14 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 cb(batch_idx + 1, batch_count, total_chunks, batch.len());
             }
 
-            let batch_embeddings = self.backend.embed_batch(batch).await.map_err(|e| {
+            let batch_embeddings = self.backend.embed_batch(batch).await.inspect_err(|_e| {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    error = ?e,
+                    error = ?_e,
                     batch_idx,
                     batch_size = batch.len(),
                     "Failed to embed batch"
                 );
-                e
             })?;
 
             if batch_embeddings.len() != batch.len() {
@@ -470,10 +469,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         #[cfg(feature = "tracing")]
         let start = std::time::Instant::now();
 
-        let mut query_embedding = self.backend.embed(query).await.map_err(|e| {
+        let mut query_embedding = self.backend.embed(query).await.inspect_err(|_e| {
             #[cfg(feature = "tracing")]
-            tracing::error!(error = ?e, "Failed to generate query embedding");
-            e
+            tracing::error!(error = ?_e, "Failed to generate query embedding");
         })?;
 
         #[cfg(feature = "tracing")]
@@ -628,7 +626,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 .max(f32::EPSILON);
             let max_initial = candidates
                 .iter()
-                    .map(|c| c.result.score)
+                .map(|c| c.result.score)
                 .fold(0.0_f32, f32::max)
                 .max(f32::EPSILON);
 
