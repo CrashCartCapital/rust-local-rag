@@ -173,6 +173,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             return Ok(None);
         }
 
+        let start_time = std::time::Instant::now();
+
         #[cfg(feature = "tracing")]
         let chunk_start = std::time::Instant::now();
 
@@ -221,6 +223,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let embed_start = std::time::Instant::now();
 
         for (batch_idx, batch) in chunk_texts.chunks(batch_size).enumerate() {
+            if let Some(timeout) = self.config.document_prep_timeout {
+                if start_time.elapsed() > timeout {
+                    return Err(EngineError::Embedding(EmbeddingError::Timeout(timeout)));
+                }
+            }
+
             if let Some(cb) = batch_callback.as_deref_mut() {
                 cb(batch_idx + 1, batch_count, total_chunks, batch.len());
             }
@@ -628,7 +636,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 .max(f32::EPSILON);
             let max_initial = candidates
                 .iter()
-                    .map(|c| c.result.score)
+                .map(|c| c.result.score)
                 .fold(0.0_f32, f32::max)
                 .max(f32::EPSILON);
 
@@ -1176,6 +1184,65 @@ mod tests {
                 current.chunk_id,
                 next.chunk_id
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_document_timeout() {
+        // Slow backend that sleeps longer than the timeout
+        struct SlowBackend;
+        impl EmbeddingBackend for SlowBackend {
+            fn model_id(&self) -> &str {
+                "slow-model"
+            }
+            fn dimension(&self) -> usize {
+                2
+            }
+            async fn embed(&self, _: &str) -> std::result::Result<Vec<f32>, EmbeddingError> {
+                Ok(vec![0.0, 0.0])
+            }
+            async fn embed_batch(
+                &self,
+                texts: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EmbeddingError> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(vec![vec![0.0, 0.0]; texts.len()])
+            }
+        }
+
+        let config = RagConfig {
+            chunk_tokens: 10,
+            sentence_overlap: 0,
+            embedding_batch_size: 1, // Force multiple batches if text is long enough
+            document_prep_timeout: Some(std::time::Duration::from_millis(50)),
+            ..Default::default()
+        };
+
+        let engine = RagEngine::with_config(SlowBackend, config);
+
+        // Create enough text to generate multiple chunks/batches
+        // Since batch_size is 1, and we have multiple sentences, we should get multiple batches.
+        // The first batch will sleep 100ms.
+        // The second batch check should see > 50ms elapsed and fail.
+        // OR the first batch itself takes 100ms, and we return.
+        // Wait, the check is BEFORE the batch.
+        // 1. Check time (0ms) -> OK.
+        // 2. Embed batch (sleep 100ms).
+        // 3. Loop.
+        // 4. Check time (100ms > 50ms) -> Fail.
+        let text = "Sentence 1. Sentence 2. Sentence 3. Sentence 4. Sentence 5. Sentence 6. Sentence 7. Sentence 8. Sentence 9. Sentence 10.";
+
+        let result = engine.prepare_document("doc.txt", text, None, None).await;
+
+        match result {
+            Err(EngineError::Embedding(EmbeddingError::Timeout(t))) => {
+                assert_eq!(t, std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("Expected Timeout error, got {:?}", e),
+            Ok(res) => panic!(
+                "Expected Timeout error, got Ok. Generated {} chunks.",
+                res.map(|d| d.chunks.len()).unwrap_or(0)
+            ),
         }
     }
 }
