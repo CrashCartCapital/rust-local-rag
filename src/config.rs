@@ -5,6 +5,7 @@ use std::time::Duration;
 pub struct Config {
     pub embedding_timeout: Duration,
     pub embedding_cache_size: NonZeroUsize,
+    pub embedding_batch_size: NonZeroUsize,
     pub reranker_timeout: Duration,
     pub reranker_concurrency: NonZeroUsize,
     pub default_logprob_fallback: f64,
@@ -15,6 +16,7 @@ impl Default for Config {
         Self {
             embedding_timeout: Duration::from_secs(1200),
             embedding_cache_size: NonZeroUsize::new(1000).expect("1000 is non-zero"),
+            embedding_batch_size: NonZeroUsize::new(32).expect("32 is non-zero"),
             reranker_timeout: Duration::from_secs(60),
             reranker_concurrency: NonZeroUsize::new(1).expect("1 is non-zero"),
             default_logprob_fallback: -10.0,
@@ -25,6 +27,17 @@ impl Default for Config {
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
+
+        if let Some(batch_size) = parse_env_nonzero_usize("RAG_EMBEDDING_BATCH_SIZE")? {
+            if batch_size.get() > 1024 {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_BATCH_SIZE",
+                    value: batch_size.to_string(),
+                    message: "must be <= 1024".to_string(),
+                });
+            }
+            config.embedding_batch_size = batch_size;
+        }
 
         if let Some(timeout_secs) = parse_env_u64("RAG_EMBEDDING_TIMEOUT_SECS")? {
             if timeout_secs == 0 || timeout_secs > 3600 {
@@ -86,6 +99,7 @@ impl Config {
         tracing::info!(
             embedding_timeout_secs = self.embedding_timeout.as_secs(),
             embedding_cache_size = self.embedding_cache_size.get(),
+            embedding_batch_size = self.embedding_batch_size.get(),
             reranker_timeout_secs = self.reranker_timeout.as_secs(),
             reranker_concurrency = self.reranker_concurrency.get(),
             default_logprob_fallback = self.default_logprob_fallback,
@@ -323,6 +337,30 @@ mod tests {
         with_env_var("RAG_RERANKER_CONCURRENCY", "invalid", || {
             let err = Config::from_env().unwrap_err();
             assert!(err.message.contains("invalid digit"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_batch_size_valid() {
+        with_env_var("RAG_EMBEDDING_BATCH_SIZE", "64", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.embedding_batch_size.get(), 64);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_batch_size_zero() {
+        with_env_var("RAG_EMBEDDING_BATCH_SIZE", "0", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be > 0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_batch_size_too_large() {
+        with_env_var("RAG_EMBEDDING_BATCH_SIZE", "1025", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be <= 1024"));
         });
     }
 }

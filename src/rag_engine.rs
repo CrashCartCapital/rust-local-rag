@@ -13,15 +13,6 @@ use crate::{
 pub use rag_core::SearchResult;
 pub type PreparedDocument = rag_core::engine::PreparedDocument;
 
-// Helper function to get configurable batch size from environment.
-// Default to 32 for power-efficient operation (down from 128 for throughput).
-fn get_batch_size() -> usize {
-    std::env::var("EMBEDDING_BATCH_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(32)
-}
-
 /// Core RAG engine for the server binary.
 ///
 /// This is a thin wrapper over `rag-core` plus server-specific concerns:
@@ -60,13 +51,13 @@ impl RagEngine {
             }
         };
 
-        let config = rag_core::RagConfig {
-            embedding_batch_size: get_batch_size(),
+        let rag_config = rag_core::RagConfig {
+            embedding_batch_size: config.embedding_batch_size.get(),
             ..rag_core::RagConfig::default()
         };
 
         let mut core =
-            rag_core::RagEngine::with_optional_reranker(embedding_service, reranker, config);
+            rag_core::RagEngine::with_optional_reranker(embedding_service, reranker, rag_config);
 
         if let Err(e) = core.load_from_dir(data_dir) {
             tracing::warn!("Could not load existing data: {}", e);
