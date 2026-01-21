@@ -380,8 +380,9 @@ impl TagEmbeddingIndex {
             })
             .collect();
 
-        // Sort by score descending (using total_cmp for deterministic float ordering)
-        results.sort_by(|a, b| b.score.total_cmp(&a.score));
+        // Sort by score descending (using total_cmp for deterministic float ordering),
+        // then by tag string ascending for stability.
+        results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.tag.cmp(&b.tag)));
 
         // Limit results
         results.truncate(max_results);
@@ -1003,5 +1004,27 @@ mod tests {
         assert_eq!(tags.len(), 2);
         assert!(tags.contains("a"));
         assert!(tags.contains("b"));
+    }
+
+    #[test]
+    fn test_tag_embedding_index_find_similar_tie_breaking() {
+        let mut index = TagEmbeddingIndex::new();
+        // Insert tags that will have identical scores
+        index.insert("c", vec![1.0, 0.0]).unwrap();
+        index.insert("a", vec![1.0, 0.0]).unwrap();
+        index.insert("b", vec![1.0, 0.0]).unwrap();
+
+        let query = vec![1.0, 0.0];
+        let results = index.find_similar(&query, 0.5, 10);
+
+        assert_eq!(results.len(), 3);
+        // Scores should be identical
+        assert!((results[0].score - results[1].score).abs() < f32::EPSILON);
+        assert!((results[1].score - results[2].score).abs() < f32::EPSILON);
+
+        // Should be sorted alphabetically by tag name
+        assert_eq!(results[0].tag, "a");
+        assert_eq!(results[1].tag, "b");
+        assert_eq!(results[2].tag, "c");
     }
 }
