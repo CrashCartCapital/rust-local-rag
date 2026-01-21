@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 
 use crate::job_manager::JobManager;
+use crate::job_payload::ReindexJobPayload;
 use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
 use tokio::sync::mpsc;
@@ -123,10 +124,21 @@ impl RagMcpServer {
     #[instrument(skip(self))]
     async fn start_reindex(&self) -> Result<CallToolResult, McpError> {
         tracing::info!("Starting reindex job");
+        let (model_id, embedding_dim) = {
+            let engine = self.rag_state.read().await;
+            (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+        };
+        let payload = serde_json::to_string(&ReindexJobPayload {
+            documents_dir: self.documents_dir.clone(),
+            model_id,
+            embedding_dim,
+        })
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
         // Atomically create job if no active job exists (prevents race conditions)
         let job = match self
             .job_manager
-            .create_reindex_job_if_not_active(Some(self.documents_dir.clone()), 0)
+            .create_reindex_job_if_not_active(Some(payload), 0)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
         {

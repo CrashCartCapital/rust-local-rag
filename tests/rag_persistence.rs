@@ -27,6 +27,35 @@ async fn setup_mock_ollama() -> MockServer {
     mock_server
 }
 
+fn make_chunk(
+    chunk_id: &str,
+    document_name: &str,
+    text: &str,
+    embedding_dim: usize,
+    chunk_index: usize,
+) -> rag_core::DocumentChunk {
+    use rag_core::{ChunkMetadata, Resolution};
+    use std::collections::HashSet;
+
+    rag_core::DocumentChunk {
+        id: chunk_id.to_string(),
+        document_name: document_name.to_string(),
+        text: text.to_string(),
+        embedding: vec![0.0f32; embedding_dim],
+        chunk_index,
+        page_number: 1,
+        section: None,
+        metadata: ChunkMetadata {
+            token_count: 0,
+            overlap_with_previous: 0,
+            ..Default::default()
+        },
+        tags: HashSet::new(),
+        resolution: Resolution::Chunk,
+        parent_id: None,
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_recover_from_corrupt_index() {
@@ -197,4 +226,50 @@ async fn test_embedding_dim_mismatch_marks_reindex_and_blocks_search() {
         msg.contains("Embedding dimension mismatch"),
         "Unexpected error: {msg}"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_sqlite_hydration_and_deletion_persist_across_restart() {
+    let mock_server = setup_mock_ollama().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().to_str().unwrap();
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+    }
+
+    let model_id = "nomic-embed-text";
+    let embedding_dim = 384;
+    let db_path = format!("sqlite:{data_dir}/jobs.db");
+
+    // Seed SQLite directly.
+    let store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    store
+        .upsert_document_atomic(
+            model_id,
+            embedding_dim,
+            false,
+            "test.pdf",
+            "hash123",
+            &[make_chunk("chunk-1", "test.pdf", "Hello World", embedding_dim, 0)],
+        )
+        .await
+        .unwrap();
+
+    // Restart: RagEngine should hydrate from SQLite.
+    let engine = RagEngine::new(data_dir, &Config::default()).await.unwrap();
+    assert!(!engine.needs_reindex());
+    assert_eq!(engine.list_documents(), vec!["test.pdf".to_string()]);
+
+    // Delete in SQLite and ensure the next restart reflects it.
+    let store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    store
+        .delete_document_atomic(model_id, "test.pdf")
+        .await
+        .unwrap();
+
+    let engine2 = RagEngine::new(data_dir, &Config::default()).await.unwrap();
+    assert!(engine2.list_documents().is_empty());
 }

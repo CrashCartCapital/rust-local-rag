@@ -2,6 +2,7 @@ pub mod config;
 pub mod embeddings;
 pub mod index_store;
 pub mod job_manager;
+pub mod job_payload;
 mod mcp;
 pub mod mcp_server;
 pub mod progress_logger;

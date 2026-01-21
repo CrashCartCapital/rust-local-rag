@@ -480,11 +480,15 @@ impl SqliteIndexStore {
         );
         let backup_path = json_path.with_file_name(backup_name);
         if json_path.exists() && !backup_path.exists() {
-            let _ = std::fs::rename(&json_path, &backup_path);
+            let from = json_path.clone();
+            let to = backup_path.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::rename(&from, &to)).await;
         } else if legacy_path.exists() {
             let legacy_backup = legacy_path.with_extension("json.migrated.bak");
             if !legacy_backup.exists() {
-                let _ = std::fs::rename(&legacy_path, &legacy_backup);
+                let from = legacy_path.clone();
+                let to = legacy_backup.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::rename(&from, &to)).await;
             }
         }
 

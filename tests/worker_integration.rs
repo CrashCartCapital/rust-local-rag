@@ -582,3 +582,245 @@ async fn test_supervisor_marks_job_completed_when_progress_reached_total() {
         }
     }
 }
+
+#[derive(serde::Serialize)]
+struct ReindexJobPayload {
+    documents_dir: String,
+    model_id: String,
+    embedding_dim: usize,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(bytes);
+    format!("{hash:x}")
+}
+
+#[tokio::test]
+#[serial]
+async fn test_resume_mid_reindex_completes_without_duplicate_chunks() {
+    // 1. Setup Environment & Mock Ollama
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{ "name": "nomic-embed-text:latest" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let docs_dir = temp_dir.path().join("docs");
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+
+    unsafe {
+        std::env::set_var("LOG_DIR", log_dir.to_str().unwrap());
+    }
+
+    // 2. Write two PDFs
+    let a_bytes = create_valid_pdf();
+    std::fs::write(docs_dir.join("a.pdf"), &a_bytes).unwrap();
+    std::fs::write(docs_dir.join("b.pdf"), create_valid_pdf()).unwrap();
+
+    // 3. Seed SQLite with only a.pdf (simulate crash mid-job after a.pdf committed)
+    let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    index_store
+        .upsert_document_atomic(
+            "nomic-embed-text",
+            384,
+            false,
+            "a.pdf",
+            &sha256_hex(&a_bytes),
+            &[rag_core::DocumentChunk {
+                id: "chunk-a-1".to_string(),
+                document_name: "a.pdf".to_string(),
+                text: "Hello World".to_string(),
+                embedding: vec![0.0f32; 384],
+                chunk_index: 0,
+                page_number: 1,
+                section: None,
+                metadata: rag_core::ChunkMetadata {
+                    token_count: 0,
+                    overlap_with_previous: 0,
+                    ..Default::default()
+                },
+                tags: std::collections::HashSet::new(),
+                resolution: rag_core::Resolution::Chunk,
+                parent_id: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    // 4. Create a resumable job with structured payload (to be parsed on resume).
+    let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let payload = serde_json::to_string(&ReindexJobPayload {
+        documents_dir: docs_dir.to_str().unwrap().to_string(),
+        model_id: "nomic-embed-text".to_string(),
+        embedding_dim: 384,
+    })
+    .unwrap();
+    let job = job_manager
+        .create_job(JobType::Reindex, Some(payload), 2)
+        .await
+        .unwrap();
+    job_manager
+        .update_status(&job.job_id, JobStatus::InProgress, None)
+        .await
+        .unwrap();
+    job_manager.update_progress(&job.job_id, 1).await.unwrap();
+
+    // 5. Start supervisor (simulates restart) and wait for completion.
+    let rag_engine = Arc::new(RwLock::new(
+        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+            .await
+            .unwrap(),
+    ));
+    let (_job_tx, job_rx) = mpsc::channel(10);
+    let supervisor = WorkerSupervisor::new(job_manager.clone(), rag_engine.clone(), job_rx);
+    tokio::spawn(async move {
+        supervisor.run().await;
+    });
+
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let current_job = job_manager.get_job(&job.job_id).await.unwrap().unwrap();
+
+        if current_job.status == JobStatus::Completed {
+            break;
+        }
+        if current_job.status == JobStatus::Failed {
+            panic!("Job failed: {:?}", current_job.error);
+        }
+
+        attempts += 1;
+        if attempts > 200 {
+            panic!("Job timed out. Status: {:?}", current_job.status);
+        }
+    }
+
+    // 6. Verify both documents are present and per-document rows are not duplicated.
+    let engine = rag_engine.read().await;
+    let docs = engine.list_documents();
+    assert_eq!(docs.len(), 2, "Should have indexed 2 documents");
+    assert!(docs.contains(&"a.pdf".to_string()));
+    assert!(docs.contains(&"b.pdf".to_string()));
+
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let doc_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
+            .bind("nomic-embed-text")
+            .fetch_one(&index_store.pool())
+            .await
+            .unwrap();
+    assert_eq!(doc_count, 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_resume_job_with_model_mismatch_is_marked_failed() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{ "name": "nomic-embed-text:latest" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let docs_dir = temp_dir.path().join("docs");
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+
+    unsafe {
+        std::env::set_var("LOG_DIR", log_dir.to_str().unwrap());
+    }
+
+    let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
+    let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let rag_engine = Arc::new(RwLock::new(
+        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+            .await
+            .unwrap(),
+    ));
+    let (_job_tx, job_rx) = mpsc::channel(10);
+
+    let payload = serde_json::to_string(&ReindexJobPayload {
+        documents_dir: docs_dir.to_str().unwrap().to_string(),
+        model_id: "some-other-model".to_string(),
+        embedding_dim: 384,
+    })
+    .unwrap();
+    let job = job_manager
+        .create_job(JobType::Reindex, Some(payload), 0)
+        .await
+        .unwrap();
+    job_manager
+        .update_status(&job.job_id, JobStatus::InProgress, None)
+        .await
+        .unwrap();
+
+    let supervisor = WorkerSupervisor::new(job_manager.clone(), rag_engine, job_rx);
+    tokio::spawn(async move {
+        supervisor.run().await;
+    });
+
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let current_job = job_manager.get_job(&job.job_id).await.unwrap().unwrap();
+        if current_job.status == JobStatus::Failed {
+            let msg = current_job.error.as_deref().unwrap_or("");
+            assert!(
+                msg.contains("model") && msg.contains("reindex"),
+                "Unexpected error message: {msg}"
+            );
+            break;
+        }
+        if current_job.status == JobStatus::Completed {
+            panic!("Job unexpectedly completed");
+        }
+
+        attempts += 1;
+        if attempts > 200 {
+            panic!("Timed out waiting for job to be marked failed: {current_job:?}");
+        }
+    }
+}

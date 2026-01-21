@@ -1,4 +1,5 @@
 use crate::job_manager::{JobManager, JobStatus};
+use crate::job_payload::{ParsedReindexJobPayload, parse_reindex_job_payload};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
 use anyhow::{Context, Result};
@@ -225,7 +226,14 @@ impl WorkerSupervisor {
 
                     match primary.payload {
                         Some(payload) => {
-                            let documents_dir = payload.trim().to_string();
+                            let parsed = parse_reindex_job_payload(payload.trim());
+                            let documents_dir = match &parsed {
+                                ParsedReindexJobPayload::Structured(payload) => {
+                                    payload.documents_dir.trim().to_string()
+                                }
+                                ParsedReindexJobPayload::LegacyDocumentsDir(dir) => dir.clone(),
+                            };
+
                             if documents_dir.is_empty() || !Path::new(&documents_dir).exists() {
                                 let _ = self
                                     .job_manager
@@ -238,6 +246,54 @@ impl WorkerSupervisor {
                                         )),
                                     )
                                     .await;
+                            } else if let ParsedReindexJobPayload::Structured(payload) = parsed {
+                                let (current_model_id, current_dim) = {
+                                    let engine = self.rag_engine.read().await;
+                                    (
+                                        engine.embedding_model().to_string(),
+                                        engine.backend_embedding_dim(),
+                                    )
+                                };
+
+                                if payload.model_id != current_model_id {
+                                    let _ = self
+                                        .job_manager
+                                        .update_status(
+                                            &primary.job_id,
+                                            JobStatus::Failed,
+                                            Some(format!(
+                                                "reindex job model mismatch: job started with '{}' but server is running '{}'. reindex required under the current model.",
+                                                payload.model_id, current_model_id
+                                            )),
+                                        )
+                                        .await;
+                                } else if payload.embedding_dim != current_dim {
+                                    let _ = self
+                                        .job_manager
+                                        .update_status(
+                                            &primary.job_id,
+                                            JobStatus::Failed,
+                                            Some(format!(
+                                                "reindex job embedding dimension mismatch: job expects {} but server backend is {} for model '{}'. reindex required.",
+                                                payload.embedding_dim, current_dim, current_model_id
+                                            )),
+                                        )
+                                        .await;
+                                } else if primary.total > 0 && primary.progress >= primary.total {
+                                    let _ = self
+                                        .job_manager
+                                        .update_status(
+                                            &primary.job_id,
+                                            JobStatus::Completed,
+                                            Some(
+                                                "Recovered on startup: index already up to date"
+                                                    .to_string(),
+                                            ),
+                                        )
+                                        .await;
+                                } else {
+                                    self.spawn_reindex_worker(primary.job_id, documents_dir).await;
+                                }
                             } else if primary.total > 0 && primary.progress >= primary.total {
                                 let _ = self
                                     .job_manager

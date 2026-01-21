@@ -1,4 +1,5 @@
 use crate::job_manager::JobManager;
+use crate::job_payload::ReindexJobPayload;
 use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
 use rag_core::{EmbeddingError, EngineError, RerankError};
@@ -195,9 +196,20 @@ async fn http_start_reindex(
     axum::extract::State(app_state): axum::extract::State<AppState>,
 ) -> Result<axum::Json<ReindexResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
     tracing::info!("HTTP request to start reindex job");
+    let (model_id, embedding_dim) = {
+        let engine = app_state.rag_state.read().await;
+        (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+    };
+    let payload = serde_json::to_string(&ReindexJobPayload {
+        documents_dir: app_state.documents_dir.clone(),
+        model_id,
+        embedding_dim,
+    })
+    .map_err(|e| api_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let job = match app_state
         .job_manager
-        .create_reindex_job_if_not_active(Some(app_state.documents_dir.clone()), 0)
+        .create_reindex_job_if_not_active(Some(payload), 0)
         .await
     {
         Ok(Some(job)) => job,
