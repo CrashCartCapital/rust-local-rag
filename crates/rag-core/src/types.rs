@@ -170,6 +170,8 @@ pub struct RagConfig {
     pub sentence_overlap: usize,
     pub weights: SearchWeights,
     pub embedding_batch_size: usize,
+    /// Timeout for document preparation (chunking + embedding).
+    pub document_prep_timeout: Option<std::time::Duration>,
 }
 
 impl Default for RagConfig {
@@ -179,6 +181,7 @@ impl Default for RagConfig {
             sentence_overlap: 2,
             weights: SearchWeights::default(),
             embedding_batch_size: 32,
+            document_prep_timeout: None,
         }
     }
 }
