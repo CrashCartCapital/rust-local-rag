@@ -150,6 +150,10 @@ pub enum RerankError {
     /// Reranker returned invalid response
     #[error("invalid reranker response: {0}")]
     InvalidResponse(String),
+
+    /// Reranker operation timed out
+    #[error("timeout after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 #[derive(Debug, thiserror::Error)]
