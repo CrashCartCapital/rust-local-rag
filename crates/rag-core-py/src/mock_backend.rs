@@ -143,11 +143,13 @@ impl EmbeddingBackend for MockEmbeddingBackend {
 /// let sim_13: f32 = v1.iter().zip(v3.iter()).map(|(a, b)| a * b).sum();
 /// assert!(sim_12 > sim_13);
 /// ```
+#[allow(dead_code)]
 pub struct CorrelatedMockEmbeddingBackend {
     /// Underlying hash-based backend for per-token embeddings
     inner: MockEmbeddingBackend,
 }
 
+#[allow(dead_code)]
 impl CorrelatedMockEmbeddingBackend {
     /// Create a new correlated mock backend with specified dimension.
     pub fn new(dimension: usize) -> Self {

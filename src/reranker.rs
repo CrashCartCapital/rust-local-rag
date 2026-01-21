@@ -19,13 +19,17 @@ fn is_fatal_error(err: &anyhow::Error) -> bool {
     }
 }
 
-fn map_rerank_error(err: anyhow::Error) -> RerankError {
+fn map_rerank_error(err: anyhow::Error, timeout_duration: Duration) -> RerankError {
     match err.root_cause().downcast_ref::<reqwest::Error>() {
+        Some(e) if e.is_timeout() => RerankError::Timeout(timeout_duration),
         Some(e) if e.is_connect() => RerankError::Unavailable(e.to_string()),
         _ => {
             let s = err.to_string();
             if s.contains("connection refused") || s.contains("Connection refused") {
                 RerankError::Unavailable(s)
+            } else if s.to_lowercase().contains("timed out") || s.to_lowercase().contains("timeout")
+            {
+                RerankError::Timeout(timeout_duration)
             } else if s.contains("Reranker API error") {
                 RerankError::Api(s)
             } else {
@@ -37,7 +41,7 @@ fn map_rerank_error(err: anyhow::Error) -> RerankError {
 
 #[cfg(test)]
 pub fn map_rerank_error_for_test(err: anyhow::Error) -> RerankError {
-    map_rerank_error(err)
+    map_rerank_error(err, Duration::from_secs(30))
 }
 
 /// Detailed score result including logprobs for transparency
@@ -825,7 +829,7 @@ impl rag_core::Rerank for RerankerService {
     ) -> std::result::Result<Vec<RerankedResult>, rag_core::RerankError> {
         RerankerService::rerank(self, query, candidates)
             .await
-            .map_err(map_rerank_error)
+            .map_err(|e| map_rerank_error(e, self.timeout_duration))
     }
 }
 

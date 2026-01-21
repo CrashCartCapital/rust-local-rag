@@ -110,6 +110,9 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
         EngineError::Rerank(RerankError::InvalidResponse(_)) => {
             (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
         }
+        EngineError::Rerank(RerankError::Timeout(_)) => {
+            (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
+        }
         _ => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -370,6 +373,11 @@ mod tests {
         let err = EngineError::Rerank(RerankError::Api("500 internal".to_string()));
         let (status, _) = map_engine_error(&err);
         assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+
+        // Test Rerank Timeout (New)
+        let err = EngineError::Rerank(RerankError::Timeout(std::time::Duration::from_secs(5)));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::GATEWAY_TIMEOUT);
 
         // Test Default/Generic
         let err = EngineError::Config("bad config".to_string());

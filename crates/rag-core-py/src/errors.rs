@@ -91,8 +91,14 @@ pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
                         rag_core::RerankError::Unavailable(_) => "unavailable",
                         rag_core::RerankError::Api(_) => "api",
                         rag_core::RerankError::InvalidResponse(_) => "invalid_response",
+                        rag_core::RerankError::Timeout(_) => "timeout",
                     };
                     let _ = exc.setattr("kind", kind);
+
+                    // Set timeout duration if applicable
+                    if let rag_core::RerankError::Timeout(duration) = rerank_err {
+                        let _ = exc.setattr("timeout_secs", duration.as_secs_f64());
+                    }
                 }
                 pyerr
             }
