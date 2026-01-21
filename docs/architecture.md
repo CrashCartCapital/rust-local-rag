@@ -37,7 +37,7 @@
 2.  **Extraction**: Extracts text using `lopdf` (pure Rust). Falls back to `pdftotext` (poppler) if `lopdf` fails.
 3.  **Chunking**: Splits text into sentence-aware chunks (~500-1000 chars) with metadata (page number, section).
 4.  **Embedding**: Generates embeddings using the configured Ollama model.
-5.  **Indexing**: Stores embeddings in a model-specific JSON file (e.g., `data/chunks_nomic-embed-text.json`).
+5.  **Indexing**: Stores chunks + embeddings in SQLite (`DATA_DIR/jobs.db`) partitioned by `model_id` (`rag_models`, `rag_documents`, `rag_chunks`). Legacy JSON indexes (`chunks_{model}.json`) are auto-migrated once and renamed to `.migrated.bak`.
 6.  **Fingerprinting**: Uses SHA-256 hashes to detect unchanged files and skip re-processing.
 
 ## Search & Retrieval

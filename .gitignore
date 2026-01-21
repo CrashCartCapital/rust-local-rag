@@ -40,8 +40,8 @@ dist/
 mcpjungle-config.json
 mcp.db
 
-# Archives
-.archive/
+# Archives (tracked)
+# `.archive/` holds superseded docs kept in-repo.
 
 # Development artifacts (not for release)
 .jules/

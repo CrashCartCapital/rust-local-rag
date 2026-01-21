@@ -82,6 +82,16 @@ impl RagEngine {
             Err(e) => {
                 tracing::warn!("Could not load existing SQLite index state: {}", e);
                 core.set_needs_reindex(true);
+                let backend_dim = core.backend_embedding_dim();
+                if let Err(db_err) = index_store
+                    .set_model_needs_reindex(&model_id, backend_dim, true)
+                    .await
+                {
+                    tracing::warn!(
+                        "Could not persist needs_reindex state to SQLite after load failure: {}",
+                        db_err
+                    );
+                }
             }
         }
 
@@ -120,6 +130,10 @@ impl RagEngine {
         self.core.backend_embedding_dim()
     }
 
+    pub fn incompatible_index_reason(&self) -> Option<&str> {
+        self.incompatible_index_reason.as_deref()
+    }
+
     pub fn has_reranker(&self) -> bool {
         self.core.has_reranker()
     }
@@ -138,6 +152,15 @@ impl RagEngine {
                 self.list_documents().len()
             );
         }
+        Ok(())
+    }
+
+    pub fn reset_state_for_reindex(&mut self, embedding_dim: usize) -> Result<()> {
+        let mut state = rag_core::EngineState::new(self.core.embedding_model(), embedding_dim);
+        state.needs_reindex = true;
+        self.core
+            .load_state(state)
+            .map_err(anyhow::Error::new)?;
         Ok(())
     }
 

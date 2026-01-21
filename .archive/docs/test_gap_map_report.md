@@ -1,4 +1,6 @@
-# Test Gap Map Report
+# Test Gap Map Report (Archived)
+
+> Archived: superseded by current tests and PRD implementation.
 
 ## 1. Critical Flows
 

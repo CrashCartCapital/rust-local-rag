@@ -2,7 +2,7 @@
 
 **Project**: rust-local-rag  
 **Created**: 2026-01-21  
-**Status**: Draft (Revised to match current codebase)  
+**Status**: Implemented (2026-01-21)  
 **Authors**: Claude Code (Sonnet 4.5), Codex CLI (GPT-5.2)  
 **Reviewed With**: CRASH MCP reasoning chains + Gemini (`gemini-3-pro-preview`)  
 **Based On**:
@@ -14,19 +14,14 @@
 
 ## Executive Summary
 
-Several resilience goals that originally motivated this PRD are already achieved in the current codebase:
-- Atomic JSON writes for `chunks_{model}.json` (temp file + rename)
-- Corrupt index handling on load (`needs_reindex=true`, continue running)
-- Restart resilience: the supervisor resumes pending/in-progress reindex jobs
-- Incremental add/modify: per-document SHA-256 skip prevents re-embedding unchanged PDFs
+This PRD’s goals are now implemented in the current codebase:
+- **SQLite-backed index store** in `DATA_DIR/jobs.db` with per-document ACID transactions (`rag_models`, `rag_documents`, `rag_chunks`).
+- **Legacy JSON import**: any `chunks_{model}.json` is auto-migrated into SQLite once and renamed to `.migrated.bak`.
+- **Deletion pruning**: PDFs deleted from disk are pruned from SQLite + in-memory index during reindex.
+- **Embedding dimension discovery + validation**: startup canary determines backend dim; persisted-vs-backend mismatch marks `needs_reindex` and blocks search with an actionable message.
+- **Restart resilience**: supervisor reconciles resumable jobs; reindex job payload is model-safe (`documents_dir`, `model_id`, `embedding_dim`) and fails fast on mismatch.
 
-This revised PRD focuses on the remaining correctness and maintainability gaps:
-1. **Ghost results**: PDFs deleted from disk remain in the index indefinitely.
-2. **Embedding dimension ambiguity**: embedding dimension is not reliably known/persisted/validated.
-3. **Persistence API fragmentation**: `rag-core` has `PersistenceBackend`/`EngineState`, but the server bypasses it with a parallel persistence path.
-4. **Job/index reconciliation UX**: after crashes, job state can lag reality even when the index is consistent.
-
-**Impact**: Removes ghost results, prevents dimension-mismatch runtime failures, simplifies persistence, and culminates in a mandatory SQLite-backed index for durable, incremental writes.
+**Impact**: No ghost results after deletions, no dimension-mismatch runtime panics, simpler persistence semantics, and durable incremental writes via SQLite.
 
 ---
 
@@ -36,7 +31,7 @@ This revised PRD focuses on the remaining correctness and maintainability gaps:
 
 **Problem 1: Orphaned / “Ghost” Documents After Deletion**
 
-**Current behavior**: Reindex discovers PDFs and upserts them, but does not prune index entries for PDFs that no longer exist on disk.
+**Previous behavior (fixed)**: Reindex upserted discovered PDFs but did not prune index entries for PDFs that no longer exist on disk.
 
 **Failure mode**:
 1. User deletes `some.pdf` from `DOCUMENTS_DIR`
@@ -50,7 +45,7 @@ This revised PRD focuses on the remaining correctness and maintainability gaps:
 
 **Problem 2: Embedding Dimension Is Not Reliably Known or Validated**
 
-**Current behavior**:
+**Previous behavior (fixed)**:
 - Connectivity and model existence are validated at startup.
 - The embedding dimension is not established reliably for Ollama today (dimension reporting is effectively unknown).
 - Persisted index format does not explicitly include `embedding_dim`, preventing robust fail-fast validation.
@@ -66,11 +61,10 @@ This revised PRD focuses on the remaining correctness and maintainability gaps:
 
 **Problem 3: Persistence API Fragmentation**
 
-`rag-core` provides feature-gated persistence (`PersistenceBackend`, `EngineState`, `JsonFileBackend`) including migration helpers and metadata (schema version, model id, inferred embedding dim). The server currently persists via a parallel JSON format, creating:
-- duplicate implementations
-- duplicated migration logic
-- inconsistent metadata surface
-- higher future cost for adding new backends (binary/SQLite)
+`rag-core` provides feature-gated JSON persistence (`PersistenceBackend`, `EngineState`, `JsonFileBackend`) including metadata (schema version, model id, inferred embedding dim). The server persists the durable index via a server-level SQLite store (to avoid introducing `sqlx` into `rag-core`), which means we must be explicit about:
+- shared metadata contract (`EngineState` fields mirrored in SQLite)
+- one-time JSON → SQLite migration behavior + backups
+- keeping model/dimension invariants enforced consistently
 
 **User impact**: Slower iteration and higher risk of future persistence regressions.
 
@@ -78,7 +72,7 @@ This revised PRD focuses on the remaining correctness and maintainability gaps:
 
 **Problem 4: Job/Index Reconciliation Edge Cases**
 
-Jobs live in SQLite (`jobs.db`), while index lives in JSON (`chunks_{model}.json`). While the system already resumes jobs and persists per-document, edge cases remain:
+Jobs and index state share the same SQLite DB (`DATA_DIR/jobs.db`), but edge cases remain:
 - crash after index state is saved but before job is marked completed
 - multiple stale pending/in-progress jobs left from dev/test cycles
 - job progress UX resets on resume (not a correctness issue, but confusing)
@@ -92,7 +86,7 @@ Jobs live in SQLite (`jobs.db`), while index lives in JSON (`chunks_{model}.json
 ### Goals
 - The index reflects disk truth: **deleted PDFs do not appear in search results** after sync/reindex.
 - Embedding configuration is validated with reliable dimension info; mismatches become clear, actionable states.
-- The persistence layer is simplified: one canonical path using `rag-core` persistence abstractions.
+- The persistence layer is simplified: one canonical path using `rag-core`’s in-memory `EngineState` as the contract, with SQLite as the durable store and legacy JSON supported for migration/import/export.
 - Restart behavior is predictable and observable (job status and index state converge quickly).
 
 ### Non-Goals (Out of Scope)
@@ -100,6 +94,7 @@ Jobs live in SQLite (`jobs.db`), while index lives in JSON (`chunks_{model}.json
 - Sub-document incremental patching: unit of update remains “whole document if hash changes”.
 - Distributed persistence (S3, remote DBs, vector DBs) — local-first remains the constraint.
 - Mixed-dimension indexes — still one embedding model per index file.
+ - Mixed-dimension indexes — still one embedding model per model-partitioned index.
 
 ---
 
@@ -108,9 +103,9 @@ Jobs live in SQLite (`jobs.db`), while index lives in JSON (`chunks_{model}.json
 ### R1: Canonical Persistence API + Index Metadata (P0)
 
 **Functional Requirements**:
-- FR1.1: The server MUST use `rag-core`’s `PersistenceBackend` abstraction for all index save/load operations (default: `JsonFileBackend`).
+- FR1.1: The server MUST use `rag-core`’s `EngineState` as the canonical in-memory state shape, and MUST support legacy JSON via `rag-core`’s `PersistenceBackend` (`JsonFileBackend`) for migration/import/export.
 - FR1.2: The persisted state MUST include: `schema_version`, `embedding_model_id`, `embedding_dim`, `needs_reindex`, `document_hashes`, and `chunks`.
-- FR1.3: Save MUST be atomic (temp file + rename). If a save fails, the prior index MUST remain valid.
+- FR1.3: Persistence writes MUST be atomic. For legacy JSON this means temp file + rename; for SQLite this means per-document SQL transactions. If a write fails, the prior durable state MUST remain valid.
 - FR1.4: Backward compatibility: existing `chunks_{model}.json` files MUST load, with `embedding_dim` inferred when missing.
 
 **Non-Functional Requirements**:
@@ -199,19 +194,19 @@ This is motivated by the current write pattern: reindexing saves the index after
 
 ## Design
 
-### D1: Canonical JSON Persistence via `rag-core` `EngineState` (Recommended)
+### D1: Canonical `EngineState` + SQLite Source of Truth (Implemented)
 
-**Decision**: Adopt `rag-core`’s persistence abstractions as the single source of truth for index persistence.
+**Decision**: Treat `rag-core::EngineState` as the canonical in-memory state shape, and treat SQLite (`DATA_DIR/jobs.db`) as the durable source of truth for index persistence.
 
 Why this is pragmatic:
-- The repo already ships `EngineState` + `JsonFileBackend` (feature enabled in the server).
-- Legacy migration already exists (legacy state can be converted; `embedding_dim` can be inferred from stored chunks).
-- Avoids introducing a new DB schema and `sqlx` usage into `rag-core` prematurely.
+- The server already depends on SQLite (`sqlx`) for jobs; reusing the same DB for index state avoids monolithic JSON rewrites.
+- `rag-core` stays focused on the in-memory engine + state contract; the server owns storage details.
+- Legacy JSON (`chunks_{model}.json`) remains supported via `rag-core::JsonFileBackend` for migration/import/export without bringing `sqlx` into `rag-core`.
 
 **Design notes**:
-- Use `JsonFileBackend` for `{data_dir}/chunks_{sanitized_model}.json`.
-- Persist `embedding_dim` explicitly (infer it when missing on legacy loads).
-- Keep atomic temp-file write + rename pattern.
+- Store `rag_models` / `rag_documents` / `rag_chunks` in `DATA_DIR/jobs.db`, partitioned by `model_id`.
+- Per-document updates are atomic SQL transactions (delete+insert doc/chunks).
+- JSON is legacy-only: import into SQLite once and rename to `.migrated.bak` (do not delete automatically).
 
 ---
 
@@ -236,8 +231,7 @@ Algorithm sketch:
 1. Discover current PDFs in `DOCUMENTS_DIR`.
 2. Build set of current document basenames.
 3. Compare to the set of indexed documents (`document_hashes` keys or `engine.list_documents()`).
-4. For any indexed doc missing from disk: call `rag-core`’s `remove_document`.
-5. Save index state after pruning (and again after processing changed docs).
+4. For any indexed doc missing from disk: delete it from SQLite first (atomic), then remove it from the in-memory engine.
 
 This preserves incremental behavior while eliminating ghost results.
 

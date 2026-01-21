@@ -129,6 +129,90 @@ async fn test_model_isolation_loads_only_requested_model() {
 }
 
 #[tokio::test]
+async fn test_delete_document_atomic_cascades_chunk_rows() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = format!("sqlite:{}/jobs.db", temp_dir.path().display());
+    let store = SqliteIndexStore::new(&db_path).await.unwrap();
+
+    let model_id = "model-a";
+    let embedding_dim = 5;
+    let doc = "doc.pdf";
+    let chunks = vec![
+        make_chunk("chunk-1", doc, "a", embedding_dim, 0),
+        make_chunk("chunk-2", doc, "b", embedding_dim, 1),
+    ];
+    store
+        .upsert_document_atomic(model_id, embedding_dim, false, doc, "hash", &chunks)
+        .await
+        .unwrap();
+
+    let before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rag_chunks WHERE model_id = ? AND document_name = ?",
+    )
+    .bind(model_id)
+    .bind(doc)
+    .fetch_one(&store.pool())
+    .await
+    .unwrap();
+    assert_eq!(before, 2);
+
+    store.delete_document_atomic(model_id, doc).await.unwrap();
+
+    let docs_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rag_documents WHERE model_id = ? AND document_name = ?",
+    )
+    .bind(model_id)
+    .bind(doc)
+    .fetch_one(&store.pool())
+    .await
+    .unwrap();
+    assert_eq!(docs_left, 0);
+
+    let chunks_left: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rag_chunks WHERE model_id = ? AND document_name = ?",
+    )
+    .bind(model_id)
+    .bind(doc)
+    .fetch_one(&store.pool())
+    .await
+    .unwrap();
+    assert_eq!(chunks_left, 0);
+}
+
+#[tokio::test]
+async fn test_upsert_rejects_embedding_dim_mismatch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = format!("sqlite:{}/jobs.db", temp_dir.path().display());
+    let store = SqliteIndexStore::new(&db_path).await.unwrap();
+
+    let model_id = "model-a";
+    let doc = "doc.pdf";
+    let embedding_dim = 8;
+
+    // Create a chunk with the wrong embedding length (7 instead of 8).
+    let mut chunk = make_chunk("chunk-1", doc, "x", embedding_dim - 1, 0);
+    chunk.embedding = vec![0.0f32; embedding_dim - 1];
+
+    let err = store
+        .upsert_document_atomic(model_id, embedding_dim, false, doc, "hash", &[chunk])
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Embedding dimension mismatch"),
+        "Unexpected error: {msg}"
+    );
+
+    let doc_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
+            .bind(model_id)
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+    assert_eq!(doc_count, 0);
+}
+
+#[tokio::test]
 async fn test_json_migration_imports_and_is_idempotent_and_creates_backup() {
     use rag_core::{EngineState, JsonFileBackend, PersistenceBackend};
 
@@ -283,4 +367,3 @@ async fn test_sqlite_busy_timeout_prevents_lock_errors_under_concurrent_writes()
     .await
     .expect("concurrent writes should not time out");
 }
-

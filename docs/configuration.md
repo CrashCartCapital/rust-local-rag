@@ -68,4 +68,4 @@ You can switch between different Ollama embedding models without losing your ind
 2.  **Update Config**: Change `OLLAMA_EMBEDDING_MODEL` to `mxbai-embed-large`.
 3.  **Restart**: Restart Claude Desktop.
 
-Each model gets its own index file (e.g., `chunks_nomic-embed-text.json`, `chunks_mxbai-embed-large.json`). Switching back to a previous model instantly restores its index.
+Each model gets its own partition inside the SQLite index store in `DATA_DIR/jobs.db` (keyed by `model_id`). Switching back to a previous model restores its existing index. If you have legacy JSON index files (`chunks_{model}.json`), they are imported automatically on first run and renamed to `.migrated.bak`.

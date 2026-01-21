@@ -115,6 +115,9 @@ impl SqliteIndexStore {
         let embedding_dim: i64 = model_row.get("embedding_dim");
         let schema_version: i64 = model_row.get("schema_version");
         let needs_reindex: i64 = model_row.get("needs_reindex");
+        let embedding_dim_usize: usize = embedding_dim
+            .try_into()
+            .context("rag_models.embedding_dim is not a valid usize")?;
 
         let mut document_hashes: HashMap<String, String> = HashMap::new();
         let mut docs_rows =
@@ -164,6 +167,14 @@ impl SqliteIndexStore {
 
             let embedding = decode_f32_blob(&embedding_blob)
                 .with_context(|| format!("Invalid embedding blob for chunk {chunk_id}"))?;
+            if embedding.len() != embedding_dim_usize {
+                return Err(anyhow::anyhow!(
+                    "Embedding dimension mismatch for chunk {}: expected {} floats but found {}",
+                    chunk_id,
+                    embedding_dim_usize,
+                    embedding.len()
+                ));
+            }
 
             let metadata: ChunkMetadata = serde_json::from_str(&metadata_json)
                 .with_context(|| format!("Invalid metadata_json for chunk {chunk_id}"))?;
@@ -194,7 +205,7 @@ impl SqliteIndexStore {
             );
         }
 
-        let mut state = EngineState::new(model_id, embedding_dim as usize);
+        let mut state = EngineState::new(model_id, embedding_dim_usize);
         state.schema_version = schema_version as u32;
         state.needs_reindex = needs_reindex != 0;
         state.document_hashes = document_hashes;
@@ -212,6 +223,17 @@ impl SqliteIndexStore {
         document_hash: &str,
         chunks: &[DocumentChunk],
     ) -> Result<()> {
+        for chunk in chunks {
+            if chunk.embedding.len() != embedding_dim {
+                return Err(anyhow::anyhow!(
+                    "Embedding dimension mismatch for chunk {}: expected {} floats but found {}",
+                    chunk.id,
+                    embedding_dim,
+                    chunk.embedding.len()
+                ));
+            }
+        }
+
         let now = Utc::now().timestamp();
         let mut tx = self.pool.begin().await?;
 
@@ -220,7 +242,6 @@ impl SqliteIndexStore {
             INSERT INTO rag_models (model_id, embedding_dim, schema_version, needs_reindex, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(model_id) DO UPDATE SET
-                embedding_dim = excluded.embedding_dim,
                 schema_version = excluded.schema_version,
                 needs_reindex = excluded.needs_reindex,
                 updated_at = excluded.updated_at
@@ -234,6 +255,35 @@ impl SqliteIndexStore {
         .bind(now)
         .execute(&mut *tx)
         .await?;
+
+        let existing_dim: i64 = sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
+            .bind(model_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let existing_usize: usize = existing_dim
+            .try_into()
+            .context("rag_models.embedding_dim is not a valid usize")?;
+        if existing_usize != embedding_dim {
+            let doc_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
+                .bind(model_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if doc_count > 0 {
+                return Err(anyhow::anyhow!(
+                    "Embedding dimension changed for model_id '{}': stored {} vs requested {}. Reset/reindex required before upserts.",
+                    model_id,
+                    existing_usize,
+                    embedding_dim
+                ));
+            }
+
+            sqlx::query("UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?")
+                .bind(embedding_dim as i64)
+                .bind(now)
+                .bind(model_id)
+                .execute(&mut *tx)
+                .await?;
+        }
 
         sqlx::query("DELETE FROM rag_documents WHERE model_id = ? AND document_name = ?")
             .bind(model_id)
@@ -330,6 +380,64 @@ impl SqliteIndexStore {
         needs_reindex: bool,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO rag_models (model_id, embedding_dim, schema_version, needs_reindex, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(model_id) DO UPDATE SET
+                schema_version = excluded.schema_version,
+                needs_reindex = excluded.needs_reindex,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(model_id)
+        .bind(embedding_dim as i64)
+        .bind(rag_core::persistence::INDEX_VERSION as i64)
+        .bind(if needs_reindex { 1_i64 } else { 0_i64 })
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let existing_dim: i64 =
+            sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
+                .bind(model_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let existing_usize: usize = existing_dim
+            .try_into()
+            .context("rag_models.embedding_dim is not a valid usize")?;
+        if existing_usize != embedding_dim {
+            let doc_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM rag_documents WHERE model_id = ?")
+                    .bind(model_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if doc_count == 0 {
+                sqlx::query("UPDATE rag_models SET embedding_dim = ?, updated_at = ? WHERE model_id = ?")
+                    .bind(embedding_dim as i64)
+                    .bind(now)
+                    .bind(model_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn reset_model_state_atomic(
+        &self,
+        model_id: &str,
+        embedding_dim: usize,
+        needs_reindex: bool,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp();
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query(
             r#"
             INSERT INTO rag_models (model_id, embedding_dim, schema_version, needs_reindex, created_at, updated_at)
@@ -347,8 +455,15 @@ impl SqliteIndexStore {
         .bind(if needs_reindex { 1_i64 } else { 0_i64 })
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        sqlx::query("DELETE FROM rag_documents WHERE model_id = ?")
+            .bind(model_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -378,12 +493,32 @@ impl SqliteIndexStore {
             .await
             .context("json load task failed")??;
 
-        let Some(state) = state else {
+        let Some(mut state) = state else {
             // JSON exists but couldn't be loaded; preserve behavior by marking for reindex.
             self.set_model_needs_reindex(model_id, embedding_dim, true)
                 .await?;
             return Ok(());
         };
+
+        if state.embedding_dim == 0 && !state.chunks.is_empty() {
+            if let Some(first) = state.chunks.values().next() {
+                state.embedding_dim = first.embedding.len();
+            }
+        }
+        if state.embedding_dim == 0 {
+            self.set_model_needs_reindex(model_id, embedding_dim, true)
+                .await?;
+            return Ok(());
+        }
+        if state
+            .chunks
+            .values()
+            .any(|chunk| chunk.embedding.len() != state.embedding_dim)
+        {
+            self.set_model_needs_reindex(model_id, embedding_dim, true)
+                .await?;
+            return Ok(());
+        }
 
         let mut doc_counts: HashMap<String, usize> = HashMap::new();
         for chunk in state.chunks.values() {

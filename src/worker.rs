@@ -197,135 +197,134 @@ impl WorkerSupervisor {
 
             if !jobs.is_empty() {
                 // Guardrail: only allow one active reindex job on startup.
-                // If multiple exist (common in dev/test cycles), fail older ones to avoid confusion.
-                let primary_idx = jobs.iter().position(|job| {
-                    job.payload
-                        .as_ref()
-                        .is_some_and(|payload| !payload.trim().is_empty())
-                });
+                // Choose the newest resumable job that has a valid payload and is compatible
+                // with the current embedding model; mark the rest as failed to avoid confusion.
+                let (current_model_id, current_dim) = {
+                    let engine = self.rag_engine.read().await;
+                    (engine.embedding_model().to_string(), engine.backend_embedding_dim())
+                };
 
-                if let Some(primary_idx) = primary_idx {
-                    let primary = jobs.remove(primary_idx);
+                let mut handled_job_ids: HashSet<String> = HashSet::new();
+                let mut selected: Option<(String, String, JobStatus, bool)> = None;
 
-                    for stale in jobs {
-                        let msg = format!(
-                            "Superseded by newer reindex job {} on startup",
-                            primary.job_id
-                        );
+                for job in &jobs {
+                    let Some(payload) = job.payload.as_deref() else {
+                        handled_job_ids.insert(job.job_id.clone());
                         let _ = self
                             .job_manager
-                            .update_status(&stale.job_id, JobStatus::Failed, Some(msg))
+                            .update_status(
+                                &job.job_id,
+                                JobStatus::Failed,
+                                Some("Missing payload (documents_dir); cannot resume".to_string()),
+                            )
                             .await;
+                        continue;
+                    };
+
+                    let parsed = parse_reindex_job_payload(payload.trim());
+                    let documents_dir = match &parsed {
+                        ParsedReindexJobPayload::Structured(payload) => {
+                            payload.documents_dir.trim().to_string()
+                        }
+                        ParsedReindexJobPayload::LegacyDocumentsDir(dir) => dir.clone(),
+                    };
+
+                    if documents_dir.is_empty() || !Path::new(&documents_dir).exists() {
+                        handled_job_ids.insert(job.job_id.clone());
+                        let _ = self
+                            .job_manager
+                            .update_status(
+                                &job.job_id,
+                                JobStatus::Failed,
+                                Some(format!(
+                                    "Invalid documents_dir in payload: '{}'",
+                                    documents_dir
+                                )),
+                            )
+                            .await;
+                        continue;
                     }
 
-                    tracing::info!(
-                        "Resuming job {} (status: {:?}) from restart",
-                        primary.job_id,
-                        primary.status
-                    );
-
-                    match primary.payload {
-                        Some(payload) => {
-                            let parsed = parse_reindex_job_payload(payload.trim());
-                            let documents_dir = match &parsed {
-                                ParsedReindexJobPayload::Structured(payload) => {
-                                    payload.documents_dir.trim().to_string()
-                                }
-                                ParsedReindexJobPayload::LegacyDocumentsDir(dir) => dir.clone(),
-                            };
-
-                            if documents_dir.is_empty() || !Path::new(&documents_dir).exists() {
-                                let _ = self
-                                    .job_manager
-                                    .update_status(
-                                        &primary.job_id,
-                                        JobStatus::Failed,
-                                        Some(format!(
-                                            "Invalid documents_dir in payload: '{}'",
-                                            documents_dir
-                                        )),
-                                    )
-                                    .await;
-                            } else if let ParsedReindexJobPayload::Structured(payload) = parsed {
-                                let (current_model_id, current_dim) = {
-                                    let engine = self.rag_engine.read().await;
-                                    (
-                                        engine.embedding_model().to_string(),
-                                        engine.backend_embedding_dim(),
-                                    )
-                                };
-
-                                if payload.model_id != current_model_id {
-                                    let _ = self
-                                        .job_manager
-                                        .update_status(
-                                            &primary.job_id,
-                                            JobStatus::Failed,
-                                            Some(format!(
-                                                "reindex job model mismatch: job started with '{}' but server is running '{}'. reindex required under the current model.",
-                                                payload.model_id, current_model_id
-                                            )),
-                                        )
-                                        .await;
-                                } else if payload.embedding_dim != current_dim {
-                                    let _ = self
-                                        .job_manager
-                                        .update_status(
-                                            &primary.job_id,
-                                            JobStatus::Failed,
-                                            Some(format!(
-                                                "reindex job embedding dimension mismatch: job expects {} but server backend is {} for model '{}'. reindex required.",
-                                                payload.embedding_dim, current_dim, current_model_id
-                                            )),
-                                        )
-                                        .await;
-                                } else if primary.total > 0 && primary.progress >= primary.total {
-                                    let _ = self
-                                        .job_manager
-                                        .update_status(
-                                            &primary.job_id,
-                                            JobStatus::Completed,
-                                            Some(
-                                                "Recovered on startup: index already up to date"
-                                                    .to_string(),
-                                            ),
-                                        )
-                                        .await;
-                                } else {
-                                    self.spawn_reindex_worker(primary.job_id, documents_dir).await;
-                                }
-                            } else if primary.total > 0 && primary.progress >= primary.total {
-                                let _ = self
-                                    .job_manager
-                                    .update_status(
-                                        &primary.job_id,
-                                        JobStatus::Completed,
-                                        Some(
-                                            "Recovered on startup: index already up to date"
-                                                .to_string(),
-                                        ),
-                                    )
-                                    .await;
-                            } else {
-                                self.spawn_reindex_worker(primary.job_id, documents_dir).await;
-                            }
-                        }
-                        None => {
+                    if let ParsedReindexJobPayload::Structured(payload) = parsed {
+                        if payload.model_id != current_model_id {
+                            handled_job_ids.insert(job.job_id.clone());
                             let _ = self
                                 .job_manager
                                 .update_status(
-                                    &primary.job_id,
+                                    &job.job_id,
                                     JobStatus::Failed,
-                                    Some(
-                                        "Missing payload (documents_dir); cannot resume"
-                                            .to_string(),
-                                    ),
+                                    Some(format!(
+                                        "reindex job model mismatch: job started with '{}' but server is running '{}'. reindex required under the current model.",
+                                        payload.model_id, current_model_id
+                                    )),
                                 )
                                 .await;
+                            continue;
                         }
+                        if payload.embedding_dim != current_dim {
+                            handled_job_ids.insert(job.job_id.clone());
+                            let _ = self
+                                .job_manager
+                                .update_status(
+                                    &job.job_id,
+                                    JobStatus::Failed,
+                                    Some(format!(
+                                        "reindex job embedding dimension mismatch: job expects {} but server backend is {} for model '{}'. reindex required.",
+                                        payload.embedding_dim, current_dim, current_model_id
+                                    )),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
+
+                    let already_complete = job.total > 0 && job.progress >= job.total;
+                    selected = Some((
+                        job.job_id.clone(),
+                        documents_dir,
+                        job.status.clone(),
+                        already_complete,
+                    ));
+                    break;
+                }
+
+                if let Some((selected_job_id, documents_dir, status, already_complete)) = selected {
+                    for job in &jobs {
+                        if job.job_id == selected_job_id || handled_job_ids.contains(&job.job_id) {
+                            continue;
+                        }
+                        let msg = format!(
+                            "Superseded by newer reindex job {} on startup",
+                            selected_job_id
+                        );
+                        let _ = self
+                            .job_manager
+                            .update_status(&job.job_id, JobStatus::Failed, Some(msg))
+                            .await;
+                    }
+
+                    if already_complete {
+                        let _ = self
+                            .job_manager
+                            .update_status(
+                                &selected_job_id,
+                                JobStatus::Completed,
+                                Some("Recovered on startup: index already up to date".to_string()),
+                            )
+                            .await;
+                    } else {
+                        tracing::info!(
+                            "Resuming job {} (status: {:?}) from restart",
+                            selected_job_id,
+                            status
+                        );
+                        self.spawn_reindex_worker(selected_job_id, documents_dir).await;
                     }
                 } else {
                     for job in jobs {
+                        if handled_job_ids.contains(&job.job_id) {
+                            continue;
+                        }
                         let _ = self
                             .job_manager
                             .update_status(
@@ -699,15 +698,28 @@ impl WorkerSupervisor {
 
         let mut failed_documents = Vec::new();
 
-        let (index_store, model_id, embedding_dim, needs_reindex) = {
+        let (index_store, model_id, embedding_dim, mut needs_reindex, incompatible_index) = {
             let engine = rag_engine.read().await;
             (
                 engine.index_store(),
                 engine.embedding_model().to_string(),
                 engine.backend_embedding_dim(),
                 engine.needs_reindex(),
+                engine.incompatible_index_reason().is_some(),
             )
         };
+
+        // If we detected an incompatible index (e.g., embedding dimension mismatch), reset the
+        // durable and in-memory state before indexing to avoid mixed-dimension rows on crash/resume.
+        if incompatible_index {
+            index_store
+                .reset_model_state_atomic(&model_id, embedding_dim, true)
+                .await?;
+            let mut engine =
+                TimedWriteLockGuard::acquire(&rag_engine, "reset_model_state_for_reindex").await?;
+            engine.reset_state_for_reindex(embedding_dim)?;
+            needs_reindex = true;
+        }
 
         // Phase 2: Deletion synchronization - prune indexed docs missing from disk
         let current_docs: HashSet<String> = pdf_paths

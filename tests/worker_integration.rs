@@ -583,6 +583,149 @@ async fn test_supervisor_marks_job_completed_when_progress_reached_total() {
     }
 }
 
+#[tokio::test]
+#[serial]
+async fn test_reindex_resets_incompatible_index_to_avoid_mixed_dimensions() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{ "name": "nomic-embed-text:latest" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Canary + document embeddings return 768D (backend dim).
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 768]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let docs_dir = temp_dir.path().join("docs");
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::create_dir_all(&log_dir).unwrap();
+
+    unsafe {
+        std::env::set_var("LOG_DIR", log_dir.to_str().unwrap());
+    }
+
+    // Write a PDF that will be reindexed.
+    let pdf_bytes = create_valid_pdf();
+    std::fs::write(docs_dir.join("test.pdf"), &pdf_bytes).unwrap();
+
+    let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
+    let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+
+    // Seed an incompatible 384D index state in SQLite (persisted dim).
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    index_store
+        .upsert_document_atomic(
+            "nomic-embed-text",
+            384,
+            false,
+            "test.pdf",
+            &sha256_hex(&pdf_bytes),
+            &[rag_core::DocumentChunk {
+                id: "old-chunk".to_string(),
+                document_name: "test.pdf".to_string(),
+                text: "old".to_string(),
+                embedding: vec![0.0f32; 384],
+                chunk_index: 0,
+                page_number: 1,
+                section: None,
+                metadata: rag_core::ChunkMetadata {
+                    token_count: 0,
+                    overlap_with_previous: 0,
+                    ..Default::default()
+                },
+                tags: std::collections::HashSet::new(),
+                resolution: rag_core::Resolution::Chunk,
+                parent_id: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let rag_engine = Arc::new(RwLock::new(
+        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+            .await
+            .unwrap(),
+    ));
+    assert!(
+        rag_engine.read().await.needs_reindex(),
+        "Expected needs_reindex due to dim mismatch"
+    );
+
+    let (job_tx, job_rx) = mpsc::channel(10);
+    let supervisor = WorkerSupervisor::new(job_manager.clone(), rag_engine.clone(), job_rx);
+    tokio::spawn(async move {
+        supervisor.run().await;
+    });
+
+    let job = job_manager
+        .create_job(JobType::Reindex, None, 0)
+        .await
+        .unwrap();
+    job_tx
+        .send(JobRequest::StartReindex {
+            job_id: job.job_id.clone(),
+            documents_dir: docs_dir.to_str().unwrap().to_string(),
+        })
+        .await
+        .unwrap();
+
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let current_job = job_manager.get_job(&job.job_id).await.unwrap().unwrap();
+        if current_job.status == JobStatus::Completed {
+            break;
+        }
+        if current_job.status == JobStatus::Failed {
+            panic!("Job failed: {:?}", current_job.error);
+        }
+        attempts += 1;
+        if attempts > 200 {
+            panic!("Job timed out. Status: {:?}", current_job.status);
+        }
+    }
+
+    // After reindex, rag_models.embedding_dim should match backend (768),
+    // and no 384D embeddings should remain.
+    let index_store = rust_local_rag::SqliteIndexStore::new(&db_path).await.unwrap();
+    let stored_dim: i64 =
+        sqlx::query_scalar("SELECT embedding_dim FROM rag_models WHERE model_id = ?")
+            .bind("nomic-embed-text")
+            .fetch_one(&index_store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored_dim, 768);
+
+    let blob_lens: Vec<i64> =
+        sqlx::query_scalar("SELECT LENGTH(embedding) FROM rag_chunks WHERE model_id = ?")
+            .bind("nomic-embed-text")
+            .fetch_all(&index_store.pool())
+            .await
+            .unwrap();
+    assert!(!blob_lens.is_empty(), "Expected chunks after reindex");
+    for len in blob_lens {
+        assert_eq!(len, 768 * 4);
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ReindexJobPayload {
     documents_dir: String,
