@@ -3,11 +3,10 @@
 //! This module provides the main entry point for Python applications.
 //! It wraps the Rust RagEngine with PyO3 bindings.
 
-use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
@@ -22,13 +21,7 @@ use rag_core::{BoxedEmbedder, BoxedReranker};
 /// Using a lazy static runtime avoids creating multiple thread pools
 /// and aligns with pyo3-async-runtimes patterns.
 #[allow(dead_code)] // Used in Phase 2 Task 2.2 for search operations
-static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("Failed to create Tokio runtime")
-});
+static TOKIO_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
 /// Type alias for the dynamic engine type using boxed trait objects.
 /// This allows the engine to work with any embedding backend or reranker
@@ -343,7 +336,7 @@ impl PyRagEngine {
         // Release GIL and perform async embedding + upsert
         py.allow_threads(move || {
             let mut engine = engine.blocking_lock();
-            runtime()
+            runtime()?
                 .block_on(engine.upsert_document(&name, &text, content_hash))
                 .map_err(engine_error_to_pyerr)
         })
@@ -434,21 +427,18 @@ impl PyRagEngine {
         // Release GIL and perform async search
         py.allow_threads(move || {
             let engine = engine.blocking_lock();
+            let rt = runtime()?;
 
             // Use diversity search if diversity_factor > 0
             let search_result = if query_spec.diversity_factor > 0.0 {
-                runtime().block_on(engine.search_with_diversity(
+                rt.block_on(engine.search_with_diversity(
                     &query_spec.query,
                     query_spec.top_k,
                     query_spec.diversity_factor,
-                    query_spec.weights.clone(),
+                    query_spec.weights,
                 ))
             } else {
-                runtime().block_on(engine.search(
-                    &query_spec.query,
-                    query_spec.top_k,
-                    query_spec.weights.clone(),
-                ))
+                rt.block_on(engine.search(&query_spec.query, query_spec.top_k, query_spec.weights))
             };
 
             search_result
@@ -511,20 +501,21 @@ impl PyRagEngine {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             tokio::task::spawn_blocking(move || {
                 let engine = engine.blocking_lock();
+                let rt = runtime()?;
 
                 // Use diversity search if diversity_factor > 0
                 let search_result = if query_spec.diversity_factor > 0.0 {
-                    runtime().block_on(engine.search_with_diversity(
+                    rt.block_on(engine.search_with_diversity(
                         &query_spec.query,
                         query_spec.top_k,
                         query_spec.diversity_factor,
-                        query_spec.weights.clone(),
+                        query_spec.weights,
                     ))
                 } else {
-                    runtime().block_on(engine.search(
+                    rt.block_on(engine.search(
                         &query_spec.query,
                         query_spec.top_k,
-                        query_spec.weights.clone(),
+                        query_spec.weights,
                     ))
                 };
 
@@ -574,7 +565,7 @@ impl PyRagEngine {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             tokio::task::spawn_blocking(move || {
                 let mut engine = engine.blocking_lock();
-                runtime()
+                runtime()?
                     .block_on(engine.upsert_document(&name, &text, content_hash))
                     .map_err(engine_error_to_pyerr)
             })
@@ -631,8 +622,17 @@ impl PyRagEngine {
 ///
 /// This is used by async methods to execute futures.
 #[allow(dead_code)] // Used in Phase 2 Task 2.2 for search operations
-pub(crate) fn runtime() -> &'static Runtime {
-    &TOKIO_RUNTIME
+pub(crate) fn runtime() -> PyResult<&'static Runtime> {
+    TOKIO_RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create Tokio runtime: {}", e))
+        })
+        .as_ref()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.clone()))
 }
 
 #[cfg(test)]
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_runtime_accessible() {
-        let rt = runtime();
+        let rt = runtime().unwrap();
         rt.block_on(async {
             // Simple async test
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
