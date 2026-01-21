@@ -1,803 +1,561 @@
 # PRD: Persistence, Resilience & Configuration Hardening
 
-**Project**: rust-local-rag
-**Created**: 2026-01-21
-**Status**: Draft
-**Authors**: Claude Code (Sonnet 4.5) with CRASH MCP + Gemini 3 Pro analysis
-**Based On**: STAT-REPORT-172612 + STAT-REPORT-180809 comprehensive audits
+**Project**: rust-local-rag  
+**Created**: 2026-01-21  
+**Status**: Draft (Revised to match current codebase)  
+**Authors**: Claude Code (Sonnet 4.5), Codex CLI (GPT-5.2)  
+**Reviewed With**: CRASH MCP reasoning chains + Gemini (`gemini-3-pro-preview`)  
+**Based On**:
+- `docs/architecture.md` (current architecture + persistence model)
+- `analysis/20260114_operational_stability_hardening_PRD_v1.0.md` (approved stability PRD)
+- Current implementation + tests (`src/worker.rs`, `src/job_manager.rs`, `src/embeddings.rs`, `tests/rag_persistence.rs`)
 
 ---
 
 ## Executive Summary
 
-This PRD addresses the three highest-impact architectural improvements identified by dual comprehensive audits of the rust-local-rag codebase. These improvements eliminate data corruption risks, enable crash recovery, and prepare the system for incremental operation—all critical for a privacy-preserving local RAG system running on solo developer laptops.
+Several resilience goals that originally motivated this PRD are already achieved in the current codebase:
+- Atomic JSON writes for `chunks_{model}.json` (temp file + rename)
+- Corrupt index handling on load (`needs_reindex=true`, continue running)
+- Restart resilience: the supervisor resumes pending/in-progress reindex jobs
+- Incremental add/modify: per-document SHA-256 skip prevents re-embedding unchanged PDFs
 
-**Impact**: Eliminates P0 data corruption risks, reduces reindex time by 90%+, enables graceful degradation
+This revised PRD focuses on the remaining correctness and maintainability gaps:
+1. **Ghost results**: PDFs deleted from disk remain in the index indefinitely.
+2. **Embedding dimension ambiguity**: embedding dimension is not reliably known/persisted/validated.
+3. **Persistence API fragmentation**: `rag-core` has `PersistenceBackend`/`EngineState`, but the server bypasses it with a parallel persistence path.
+4. **Job/index reconciliation UX**: after crashes, job state can lag reality even when the index is consistent.
 
-**Prioritization Rationale**:
-- Both audit reports identified persistence atomicity as the #1 scariest risk
-- Gemini peer review validated unified SQLite persistence as highest ROI (impact: 10/10)
-- All improvements are pragmatic for solo developers (no distributed systems complexity)
+**Impact**: Removes ghost results, prevents dimension-mismatch runtime failures, simplifies persistence, and culminates in a mandatory SQLite-backed index for durable, incremental writes.
 
 ---
 
 ## Problem Statement
 
-### P0 Problems (Data Corruption & Loss)
+### P0 Problems (Correctness / Silent Corruption)
 
-**Problem 1: Vector-Relational Desynchronization**
-**Evidence**: STAT-REPORT-180809 E6-E8, STAT-REPORT-172612 E39-E40
+**Problem 1: Orphaned / “Ghost” Documents After Deletion**
 
-The system maintains two independent persistence layers:
-- SQLite (`jobs.db`): Job metadata, status, progress
-- JSON (`chunks_{model}.json`): Document chunks, embeddings, hashes
+**Current behavior**: Reindex discovers PDFs and upserts them, but does not prune index entries for PDFs that no longer exist on disk.
 
-**Failure Mode**:
-If the process crashes between updating JSON (step 3) and marking job completed in SQLite (step 4):
-1. Job status shows "in progress" indefinitely
-2. Chunks JSON may be partially written (corrupted or missing documents)
-3. Document hashes diverge from actual file state
-4. No recovery mechanism—user must manually delete chunks file and reindex (20+ minutes)
+**Failure mode**:
+1. User deletes `some.pdf` from `DOCUMENTS_DIR`
+2. User runs `start_reindex` (or restarts and resumes)
+3. Index still contains chunks for `some.pdf`
+4. Search results include a document that no longer exists (“ghost result”)
 
-**User Impact**:
-Solo developer loses 20+ minutes of indexing work on every laptop sleep, Ctrl+C, or OOM crash. Silent quality degradation (search returns outdated results) with no error message.
+**User impact**: Silent correctness failure (search returns results from deleted files). This breaks user trust in a local-first RAG tool.
 
 ---
 
-**Problem 2: No Job Crash Recovery**
-**Evidence**: STAT-REPORT-180809 E73, STAT-REPORT-172612 (no checkpoint logic)
+**Problem 2: Embedding Dimension Is Not Reliably Known or Validated**
 
-Background indexing jobs restart from scratch after any interruption:
-- Laptop sleep/wake
-- Process killed (OOM, Ctrl+C)
-- Ollama service restart
+**Current behavior**:
+- Connectivity and model existence are validated at startup.
+- The embedding dimension is not established reliably for Ollama today (dimension reporting is effectively unknown).
+- Persisted index format does not explicitly include `embedding_dim`, preventing robust fail-fast validation.
 
-**User Impact**:
-For 85K chunk corpus (70 PDFs), a full reindex takes 20+ minutes. Every interruption means starting over. This is unacceptable for local-first software.
+**Failure mode**:
+- If the embedding dimension changes for a model identifier (or backend behavior changes), search can hit dimension mismatch errors at runtime and `get_stats`/health reporting can be misleading.
 
----
-
-**Problem 3: No Embedding Model Validation**
-**Evidence**: STAT-REPORT-180809 E25-E26, STAT-REPORT-172612 E17
-
-System detects model changes (`needs_reindex=true`) but doesn't validate dimension compatibility:
-- User switches from `nomic-embed-text` (768D) to `mxbai-embed-large` (1024D)
-- Old chunks with 768D embeddings remain in index
-- Search operations panic on dimension mismatch OR silently fail
-
-**User Impact**:
-Silent index corruption after model upgrades. No fail-fast validation on startup.
+**User impact**: Confusing runtime failures and unclear remediation (“why did search break?”).
 
 ---
 
-### P1 Problems (Operational Friction)
+### P1 Problems (Maintainability / Operational UX)
 
-**Problem 4: Full Reindex on Every Change**
-**Evidence**: STAT-REPORT-180809 E70, STAT-REPORT-172612 (no incremental sync)
+**Problem 3: Persistence API Fragmentation**
 
-Adding or updating a single PDF requires re-embedding the entire corpus:
-- No change detection granularity below document level
-- SHA-256 hashes exist but only used for "unchanged" detection, not selective updates
-- No way to update individual documents without full reindex
+`rag-core` provides feature-gated persistence (`PersistenceBackend`, `EngineState`, `JsonFileBackend`) including migration helpers and metadata (schema version, model id, inferred embedding dim). The server currently persists via a parallel JSON format, creating:
+- duplicate implementations
+- duplicated migration logic
+- inconsistent metadata surface
+- higher future cost for adding new backends (binary/SQLite)
 
-**User Impact**:
-20+ minute reindex to add a single 10-page PDF. Discourages iterative use.
+**User impact**: Slower iteration and higher risk of future persistence regressions.
+
+---
+
+**Problem 4: Job/Index Reconciliation Edge Cases**
+
+Jobs live in SQLite (`jobs.db`), while index lives in JSON (`chunks_{model}.json`). While the system already resumes jobs and persists per-document, edge cases remain:
+- crash after index state is saved but before job is marked completed
+- multiple stale pending/in-progress jobs left from dev/test cycles
+- job progress UX resets on resume (not a correctness issue, but confusing)
+
+**User impact**: “Zombie job” status confusion and harder debugging.
+
+---
+
+## Goals / Non-Goals
+
+### Goals
+- The index reflects disk truth: **deleted PDFs do not appear in search results** after sync/reindex.
+- Embedding configuration is validated with reliable dimension info; mismatches become clear, actionable states.
+- The persistence layer is simplified: one canonical path using `rag-core` persistence abstractions.
+- Restart behavior is predictable and observable (job status and index state converge quickly).
+
+### Non-Goals (Out of Scope)
+- Real-time file watching (FSEvents/inotify): sync remains explicit (reindex/sync call) or startup-driven.
+- Sub-document incremental patching: unit of update remains “whole document if hash changes”.
+- Distributed persistence (S3, remote DBs, vector DBs) — local-first remains the constraint.
+- Mixed-dimension indexes — still one embedding model per index file.
 
 ---
 
 ## Requirements
 
-### R1: Unified Atomic Persistence (P0)
+### R1: Canonical Persistence API + Index Metadata (P0)
 
 **Functional Requirements**:
-- FR1.1: All document chunks, embeddings, hashes, and job metadata MUST be stored in a single SQLite database
-- FR1.2: Job status updates and chunk writes MUST occur within the same SQLite transaction
-- FR1.3: On crash/rollback, system MUST restore to last consistent state (no partial updates)
-- FR1.4: Existing JSON-based indexes MUST be migrated automatically on first startup with new backend
-- FR1.5: PersistenceBackend trait MUST remain in rag-core for future extensibility
+- FR1.1: The server MUST use `rag-core`’s `PersistenceBackend` abstraction for all index save/load operations (default: `JsonFileBackend`).
+- FR1.2: The persisted state MUST include: `schema_version`, `embedding_model_id`, `embedding_dim`, `needs_reindex`, `document_hashes`, and `chunks`.
+- FR1.3: Save MUST be atomic (temp file + rename). If a save fails, the prior index MUST remain valid.
+- FR1.4: Backward compatibility: existing `chunks_{model}.json` files MUST load, with `embedding_dim` inferred when missing.
 
 **Non-Functional Requirements**:
-- NFR1.1: Read performance MUST NOT degrade more than 10% vs current JSON approach
-- NFR1.2: Migration from JSON to SQLite MUST complete within 5 minutes for 100K chunks
-- NFR1.3: SQLite file size MUST NOT exceed 2x the current JSON file size
+- NFR1.1: Load+parse for 100K chunks SHOULD complete within 5 seconds on a typical dev laptop.
+- NFR1.2: Search read performance MUST NOT regress noticeably (≤5%).
+- NFR1.3: No new external runtime dependencies by default; alternative backends must be feature-gated.
 
 **Success Criteria**:
-- Zero data corruption events in crash simulation tests (kill -9 during indexing)
-- Job status always reflects actual index state (no orphaned "in progress" jobs)
-- Backward compatibility: existing deployments upgrade seamlessly
+- Upgrading from an existing `chunks_{model}.json` does not break startup; the index loads or transitions to a safe “needs reindex” state.
+- There is one canonical persistence path in the server (no parallel save/load formats).
 
 ---
 
-### R2: Job Checkpointing & Resume (P0)
+### R2: Embedding Dimension Discovery + Validation (P0)
 
 **Functional Requirements**:
-- FR2.1: Background jobs MUST save progress checkpoints every N documents (configurable, default: 10)
-- FR2.2: On startup, WorkerSupervisor MUST detect incomplete jobs and offer to resume
-- FR2.3: Resumed jobs MUST skip already-processed documents (idempotent)
-- FR2.4: Checkpoint data MUST be persisted in SQLite alongside job metadata
+- FR2.1: The embedding backend MUST provide a non-zero, correct embedding dimension at runtime.
+- FR2.2: On startup, the server MUST validate that persisted `embedding_dim` matches the current backend dimension when loading an existing index.
+- FR2.3: If dimensions mismatch, the system MUST enter a safe state that prevents using incompatible embeddings:
+  - mark `needs_reindex=true`
+  - avoid serving vector search from incompatible loaded chunks (either clear them or treat as invalid until reindex)
+  - emit an actionable message (“model changed; reindex required”)
 
 **Non-Functional Requirements**:
-- NFR2.1: Checkpoint overhead MUST NOT add more than 5% to total indexing time
-- NFR2.2: Resumed jobs MUST complete 90%+ faster than full reindex for 50% complete jobs
+- NFR2.1: Validation SHOULD complete within 5 seconds.
+- NFR2.2: Errors MUST include remediation (reindex or revert model).
 
 **Success Criteria**:
-- Kill process at 50% completion → Resume → Completes in <10% of original time
-- No duplicate chunks in index after resume (deterministic chunk IDs)
+- Switching to a backend/model with a different dimension never causes a runtime panic; the system clearly indicates reindex is required.
 
 ---
 
-### R3: Embedding Configuration Validation (P0)
+### R3: Deletion Synchronization (P0)
 
 **Functional Requirements**:
-- FR3.1: On startup, MUST verify Ollama is reachable at configured URL
-- FR3.2: On startup, MUST verify embedding model exists in Ollama
-- FR3.3: On startup, MUST verify embedding dimension matches existing index (if index exists)
-- FR3.4: If validation fails, MUST prevent server start with clear error message
-- FR3.5: MUST store a "canary embedding" (fixed input text) to detect upstream model changes
+- FR3.1: Any sync/reindex operation MUST detect PDFs deleted from `DOCUMENTS_DIR` and remove their chunks from the index.
+- FR3.2: Removal MUST update vector + lexical indexes and `document_hashes` consistently.
+- FR3.3: The user must get a summary of deletions (documents removed + chunks removed).
 
 **Non-Functional Requirements**:
-- NFR3.1: Startup validation MUST complete within 5 seconds
-- NFR3.2: Error messages MUST include actionable remediation steps
+- NFR3.1: Deletion pruning SHOULD be O(number of indexed documents) and complete within seconds for typical corpora.
+- NFR3.2: Deletion pruning MUST NOT require a full rebuild of embeddings for unchanged documents.
 
 **Success Criteria**:
-- Starting with wrong model fails with error: "Dimension mismatch: index expects 768D, model provides 1024D. Run reindex or switch to compatible model."
-- Canary embedding drift >5% triggers warning: "Embedding model weights may have changed. Reindex recommended."
+- Delete a PDF from disk → run `start_reindex` → searches never return that document again.
 
 ---
 
-### R4: Incremental Document Sync (P1)
+### R4: Job/Index Reconciliation + Resume UX (P1)
 
 **Functional Requirements**:
-- FR4.1: MUST support updating individual documents without full reindex
-- FR4.2: MUST detect added, modified, and deleted documents via SHA-256 hash comparison
-- FR4.3: MUST remove chunks for deleted documents from index
-- FR4.4: MUST rebuild AnnIndex and LexicalIndex incrementally (add/remove entries, not full rebuild)
-- FR4.5: MUST provide MCP tool `sync_documents` as alternative to `start_reindex`
-
-**Non-Functional Requirements**:
-- NFR4.1: Syncing 5 changed documents (out of 70) MUST complete in <2 minutes
-- NFR4.2: Index quality (Hit Rate@5) MUST NOT degrade vs full reindex
+- FR4.1: On startup, the supervisor MUST reconcile resumable jobs with index state (e.g., if no work remains, mark job completed with a clear message).
+- FR4.2: Resume MUST be idempotent and MUST NOT duplicate chunks.
+- FR4.3: Multiple stale jobs must not block server startup indefinitely (guardrail: limit to one active reindex job, mark older ones failed).
 
 **Success Criteria**:
-- Adding 1 new PDF: sync completes in <1 minute (vs 20+ min full reindex)
-- Modifying 3 PDFs: only those 3 are re-embedded
-- Deleting 2 PDFs: their chunks are removed, searches no longer return them
+- Crash mid-reindex → restart → job resumes and completes without duplicate chunks, and job status reflects completion.
+
+---
+
+### R5: Mandatory SQLite Index Persistence (Phase 5 / P1)
+
+SQLite index persistence is a planned milestone, not an optional optimization. After the immediate correctness fixes (deletion pruning, embedding-dimension validation, and job reconciliation), we will migrate index persistence from JSON snapshots to a SQLite-backed store.
+
+This is motivated by the current write pattern: reindexing saves the index after each processed document. As the corpus grows, repeatedly rewriting `chunks_{model}.json` becomes the dominant cost and increases the “crash window” during long saves.
+
+**Functional Requirements**:
+- FR5.1: The system MUST store index state in SQLite tables (chunks + document hashes + engine metadata) as the primary persistence format.
+- FR5.2: The index MUST support multiple embedding models concurrently (preserving model switching) by partitioning all index rows by `model_id` (or equivalent).
+- FR5.3: Per-document updates MUST be atomic via a single SQL transaction: delete old chunks for the document, insert new chunks, upsert the document hash, and update model metadata.
+- FR5.4: The job system MUST record `model_id` in the job payload so resumes are model-safe (a job created under model A must not resume under model B without an explicit decision).
+- FR5.5: On first startup after the migration ships, the system MUST auto-migrate any existing JSON index (`chunks_{model}.json`) into SQLite, keep a backup, and mark migration completion in SQLite so the migration is idempotent.
+- FR5.6: SQLite becomes the default and required source of truth; JSON remains supported only as an import/export + emergency fallback for a defined transition window.
+
+**Non-Functional Requirements**:
+- NFR5.1: SQLite writes MUST NOT occur while holding the engine write lock (preserve the existing “short write lock” invariant). DB I/O happens outside the lock; in-memory updates happen after commit.
+- NFR5.2: SQLite configuration MUST be enforced per connection: WAL mode, `busy_timeout`, `foreign_keys=ON`, and an explicit `synchronous` level.
+- NFR5.3: Reindexing MUST remain resilient to crashes mid-document: no partially-written document state is visible after restart.
+
+**Success Criteria**:
+- Reindexing does not rewrite a monolithic JSON file after each document; it performs per-document SQL transactions.
+- Kill/restart mid-reindex does not corrupt the DB; on restart the system resumes safely without duplicate chunks.
+- Model switching cannot silently reuse an incompatible job; the resume path is model-aware and emits an actionable message.
 
 ---
 
 ## Design
 
-### D1: Unified SQLite Persistence Backend
+### D1: Canonical JSON Persistence via `rag-core` `EngineState` (Recommended)
 
-**Architecture Decision**: Implement `SqlitePersistenceBackend` as alternative to `JsonFileBackend`, leveraging existing `PersistenceBackend` trait.
+**Decision**: Adopt `rag-core`’s persistence abstractions as the single source of truth for index persistence.
 
-**Schema Design**:
+Why this is pragmatic:
+- The repo already ships `EngineState` + `JsonFileBackend` (feature enabled in the server).
+- Legacy migration already exists (legacy state can be converted; `embedding_dim` can be inferred from stored chunks).
+- Avoids introducing a new DB schema and `sqlx` usage into `rag-core` prematurely.
+
+**Design notes**:
+- Use `JsonFileBackend` for `{data_dir}/chunks_{sanitized_model}.json`.
+- Persist `embedding_dim` explicitly (infer it when missing on legacy loads).
+- Keep atomic temp-file write + rename pattern.
+
+---
+
+### D2: Embedding Dimension Discovery
+
+**Decision**: Determine embedding dimension at runtime on startup and cache it for the process lifetime.
+
+Recommended approach:
+- Embed a fixed canary text once at startup (e.g., `"The quick brown fox jumps over the lazy dog"`).
+- Dimension = returned vector length.
+- Store this value in the embedding service so `EmbeddingBackend::dimension()` returns a real number.
+
+Optional (P1): persist canary embedding to detect drift in weights (cosine similarity warning threshold).
+
+---
+
+### D3: Deletion Sync (“Prune” Step)
+
+**Decision**: Treat deletion sync as part of the existing reindex flow to avoid extra MCP surface area.
+
+Algorithm sketch:
+1. Discover current PDFs in `DOCUMENTS_DIR`.
+2. Build set of current document basenames.
+3. Compare to the set of indexed documents (`document_hashes` keys or `engine.list_documents()`).
+4. For any indexed doc missing from disk: call `rag-core`’s `remove_document`.
+5. Save index state after pruning (and again after processing changed docs).
+
+This preserves incremental behavior while eliminating ghost results.
+
+---
+
+### D4: Job/Index Reconciliation
+
+**Decision**: Use restart-time reconciliation rather than transactionally unifying jobs + index (simpler, adequate for local-first).
+
+Implementation sketch:
+- On startup, for each resumable reindex job:
+  - validate payload/documents dir
+  - run a quick filesystem scan
+  - if nothing needs processing (all docs unchanged + deletions pruned), mark job completed with message “No changes detected; index already up to date.”
+  - otherwise, resume as today
+
+---
+
+### D5: SQLite Index Store (Mandatory, Phase 5)
+
+This PRD commits to a full SQLite-backed index store after the immediate correctness fixes ship.
+
+#### Decision Matrix (Architecture)
+
+| Option | What it is | Pros | Cons |
+|---|---|---|---|
+| A | Keep JSON snapshots | Simple; already works | O(N) rewrite per save; scale pain; larger crash window |
+| B | Store whole `EngineState` as a blob in SQLite | Transactional; easy migration | Still O(N) write; mostly “JSON-in-a-DB” |
+| C (Chosen) | Granular SQLite tables (documents + chunks) | ACID per-doc updates; fast incremental writes; constraints/indexes | More schema + migration work |
+
+#### Chosen Approach
+
+- Implement a **server-level** `SqliteIndexStore` using the existing `sqlx` SQLite stack.
+- Use a **single SQLite DB file** in `DATA_DIR` for jobs + index tables (shared pool, WAL).
+- Partition all index data by `model_id` to preserve the current “one index per model” behavior without needing separate files.
+- Keep `rag-core` as the in-memory search engine; SQLite is the durable store of record. The engine is hydrated from SQLite on startup and updated in-memory after successful commits.
+
+#### Concrete Schema (Draft)
 
 ```sql
--- Chunks table: stores document chunks with embeddings
-CREATE TABLE chunks (
-    chunk_id TEXT PRIMARY KEY NOT NULL,
-    document_name TEXT NOT NULL,
-    text TEXT NOT NULL,
-    embedding BLOB NOT NULL,  -- f32 array serialized via bincode
-    page_number INTEGER,
-    section TEXT,
-    metadata TEXT,  -- JSON for extensibility
-    created_at INTEGER NOT NULL,
-    INDEX idx_chunks_document (document_name)
-);
-
--- Document hashes table: for change detection
-CREATE TABLE document_hashes (
-    document_name TEXT PRIMARY KEY NOT NULL,
-    hash TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
--- Engine metadata table: single row for model config
-CREATE TABLE engine_metadata (
-    id INTEGER PRIMARY KEY CHECK (id = 1),  -- Enforce single row
-    schema_version INTEGER NOT NULL,
-    embedding_model_id TEXT NOT NULL,
+-- Model metadata (one row per embedding model)
+CREATE TABLE IF NOT EXISTS rag_models (
+    model_id TEXT PRIMARY KEY NOT NULL,
     embedding_dim INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
     needs_reindex INTEGER NOT NULL DEFAULT 0,
-    canary_embedding BLOB,  -- For drift detection
+    canary_embedding BLOB,
+    created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 
--- Reuse existing jobs table from JobManager
--- (Already has: job_id, status, job_type, payload, progress, total, error, started_at, updated_at)
+-- Document-level hashes (one row per document per model)
+CREATE TABLE IF NOT EXISTS rag_documents (
+    model_id TEXT NOT NULL,
+    document_name TEXT NOT NULL,
+    document_hash TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (model_id, document_name),
+    FOREIGN KEY (model_id) REFERENCES rag_models(model_id) ON DELETE CASCADE
+);
+
+-- Chunk store (many rows per document per model)
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    model_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    document_name TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    embedding BLOB NOT NULL,          -- f32 little-endian bytes
+    page_number INTEGER NOT NULL,
+    section TEXT,
+    metadata_json TEXT NOT NULL,      -- serde_json of ChunkMetadata
+    tags_json TEXT NOT NULL,          -- serde_json of HashSet<String>
+    resolution TEXT NOT NULL,         -- enum as string
+    parent_id TEXT,
+    PRIMARY KEY (model_id, chunk_id),
+    FOREIGN KEY (model_id, document_name)
+        REFERENCES rag_documents(model_id, document_name)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_model_doc
+    ON rag_chunks(model_id, document_name);
 ```
 
-**Transaction Boundaries**:
+Notes:
+- We intentionally align identity keys with current behavior (`document_name` is a basename today) to minimize behavioral changes.
+- Embeddings are stored as raw bytes (no extra serialization dependency required); conversion is `Vec<f32> <-> Vec<u8>` via `to_le_bytes`/`from_le_bytes`.
 
-```rust
-// Atomic job completion with chunk persistence
-async fn complete_job_with_chunks(
-    tx: &mut SqliteTransaction,
-    job_id: &str,
-    chunks: Vec<DocumentChunk>,
-) -> Result<()> {
-    // 1. Insert/update chunks
-    for chunk in chunks {
-        sqlx::query("INSERT OR REPLACE INTO chunks (...) VALUES (...)")
-            .execute(&mut *tx)
-            .await?;
-    }
+#### Transaction Boundaries (Per-Document, Atomic)
 
-    // 2. Update job status to completed
-    sqlx::query("UPDATE jobs SET status = 'completed', updated_at = ? WHERE job_id = ?")
-        .execute(&mut *tx)
-        .await?;
+For each processed document:
+1. Begin transaction
+2. `DELETE FROM rag_documents WHERE (model_id, document_name)=...` (cascades chunks)
+3. `INSERT INTO rag_documents (...)`
+4. `INSERT INTO rag_chunks (...)` for each chunk
+5. Update `jobs.progress` and/or `jobs.status` if desired (same DB, same tx)
+6. Commit
+7. Apply the same prepared document to the in-memory `rag-core` engine (outside the transaction)
 
-    // 3. Commit transaction (both succeed or both rollback)
-    tx.commit().await?;
-    Ok(())
-}
-```
+This preserves atomicity (no partial document state), while keeping engine locks short by performing DB I/O outside the engine write lock.
 
-**Migration Strategy**:
+#### Migration Strategy (JSON → SQLite, Idempotent)
 
-```rust
-// On first startup with SqlitePersistenceBackend:
-// 1. Check if chunks_{model}.json exists
-// 2. If yes, load JSON state
-// 3. Insert all chunks into SQLite via transaction
-// 4. Rename JSON to chunks_{model}.json.migrated (keep backup)
-// 5. Log migration completion
-```
-
-**Implementation Files**:
-- `crates/rag-core/src/persistence/sqlite.rs` (new file, ~400 LOC)
-- `src/rag_engine.rs` (modify: inject SqlitePersistenceBackend)
-- `crates/rag-core/src/persistence.rs` (add trait helper methods for transactions)
-
----
-
-### D2: Job Checkpointing
-
-**Checkpoint Data Structure**:
-
-```rust
-#[derive(Serialize, Deserialize)]
-struct ReindexCheckpoint {
-    job_id: String,
-    processed_documents: HashSet<String>,  // SHA-256 hashes
-    total_documents: usize,
-    last_checkpoint_at: i64,
-}
-```
-
-**Checkpoint Strategy**:
-- Save checkpoint every 10 documents (configurable via `RAG_CHECKPOINT_INTERVAL`)
-- Store as JSON in `jobs.payload` column (already exists)
-- On resume: skip documents in `processed_documents` set
-
-**Resume Logic**:
-
-```rust
-// WorkerSupervisor::run() startup sequence
-async fn run(&self) -> Result<()> {
-    // Find jobs with status = InProgress
-    let resumable_jobs = self.job_manager.find_resumable_jobs().await?;
-
-    for job in resumable_jobs {
-        // Parse checkpoint from payload
-        if let Some(checkpoint) = parse_checkpoint(&job.payload) {
-            tracing::info!("Resuming job {} from checkpoint ({}/{} docs processed)",
-                job.job_id, checkpoint.processed_documents.len(), checkpoint.total_documents);
-
-            // Send resume request to worker with checkpoint context
-            self.job_tx.send(JobRequest::Resume { job_id: job.job_id, checkpoint }).await?;
-        }
-    }
-
-    // Continue with normal event loop
-    // ...
-}
-```
-
-**Implementation Files**:
-- `src/worker.rs` (modify: add checkpoint save logic, resume handling)
-- `src/job_manager.rs` (modify: add `find_resumable_jobs()` method)
-
----
-
-### D3: Embedding Configuration Validation
-
-**Validation Sequence**:
-
-```rust
-// In RagEngine::new() or server startup
-async fn validate_embedding_config(backend: &impl EmbeddingBackend) -> Result<()> {
-    // 1. Health check: Verify Ollama is reachable
-    backend.health_check().await
-        .map_err(|e| anyhow!("Ollama unreachable at {}: {}", backend.url(), e))?;
-
-    // 2. Model availability: Verify model exists
-    backend.verify_model_exists().await
-        .map_err(|e| anyhow!("Embedding model '{}' not found in Ollama. Run: ollama pull {}",
-            backend.model_id(), backend.model_id()))?;
-
-    // 3. Dimension validation: Check against existing index
-    if let Some(existing_state) = persistence_backend.load()? {
-        let expected_dim = existing_state.embedding_dim;
-        let actual_dim = backend.dimension();
-
-        if expected_dim != actual_dim {
-            return Err(anyhow!(
-                "Embedding dimension mismatch:\n  \
-                 Index expects: {}D (model: {})\n  \
-                 Current model: {}D (model: {})\n\n  \
-                 Options:\n  \
-                 - Switch back to compatible model\n  \
-                 - Run full reindex with new model",
-                expected_dim, existing_state.embedding_model_id,
-                actual_dim, backend.model_id()
-            ));
-        }
-    }
-
-    // 4. Canary embedding drift check (if index exists)
-    if let Some(existing_state) = persistence_backend.load()? {
-        const CANARY_TEXT: &str = "The quick brown fox jumps over the lazy dog";
-        let current_embedding = backend.embed(CANARY_TEXT).await?;
-
-        if let Some(stored_canary) = existing_state.canary_embedding {
-            let similarity = cosine_similarity(&current_embedding, &stored_canary);
-            if similarity < 0.95 {
-                tracing::warn!(
-                    "Canary embedding drift detected (similarity: {:.3}). \
-                     Model weights may have changed. Reindex recommended.",
-                    similarity
-                );
-            }
-        } else {
-            // First run: store canary for future drift detection
-            // (save via persistence backend)
-        }
-    }
-
-    Ok(())
-}
-```
-
-**EmbeddingBackend Trait Extension**:
-
-```rust
-// Add to crates/rag-core/src/traits.rs
-pub trait EmbeddingBackend: Send + Sync {
-    // ... existing methods ...
-
-    /// Health check: verify backend is reachable
-    async fn health_check(&self) -> Result<(), EmbeddingError>;
-
-    /// Verify model exists in backend
-    async fn verify_model_exists(&self) -> Result<(), EmbeddingError>;
-
-    /// Get backend URL for error messages
-    fn url(&self) -> &str;
-}
-```
-
-**Implementation Files**:
-- `src/embeddings.rs` (add health_check, verify_model_exists methods)
-- `crates/rag-core/src/traits.rs` (extend EmbeddingBackend trait)
-- `src/main.rs` (add validation call in startup sequence)
-
----
-
-### D4: Incremental Document Sync
-
-**Change Detection Algorithm**:
-
-```rust
-async fn detect_document_changes(
-    documents_dir: &Path,
-    existing_hashes: &HashMap<String, String>,
-) -> Result<DocumentChangeset> {
-    let mut changeset = DocumentChangeset {
-        added: vec![],
-        modified: vec![],
-        deleted: vec![],
-    };
-
-    // Scan filesystem for current documents
-    let current_docs = discover_pdf_paths(documents_dir)?;
-    let current_hashes: HashMap<String, String> = current_docs
-        .iter()
-        .map(|path| {
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let hash = compute_file_hash(path)?;
-            Ok((name, hash))
-        })
-        .collect::<Result<_>>()?;
-
-    // Detect added and modified
-    for (name, hash) in &current_hashes {
-        match existing_hashes.get(name) {
-            None => changeset.added.push(name.clone()),
-            Some(old_hash) if old_hash != hash => changeset.modified.push(name.clone()),
-            Some(_) => {} // Unchanged
-        }
-    }
-
-    // Detect deleted
-    for name in existing_hashes.keys() {
-        if !current_hashes.contains_key(name) {
-            changeset.deleted.push(name.clone());
-        }
-    }
-
-    Ok(changeset)
-}
-```
-
-**Incremental Index Update**:
-
-```rust
-async fn sync_documents(
-    rag_engine: &mut RagEngine,
-    changeset: DocumentChangeset,
-) -> Result<SyncSummary> {
-    let mut summary = SyncSummary::default();
-
-    // Remove deleted documents
-    for doc_name in &changeset.deleted {
-        let removed_count = rag_engine.remove_document(doc_name).await?;
-        summary.removed_chunks += removed_count;
-    }
-
-    // Update modified documents (remove old + add new)
-    for doc_name in &changeset.modified {
-        rag_engine.remove_document(doc_name).await?;
-        let chunks = rag_engine.prepare_document(doc_name, /*...*/).await?;
-        rag_engine.upsert_prepared_document(chunks).await?;
-        summary.updated_docs += 1;
-    }
-
-    // Add new documents
-    for doc_name in &changeset.added {
-        let chunks = rag_engine.prepare_document(doc_name, /*...*/).await?;
-        rag_engine.upsert_prepared_document(chunks).await?;
-        summary.added_docs += 1;
-    }
-
-    // Rebuild indexes incrementally (if backend supports it)
-    // For initial impl: full rebuild of AnnIndex/LexicalIndex (fast for small changes)
-    rag_engine.rebuild_indexes().await?;
-
-    Ok(summary)
-}
-```
-
-**MCP Tool Addition**:
-
-```rust
-#[tool(description = "Incrementally sync document changes (faster than full reindex)")]
-async fn sync_documents(&self) -> Result<CallToolResult, McpError> {
-    // Similar to start_reindex, but creates JobType::Sync instead
-    // Worker detects changes and applies incremental updates
-    // ...
-}
-```
-
-**Implementation Files**:
-- `src/worker.rs` (add sync_documents_incremental function)
-- `crates/rag-core/src/engine.rs` (add remove_document, rebuild_indexes methods)
-- `src/mcp_server.rs` (add sync_documents MCP tool)
-- `src/job_manager.rs` (add JobType::Sync variant)
+- On first run with the SQLite backend:
+  - Load existing JSON index (`chunks_{model}.json`) into memory
+  - Import into SQLite inside a transaction (insert model metadata + documents + chunks)
+  - Rename JSON to `.migrated.bak` (do not delete)
+  - Persist a “migration complete” marker in SQLite (e.g., in `rag_models.schema_version` or a dedicated `rag_meta` table)
+- If migration is interrupted, restart must be able to retry safely (either full rollback due to transaction, or detect partial import via the marker and re-run).
 
 ---
 
 ## Implementation Tasks
 
-### Phase 1: Unified SQLite Persistence (P0)
+### Phase 1: Persistence Unification + Metadata (P0)
 
-**Task 1.1: Design SQLite Schema**
-- [ ] Create SQL migration file: `migrations/001_initial_schema.sql`
-- [ ] Define chunks, document_hashes, engine_metadata tables
-- [ ] Add indexes for performance (idx_chunks_document)
-- [ ] Validate schema with SQLite CLI
+**Task 1.1: Make `rag-core` persistence canonical**
+- [ ] Adopt `EngineState` + `JsonFileBackend` as the server’s save/load path.
+- [ ] Remove/avoid the parallel persistence path in the server.
+- [ ] Ensure legacy JSON indexes still load via migration (no user action).
 
-**Task 1.2: Implement SqlitePersistenceBackend**
-- [ ] Create `crates/rag-core/src/persistence/sqlite.rs`
-- [ ] Implement PersistenceBackend trait methods (save, load)
-- [ ] Add transaction helpers (save_chunks_atomic, update_metadata)
-- [ ] Implement embedding serialization (f32 array → BLOB via bincode)
-- [ ] Add connection pooling configuration (reuse JobManager pool)
-
-**Task 1.3: JSON → SQLite Migration**
-- [ ] Detect existing chunks_{model}.json on startup
-- [ ] Load JSON state via JsonFileBackend
-- [ ] Insert all data into SQLite via single transaction
-- [ ] Rename JSON to .migrated (keep backup)
-- [ ] Add migration logging + progress indication
-
-**Task 1.4: Integrate with JobManager**
-- [ ] Modify worker.rs to use transactions for job completion
-- [ ] Ensure chunk inserts + job status update are atomic
-- [ ] Add rollback handling on worker failure
-- [ ] Update rag_engine.rs to inject SqlitePersistenceBackend
-
-**Task 1.5: Testing**
-- [ ] Unit test: SqlitePersistenceBackend save/load round-trip
-- [ ] Integration test: crash simulation (kill -9 during save)
-- [ ] Migration test: JSON → SQLite with 10K chunks
-- [ ] Verify no orphaned jobs after crashes
+**Task 1.2: Persist and expose `embedding_dim`**
+- [ ] Ensure loaded state has a valid `embedding_dim` (infer from chunks if needed).
+- [ ] Persist `embedding_dim` explicitly on saves.
+- [ ] Expose `embedding_dim` in `get_stats`/health outputs.
 
 **Acceptance Criteria**:
-- [x] All chunks, hashes, metadata stored in SQLite
-- [x] Job status and chunk writes are atomic (single transaction)
-- [x] Crash recovery leaves system in consistent state
-- [x] JSON migration completes successfully
-- [x] Backward compatibility maintained
+- [ ] Existing users upgrade seamlessly; either index loads or `needs_reindex=true` with clear messaging.
+- [ ] The server has one persistence implementation path (no duplication).
 
 ---
 
-### Phase 2: Job Checkpointing (P0)
+### Phase 2: Deletion Synchronization (P0)
 
-**Task 2.1: Checkpoint Data Model**
-- [ ] Define ReindexCheckpoint struct in worker.rs
-- [ ] Add serialization (serde JSON) for jobs.payload column
-- [ ] Define checkpoint interval constant (default: 10 docs)
-- [ ] Add configuration: RAG_CHECKPOINT_INTERVAL env var
+**Task 2.1: Implement deletion pruning in reindex flow**
+- [ ] Before embedding/upserting, prune indexed docs missing from disk.
+- [ ] Record count of removed documents and removed chunks.
+- [ ] Save state after pruning.
 
-**Task 2.2: Worker Checkpoint Logic**
-- [ ] Modify reindex_documents() to save checkpoints every N docs
-- [ ] Store checkpoint in jobs.payload via job_manager.update_payload()
-- [ ] Add processed_documents HashSet to track completed work
-- [ ] Ensure checkpoint saves are atomic (within job update transaction)
-
-**Task 2.3: Resume Logic**
-- [ ] Add WorkerSupervisor::find_resumable_jobs() call on startup
-- [ ] Parse checkpoint from job.payload
-- [ ] Skip processed documents during resume
-- [ ] Log resume progress ("Resuming job X from 50/100 documents")
-
-**Task 2.4: Testing**
-- [ ] Test: kill job at 25%, 50%, 75% completion → resume → verify completion
-- [ ] Test: no duplicate chunks after resume (idempotent)
-- [ ] Test: checkpoint interval configuration (1, 10, 50 docs)
-- [ ] Verify resume is faster than full reindex (90%+ speedup)
+**Task 2.2: Add tests**
+- [ ] Integration test: create an index with doc A → delete A on disk → run reindex → doc A not returned in results and not listed.
 
 **Acceptance Criteria**:
-- [x] Jobs save progress checkpoints every N documents
-- [x] Resumed jobs skip already-processed documents
-- [x] Resume completes in <10% of full reindex time
-- [x] No data corruption or duplication after resume
+- [ ] Ghost documents never appear after reindex/sync.
 
 ---
 
-### Phase 3: Embedding Validation (P0)
+### Phase 3: Dimension Validation + Drift Detection (P1)
 
-**Task 3.1: EmbeddingBackend Trait Extension**
-- [ ] Add health_check() method to trait
-- [ ] Add verify_model_exists() method to trait
-- [ ] Add url() method to trait
-- [ ] Implement methods in OllamaEmbeddingService
+**Task 3.1: Implement real embedding dimension**
+- [ ] Embed canary text on startup; set `EmbeddingBackend::dimension()` accordingly (non-zero).
 
-**Task 3.2: Validation Logic**
-- [ ] Create validate_embedding_config() function
-- [ ] Add dimension mismatch check vs existing index
-- [ ] Add canary embedding drift detection (cosine similarity <0.95)
-- [ ] Format error messages with actionable remediation
+**Task 3.2: Validate on load**
+- [ ] Compare persisted `embedding_dim` to current backend `dimension()` when an index is present.
+- [ ] On mismatch: enter safe state (`needs_reindex=true`, do not use incompatible embeddings for search).
+- [ ] Provide clear remediation message.
 
-**Task 3.3: Integration + Testing**
-- [ ] Call validation in server startup (main.rs)
-- [ ] Add canary storage to engine_metadata table
-- [ ] Test: wrong model fails with clear error
-- [ ] Test: unreachable Ollama fails with clear error
-- [ ] Test: dimension mismatch prevents startup
+**Task 3.3 (Optional): Canary drift warning**
+- [ ] Persist canary embedding vector in state.
+- [ ] On startup, compare cosine similarity; warn if below threshold.
 
 **Acceptance Criteria**:
-- [x] Startup validates Ollama connectivity
-- [x] Startup validates model exists and dimension matches
-- [x] Canary drift detection warns on model weight changes
-- [x] Error messages include remediation steps
+- [ ] No dimension mismatch runtime panics; mismatch is detected and handled.
 
 ---
 
-### Phase 4: Incremental Sync (P1)
+### Phase 4: Job/Index Reconciliation Improvements (P1)
 
-**Task 4.1: Change Detection**
-- [ ] Implement detect_document_changes() in worker.rs
-- [ ] Compare filesystem SHA-256 hashes vs existing document_hashes
-- [ ] Classify documents as added, modified, deleted
-- [ ] Return DocumentChangeset struct
-
-**Task 4.2: Incremental Update Methods**
-- [ ] Add RagEngine::remove_document() method
-- [ ] Add RagEngine::rebuild_indexes() method (incremental if possible)
-- [ ] Update AnnIndex to support remove operation
-- [ ] Update LexicalIndex to support remove operation
-
-**Task 4.3: Sync Job Implementation**
-- [ ] Add JobType::Sync variant
-- [ ] Implement sync_documents_incremental() in worker.rs
-- [ ] Call detect_document_changes(), apply changeset
-- [ ] Log sync summary (X added, Y modified, Z removed)
-
-**Task 4.4: MCP Tool + Testing**
-- [ ] Add sync_documents MCP tool in mcp_server.rs
-- [ ] Test: add 1 PDF → sync completes in <1 min
-- [ ] Test: modify 3 PDFs → only those 3 re-embedded
-- [ ] Test: delete 2 PDFs → chunks removed, not in search results
-- [ ] Verify Hit Rate@5 unchanged vs full reindex
+**Task 4.1: Reconcile resumable jobs**
+- [ ] On startup, verify payload; if invalid, mark job failed.
+- [ ] If job is resumable but no work remains, mark completed with message.
+- [ ] Ensure multiple stale jobs do not block server startup (limit/guardrail).
 
 **Acceptance Criteria**:
-- [x] Syncing individual documents completes in <2 minutes
-- [x] Deleted documents removed from index
-- [x] Search quality (Hit Rate@5) unchanged vs full reindex
-- [x] MCP tool sync_documents available to Claude Desktop
+- [ ] “Zombie jobs” self-heal on restart; statuses converge quickly to truth.
+
+---
+
+### Phase 5: SQLite Index Persistence (Mandatory)
+
+This phase is mandatory, but intentionally scheduled after Phases 1–4 so we first ship correctness fixes with minimal moving parts.
+
+**Task 5.1: Database file + schema + migrations**
+- [ ] Decide on DB filename (`rag.db` preferred) and migrate from `jobs.db` safely (rename/copy-on-first-run).
+- [ ] Add schema migrations for `rag_models`, `rag_documents`, `rag_chunks` (and any meta tables).
+- [ ] Ensure migrations run at startup (single place, deterministic), and PRAGMAs are enforced per connection.
+
+**Task 5.2: Implement `SqliteIndexStore` (server crate)**
+- [ ] `init()` / `ensure_schema()` (migrations + PRAGMAs)
+- [ ] `load_model(model_id)` → stream chunks into in-memory engine on startup
+- [ ] `upsert_document_atomic(model_id, document_name, document_hash, chunks)` (single transaction)
+- [ ] `delete_document(model_id, document_name)` / `prune_missing_documents(model_id, current_docs)`
+- [ ] Store/update `embedding_dim`, `needs_reindex`, optional `canary_embedding` in `rag_models`
+
+**Task 5.3: Integrate with reindex + job system**
+- [ ] Update reindex job payload to include `{ documents_dir, model_id, embedding_dim }` (JSON).
+- [ ] On resume: if payload model differs from current model, mark job failed with remediation (“re-run reindex under current model”).
+- [ ] Replace per-document JSON saves with per-document SQL transactions; update job progress in the same DB.
+- [ ] Ensure deletion pruning happens in SQLite as well as in-memory (no ghost docs).
+
+**Task 5.4: JSON → SQLite migration (one-time, idempotent)**
+- [ ] If legacy `chunks_{model}.json` exists, import into SQLite within a transaction.
+- [ ] Write a migration-complete marker (and schema version) in SQLite.
+- [ ] Rename legacy JSON to `.migrated.bak` (never delete automatically).
+- [ ] Migration can be safely re-run (no duplicates; idempotent marker prevents double-import).
+
+**Task 5.5: De-risking tests (must-have)**
+- [ ] **Per-document atomicity**: fault-inject mid-transaction → no partial doc state.
+- [ ] **Kill/restart**: crash mid-reindex → restart → DB integrity OK; job resumes/settles; no duplicates.
+- [ ] **Multi-model isolation**: index same doc under two models → no cross-contamination.
+- [ ] **DB busy/locks**: concurrent `get_job_status` polling during reindex → no `SQLITE_BUSY` surfaced (retries/backoff).
+- [ ] **Hydration correctness**: index → restart → search returns same docs; delete → restart → doc stays deleted.
+- [ ] **Migration**: JSON fixture → import → counts match; backup exists; re-run import is a no-op.
+
+**Acceptance Criteria**:
+- [ ] SQLite is the primary index store for all runs (post-migration).
+- [ ] Index updates are per-document transactions; no monolithic JSON rewrites during reindex.
+- [ ] The system remains resilient to crashes and restarts; no corruption and no duplicate chunk growth.
 
 ---
 
 ## Testing Strategy
 
 ### Unit Tests
-- SqlitePersistenceBackend: save/load round-trip
-- Checkpoint serialization/deserialization
-- Change detection algorithm (added/modified/deleted)
-- Embedding validation logic
+- Embedding dimension discovery (canary embed length)
+- Dimension mismatch handling transitions to safe state
+- Deletion diff logic (added/modified/deleted classification)
+- EngineState migration from legacy persisted formats
+- Embedding BLOB encoding/decoding round-trip (f32 <-> little-endian bytes)
+- SQLite schema/migration marker idempotency
 
 ### Integration Tests
-- **Crash Recovery**: Kill process during indexing → restart → verify consistency
-- **Resume**: Kill at 50% → resume → verify no duplicates, faster completion
-- **Migration**: JSON → SQLite with 10K chunks → verify all data present
-- **Incremental Sync**: Add/modify/delete PDFs → sync → verify correct chunks
+- **Ghost deletion**: index doc → delete file → reindex → doc removed everywhere
+- **Restart resume**: crash mid-reindex → restart → completes without duplication
+- **Dimension mismatch**: load index with dim A → backend dim B → safe state + clear message
+- **JSON → SQLite migration**: import legacy JSON → counts + hashes match; backup exists; rerun is no-op
+- **Per-document atomicity**: fail mid-transaction → no partial document state visible after restart
+- **Multi-model isolation**: two models indexed concurrently → no cross-contamination
+- **DB lock resilience**: poll jobs/status during indexing → no surfaced SQLITE_BUSY (retries/backoff)
 
 ### Acceptance Tests
-- **End-to-End**: Full workflow with crashes, resumes, syncs
-- **Eval Framework**: Run baseline eval after all changes → Hit Rate@5 ≥ 77.8%
-- **Performance**: Measure indexing, search, sync latencies vs baseline
+- Run eval framework baseline after changes: no meaningful quality regressions.
+- Verify typical “add a PDF” workflow remains incremental (only changed docs re-embedded).
 
 ---
 
 ## Rollout Strategy
 
-### Phase 1: Unified SQLite Persistence
-**Rollout**: Feature flag `USE_SQLITE_PERSISTENCE` (default: false for first release)
-**Dependencies**: None
+### Phase 1-2 (P0)
+- Roll out as default behavior (no feature flags), since changes are backward-compatible and correctness-focused.
+- Keep legacy index backups where appropriate during migration.
 
-### Phase 2: Job Checkpointing
-**Rollout**: Enabled by default (automatically resumes jobs on startup)
-**Dependencies**: Phase 1 (SQLite persistence required for atomic checkpoints)
-
-### Phase 3: Embedding Validation
-**Rollout**: Enabled by default (fail-fast on misconfiguration)
-**Dependencies**: None (can be deployed independently)
-
-### Phase 4: Incremental Sync
-**Rollout**: New MCP tool available, manual invocation (gradual adoption)
-**Dependencies**: Phase 1 (SQLite persistence required for efficient change detection)
+### Phase 5 (SQLite, Mandatory)
+- Roll out SQLite as the default index store with automatic JSON → SQLite migration and automatic `.migrated.bak` backups.
+- Provide a short-lived emergency escape hatch (one release window): allow forcing legacy JSON read-only mode if SQLite migration fails unexpectedly.
+- After the transition window: remove the escape hatch; keep JSON support only for import/export and backups.
 
 ---
 
 ## Success Metrics
 
-### Pre-Implementation Baseline
-- **Indexing Time**: 20+ minutes for 70 PDFs (85K chunks)
-- **Crash Recovery**: Manual intervention required (delete chunks.json, reindex)
-- **Model Switch**: Silent corruption risk
-- **Document Update**: Full reindex (20+ minutes)
+### Primary (Correctness)
+- **Zero ghost results** after deleting PDFs and running reindex/sync.
+- **Zero dimension mismatch panics**; mismatches produce clear “reindex required” state.
 
-### Post-Implementation Targets
-- **Indexing Time**: Unchanged (20+ minutes for full reindex)
-- **Crash Recovery**: Automatic resume, <2 minutes to complete from 50% checkpoint
-- **Model Switch**: Fail-fast with clear error message
-- **Document Update**: Incremental sync, <1 minute for single PDF
-
-### Quality Gates
-- [ ] Zero data corruption in crash simulation tests (20 iterations)
-- [ ] Job resume success rate: 100%
-- [ ] Eval framework Hit Rate@5: ≥ 77.8% (no degradation)
-- [ ] Incremental sync latency: <2 minutes for 5 changed documents
+### Secondary (UX / Ops)
+- Reindex resumes safely after crash/restart without duplicating chunks.
+- Job statuses converge to accurate state after restart (no long-lived “in progress” confusion).
 
 ---
 
 ## Risk Mitigation
 
-### Risk 1: SQLite Performance Degradation
-**Mitigation**:
-- Use BLOB for embeddings (efficient binary storage)
-- Add indexes on document_name for fast lookups
-- Enable WAL mode for concurrent reads during writes
-- Benchmark read performance vs JSON (accept <10% degradation)
+### Risk 1: Startup/sync overhead due to deletion diff
+**Mitigation**: Compare basenames and hashes without extracting PDF text unless needed; keep deletion prune O(docs).
 
-### Risk 2: Migration Failures
-**Mitigation**:
-- Keep JSON backups (.migrated files)
-- Add rollback mechanism (delete SQLite, restore JSON)
-- Test migration with production-scale data (100K chunks)
+### Risk 2: Legacy migration edge cases
+**Mitigation**: Keep legacy backups; add explicit migration tests; on parse failures, fall back to “needs reindex” rather than crash.
 
-### Risk 3: Resume Logic Bugs (Duplicate Chunks)
-**Mitigation**:
-- Use deterministic chunk IDs (hash of document + chunk index)
-- Add unique constraint on chunks.chunk_id
-- Verify no duplicates in integration tests
-
-### Risk 4: Incremental Sync Quality Degradation
-**Mitigation**:
-- Run full eval framework after sync operations
-- Compare Hit Rate@5 vs full reindex baseline
-- Add regression tests for known queries
+### Risk 3: SQLite migration or locking regressions
+**Mitigation**: Keep transactions per-document, enforce WAL/PRAGMAs per connection, add retries/backoff for `SQLITE_BUSY`, and ship migration idempotency + rollback backups (`.migrated.bak`).
 
 ---
 
 ## Open Questions
 
-1. **SQLite File Location**: Should chunks.db be separate from jobs.db or unified?
-   - **Recommendation**: Unified database for atomic transactions. Single file simplifies backup/restore.
+1. **Failure mode preference for dimension mismatch**: fail server startup vs start in “needs reindex” mode?
+   - Recommendation: start but block vector search until reindex (keeps MCP tools usable).
 
-2. **Embedding Compression**: Should we compress f32 arrays (e.g., zstd) for storage?
-   - **Recommendation**: Defer to future optimization. Measure SQLite file size first.
+2. **Deletion prune trigger**: run only on `start_reindex`, or also on startup?
+   - Recommendation: run on reindex; optionally run on startup if index is loaded and DOCUMENTS_DIR is accessible.
 
-3. **Canary Text**: Should canary be configurable or hardcoded?
-   - **Recommendation**: Hardcoded for consistency. Document in CLAUDE.md.
+3. **SQLite DB filename**: keep `jobs.db` (now multi-purpose) vs rename to `rag.db`?
+   - Recommendation: rename to `rag.db` with a safe one-time migration (rename/copy), but tolerate `jobs.db` for backward compatibility.
 
-4. **Incremental AnnIndex Rebuild**: Full rebuild or incremental add/remove?
-   - **Recommendation**: Start with full rebuild (fast for <10K deltas). Optimize later if needed.
+4. **Document identity**: should the durable key remain basename-only (`document_name`) or become a stable relative path under `DOCUMENTS_DIR` to avoid collisions?
+   - Recommendation: keep basename for Phase 5 to avoid user-facing behavior changes; revisit as a follow-on hardening task.
 
 ---
 
 ## Appendix
 
-### A1: Related Audit Findings
+### A1: Concrete Repo Anchors
 
-**STAT-REPORT-172612**:
-- E8, E9: In-memory state monolith (Arc<RwLock>)
-- E39, E40: Corruption recovery missing
-- E17: Embedding drift detection missing
-
-**STAT-REPORT-180809**:
-- E6-E8: Vector-relational desynchronization
-- E70: No incremental sync
-- E73: No job resume
-- E25-E26: No model validation
-
-**Gemini Peer Review**:
-- Unified SQLite: Impact 10/10
-- Job Checkpointing: Impact 8/10
-- Ollama Validation: Impact 7/10
-- Sharded Locking (DashMap): Impact 6/10 (deferred to future)
-
----
-
-### A2: Alternative Approaches Considered
-
-**Alternative 1: Distributed Locking (e.g., etcd, Redis)**
-- **Rejected**: Over-engineered for solo dev use case. Adds external dependency.
-
-**Alternative 2: Full Migration to Vector DB (Qdrant, Milvus)**
-- **Rejected**: Breaks privacy-first goal (requires external service). Future consideration for scale.
-
-**Alternative 3: DashMap for Sharded Locking**
-- **Deferred**: Tactical fix for contention but doesn't solve OOM or atomicity. Consider in Phase 5.
-
-**Alternative 4: Incremental AnnIndex (LSH sharding)**
-- **Deferred**: Complex implementation. Full rebuild is acceptable for <10K changes.
+- Index persistence and corruption handling: `crates/rag-core/src/engine.rs`, `tests/rag_persistence.rs`
+- Persistence abstractions: `crates/rag-core/src/persistence.rs`
+- Job persistence + single-active-reindex semantics: `src/job_manager.rs`
+- Resume behavior and per-document saves: `src/worker.rs`
+- Embedding startup validation (connectivity/model existence): `src/embeddings.rs`
 
 ---
 
 ## Conclusion
 
-This PRD addresses the three highest-impact architectural improvements for rust-local-rag, validated by dual comprehensive audits and Gemini peer review. The proposed changes eliminate data corruption risks, enable graceful crash recovery, and prepare the system for incremental operation—all critical capabilities for a privacy-preserving local RAG system.
+This revised PRD focuses first on closing the remaining correctness gaps (deletion sync, dimension validation, job reconciliation), then delivers a **mandatory** Phase 5 migration to a granular SQLite index store for durable, incremental persistence. It keeps the system local-first and solo-dev friendly while eliminating the highest-impact sources of silent index drift and scaling pain.
 
-**Key Outcomes**:
-1. **Data Safety**: Atomic transactions eliminate desynchronization risk
-2. **Operational Resilience**: Job checkpointing enables crash recovery
-3. **Configuration Hardening**: Fail-fast validation prevents silent corruption
-4. **Incremental Efficiency**: Sync enables <2 minute updates vs 20+ minute reindexes
-
-**Next Steps**:
-1. Review PRD with stakeholder (solo dev = self-review)
-2. Begin Phase 1 implementation (Unified SQLite Persistence)
-3. Validate with crash recovery tests
-4. Iterate based on lessons learned
-
----
-
-**Document Status**: Ready for Implementation
-**Review Date**: 2026-01-21
-**Approver**: Self (Solo Developer)
+**Document Status**: Draft → Ready for implementation after self-review  
+**Review Date**: 2026-01-21  
+**Approver**: Self (Solo Developer)  
