@@ -1,4 +1,0 @@
-Top Bar Scan Results:
-1. EMBEDDING_BATCH_SIZE is parsed ad-hoc in src/rag_engine.rs without bounds checking. It also violates the RAG_ prefix convention.
-2. RAG_*_WEIGHT variables in src/rag_engine.rs silently fallback to defaults on parse errors, potentially hiding configuration mistakes.
-3. RAG_EMBEDDING_CACHE_SIZE in src/config.rs has an upper bound but no lower bound (other than >0), which is minor but technically a risk for performance.
