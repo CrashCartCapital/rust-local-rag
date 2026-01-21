@@ -14,6 +14,16 @@ async fn setup_mock_ollama() -> MockServer {
         })))
         .mount(&mock_server)
         .await;
+
+    // Default embedding response (used for startup dimension discovery)
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384],
+            "embeddings": vec![vec![0.1f32; 384]]
+        })))
+        .mount(&mock_server)
+        .await;
     mock_server
 }
 
@@ -112,4 +122,79 @@ async fn test_load_existing_valid_index() {
     let docs = engine.list_documents();
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0], "test.pdf");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_embedding_dim_mismatch_marks_reindex_and_blocks_search() {
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{ "name": "nomic-embed-text:latest" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Startup canary embed returns 768 dims (backend dim)
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 768]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().to_str().unwrap();
+
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+    }
+
+    // Create a legacy index with 384D embeddings
+    let index_path = temp_dir.path().join("chunks_nomic-embed-text.json");
+    let valid_json = serde_json::json!({
+        "version": 2,
+        "model": "nomic-embed-text",
+        "chunks": {
+            "chunk-1": {
+                "id": "chunk-1",
+                "document_name": "test.pdf",
+                "text": "Hello World",
+                "embedding": vec![0.0f32; 384],
+                "chunk_index": 0,
+                "page_number": 1,
+                "metadata": {
+                    "token_count": 2,
+                    "overlap_with_previous": 0
+                }
+            }
+        },
+        "needs_reindex": false,
+        "document_hashes": {
+            "test.pdf": "hash123"
+        }
+    });
+    std::fs::write(&index_path, serde_json::to_string(&valid_json).unwrap()).unwrap();
+
+    let engine = RagEngine::new(data_dir, &Config::default())
+        .await
+        .expect("Failed to load engine");
+
+    assert!(
+        engine.needs_reindex(),
+        "Should mark for reindex on dimension mismatch"
+    );
+
+    let search = engine.search("Hello", 5, None).await;
+    assert!(search.is_err(), "Search should be blocked on mismatch");
+    let msg = search.unwrap_err().to_string();
+    assert!(
+        msg.contains("Embedding dimension mismatch"),
+        "Unexpected error: {msg}"
+    );
 }

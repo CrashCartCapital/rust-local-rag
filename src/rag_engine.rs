@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
 use uuid::Uuid;
@@ -7,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     embeddings::EmbeddingService,
+    index_store::SqliteIndexStore,
     reranker::{RerankerCandidate, RerankerService},
 };
 
@@ -20,9 +23,10 @@ pub type PreparedDocument = rag_core::engine::PreparedDocument;
 /// - Environment-driven configuration
 /// - Stats formatting for MCP/HTTP
 pub struct RagEngine {
-    data_dir: String,
     core: rag_core::RagEngine<EmbeddingService, RerankerService>,
     start_time: std::time::Instant,
+    index_store: Arc<SqliteIndexStore>,
+    incompatible_index_reason: Option<String>,
 }
 
 impl RagEngine {
@@ -59,14 +63,48 @@ impl RagEngine {
         let mut core =
             rag_core::RagEngine::with_optional_reranker(embedding_service, reranker, rag_config);
 
-        if let Err(e) = core.load_from_dir(data_dir) {
-            tracing::warn!("Could not load existing data: {}", e);
+        let db_path = format!("sqlite:{data_dir}/jobs.db");
+        let index_store = Arc::new(SqliteIndexStore::new(&db_path).await?);
+
+        // One-time JSON -> SQLite migration (idempotent).
+        let model_id = core.embedding_model().to_string();
+        let backend_dim = core.backend_embedding_dim();
+        index_store
+            .migrate_json_if_needed(Path::new(data_dir), &model_id, backend_dim)
+            .await?;
+
+        // Hydrate the in-memory engine from SQLite (source of truth).
+        match index_store.load_model_state(&model_id).await {
+            Ok(Some(state)) => {
+                core.load_state(state).map_err(anyhow::Error::new)?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("Could not load existing SQLite index state: {}", e);
+                core.set_needs_reindex(true);
+            }
+        }
+
+        let mut incompatible_index_reason = None;
+        let persisted_dim = core.persisted_embedding_dim();
+        let backend_dim = core.backend_embedding_dim();
+        if persisted_dim != 0 && backend_dim != 0 && persisted_dim != backend_dim {
+            core.set_needs_reindex(true);
+            incompatible_index_reason = Some(format!(
+                "Embedding dimension mismatch: persisted index dim {persisted_dim} vs backend dim {backend_dim}. Reindex required."
+            ));
+            tracing::warn!(
+                persisted_dim,
+                backend_dim,
+                "Embedding dimension mismatch detected; marking for reindex"
+            );
         }
 
         Ok(Self {
-            data_dir: data_dir.to_string(),
             core,
             start_time: std::time::Instant::now(),
+            index_store,
+            incompatible_index_reason,
         })
     }
 
@@ -76,6 +114,10 @@ impl RagEngine {
 
     pub fn embedding_model(&self) -> &str {
         self.core.embedding_model()
+    }
+
+    pub fn backend_embedding_dim(&self) -> usize {
+        self.core.backend_embedding_dim()
     }
 
     pub fn has_reranker(&self) -> bool {
@@ -89,6 +131,7 @@ impl RagEngine {
     pub async fn finalize_reindex(&mut self) -> Result<()> {
         if self.core.needs_reindex() {
             self.core.set_needs_reindex(false);
+            self.incompatible_index_reason = None;
             tracing::info!(
                 "Reindexing complete. Indexed {} chunks across {} documents.",
                 self.core.chunk_count(),
@@ -117,8 +160,25 @@ impl RagEngine {
             return Ok(0);
         };
 
+        let document_hash = prepared.document_hash.as_deref().unwrap_or("");
+        if document_hash.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Prepared document missing hash; cannot persist safely"
+            ));
+        }
+
+        self.index_store
+            .upsert_document_atomic(
+                self.core.embedding_model(),
+                self.core.backend_embedding_dim(),
+                self.core.needs_reindex(),
+                &prepared.document_name,
+                document_hash,
+                &prepared.chunks,
+            )
+            .await?;
+
         let chunk_count = self.apply_prepared_document(prepared).await?;
-        self.save_to_disk_sync()?;
 
         tracing::info!(
             "Successfully processed {} chunks for {} in {:?}",
@@ -138,7 +198,7 @@ impl RagEngine {
         batch_callback: Option<&mut (dyn FnMut(usize, usize, usize, usize) + Send)>,
     ) -> Result<Option<PreparedDocument>> {
         let document_hash = compute_document_hash(data);
-        if self.core.is_document_unchanged(filename, &document_hash) {
+        if !self.core.needs_reindex() && self.core.is_document_unchanged(filename, &document_hash) {
             tracing::info!(
                 "Document {} unchanged since last index. Skipping re-embedding.",
                 filename
@@ -176,6 +236,9 @@ impl RagEngine {
         query: &str,
         count: usize,
     ) -> Result<Vec<RerankerCandidate>> {
+        if let Some(reason) = &self.incompatible_index_reason {
+            return Err(anyhow::anyhow!(reason.clone()));
+        }
         self.core
             .embedding_candidates(query, count)
             .await
@@ -189,6 +252,9 @@ impl RagEngine {
         top_k: usize,
         weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
+        if let Some(reason) = &self.incompatible_index_reason {
+            return Err(anyhow::anyhow!(reason.clone()));
+        }
         let start = std::time::Instant::now();
         let resolved = ResolvedWeights::from_query_weights(weights);
         let weights = rag_core::SearchWeights {
@@ -220,6 +286,9 @@ impl RagEngine {
         diversity_factor: f32,
         weights: Option<&QueryWeights>,
     ) -> Result<Vec<SearchResult>> {
+        if let Some(reason) = &self.incompatible_index_reason {
+            return Err(anyhow::anyhow!(reason.clone()));
+        }
         let start = std::time::Instant::now();
         let resolved = ResolvedWeights::from_query_weights(weights);
         let weights = rag_core::SearchWeights {
@@ -247,6 +316,16 @@ impl RagEngine {
         self.core.list_documents()
     }
 
+    pub fn index_store(&self) -> Arc<SqliteIndexStore> {
+        Arc::clone(&self.index_store)
+    }
+
+    pub fn remove_document(&mut self, document_name: &str) -> Result<usize> {
+        self.core
+            .remove_document(document_name)
+            .map_err(anyhow::Error::new)
+    }
+
     pub fn get_stats(&self) -> serde_json::Value {
         let doc_count = self.list_documents().len();
         let chunk_count = self.core.chunk_count();
@@ -264,17 +343,12 @@ impl RagEngine {
             "chunks": chunk_count,
             "status": status,
             "embedding_model": self.embedding_model(),
+            "embedding_dim": self.core.health().embedding_dim,
+            "needs_reindex_reason": self.incompatible_index_reason.as_deref(),
             "reranker_model": reranker_model,
             "uptime_seconds": self.start_time.elapsed().as_secs(),
             "version": env!("CARGO_PKG_VERSION")
         })
-    }
-
-    pub(crate) fn save_to_disk_sync(&self) -> Result<()> {
-        self.core
-            .save_to_dir(&self.data_dir)
-            .context("Failed to save index to disk")?;
-        Ok(())
     }
 
     /// Async wrapper for PDF text extraction using spawn_blocking.

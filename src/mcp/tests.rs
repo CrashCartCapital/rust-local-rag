@@ -147,7 +147,7 @@ fn test_format_search_results_does_not_highlight_two_letter_stopwords() {
 #[tokio::test]
 #[serial]
 async fn test_health_endpoint() {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock_server = MockServer::start().await;
@@ -158,6 +158,16 @@ async fn test_health_endpoint() {
             "models": [
                 { "name": "nomic-embed-text:latest" }
             ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Startup dimension discovery canary embed
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_string_contains("quick brown fox"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
         })))
         .mount(&mock_server)
         .await;
@@ -208,7 +218,7 @@ async fn test_health_endpoint() {
 #[tokio::test]
 #[serial]
 async fn test_documents_endpoint() {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mock_server = MockServer::start().await;
@@ -219,6 +229,16 @@ async fn test_documents_endpoint() {
             "models": [
                 { "name": "nomic-embed-text:latest" }
             ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Startup dimension discovery canary embed
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_string_contains("quick brown fox"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
         })))
         .mount(&mock_server)
         .await;
@@ -332,6 +352,16 @@ async fn test_search_timeout_error() {
             "models": [
                 { "name": "nomic-embed-text:latest" }
             ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Startup dimension discovery canary embed
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_string_contains("quick brown fox"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1; 768]
         })))
         .mount(&mock_server)
         .await;

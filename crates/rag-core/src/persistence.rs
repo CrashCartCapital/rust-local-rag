@@ -17,9 +17,11 @@ pub const INDEX_VERSION: u32 = 2;
 #[cfg_attr(feature = "persistence", derive(serde::Serialize, serde::Deserialize))]
 pub struct EngineState {
     /// Schema version for migration detection
+    #[cfg_attr(not(feature = "persistence"), allow(dead_code))]
     pub schema_version: u32,
 
     /// Embedding model identifier (invalidation key)
+    #[cfg_attr(not(feature = "persistence"), allow(dead_code))]
     pub embedding_model_id: String,
 
     /// Embedding dimension (invalidation key, derived from model)
@@ -86,6 +88,7 @@ impl EngineState {
 /// - `save()` must be atomic (temp file + rename pattern)
 /// - `load()` must return `None` if no persisted state exists
 /// - `schema_version()` must match the version in saved state
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 pub trait PersistenceBackend: Send + Sync {
     /// Save engine state to persistent storage.
     ///
@@ -122,7 +125,7 @@ pub struct JsonFileBackend {
 }
 
 #[cfg(feature = "persistence")]
-impl JsonFileBackend {
+    impl JsonFileBackend {
     /// Create a new JsonFileBackend.
     ///
     /// # Arguments
@@ -153,7 +156,11 @@ impl JsonFileBackend {
             return Ok(None);
         }
 
-        let data = std::fs::read_to_string(&legacy)?;
+        let data = match std::fs::read_to_string(&legacy) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Ok(None),
+            Err(e) => return Err(PersistenceError::Io(e)),
+        };
 
         // Try to parse with model info
         #[derive(serde::Deserialize)]
@@ -241,7 +248,11 @@ impl PersistenceBackend for JsonFileBackend {
 
         // Try model-specific path first
         if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
+            let data = match std::fs::read_to_string(&path) {
+                Ok(data) => data,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Ok(None),
+                Err(e) => return Err(PersistenceError::Io(e)),
+            };
             match serde_json::from_str::<EngineState>(&data) {
                 Ok(state) => return Ok(Some(state)),
                 Err(_) => {
@@ -270,6 +281,7 @@ impl PersistenceBackend for JsonFileBackend {
 
 /// Sanitizes model name for safe use as a filename.
 /// Replaces path separators, special characters, and handles edge cases.
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 pub fn sanitize_model_name(model_name: &str) -> String {
     let trimmed = model_name.trim();
 
@@ -297,12 +309,14 @@ pub fn sanitize_model_name(model_name: &str) -> String {
 
 /// Generates the index file path for a specific model.
 /// Uses sanitized model name to ensure filesystem safety.
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 pub fn index_path(data_dir: impl AsRef<Path>, model_name: &str) -> PathBuf {
     let sanitized = sanitize_model_name(model_name);
     data_dir.as_ref().join(format!("chunks_{sanitized}.json"))
 }
 
 /// Generates the legacy index file path (for migration support).
+#[cfg_attr(not(feature = "persistence"), allow(dead_code))]
 pub fn legacy_path(data_dir: impl AsRef<Path>) -> PathBuf {
     data_dir.as_ref().join("chunks.json")
 }
@@ -493,6 +507,19 @@ mod tests {
             // Load should return None
             let result = backend.load().unwrap();
             assert!(result.is_none());
+        }
+
+        #[test]
+        fn test_json_file_backend_invalid_utf8_returns_none() {
+            let temp_dir = TempDir::new().unwrap();
+            let backend = JsonFileBackend::new(temp_dir.path(), "test-model");
+
+            let path = backend.index_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+            let result = backend.load().unwrap();
+            assert!(result.is_none(), "Invalid UTF-8 should return None");
         }
 
         #[test]

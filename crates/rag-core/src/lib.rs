@@ -56,8 +56,12 @@ pub mod tags;
 pub mod traits;
 pub mod types;
 
+// The persistence module is always compiled so the engine can share a single
+// canonical state representation internally. Public exports remain feature-gated.
 #[cfg(feature = "persistence")]
 pub mod persistence;
+#[cfg(not(feature = "persistence"))]
+mod persistence;
 
 #[cfg(feature = "persistence")]
 pub use crate::persistence::{EngineState, JsonFileBackend, PersistenceBackend};

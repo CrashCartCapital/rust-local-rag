@@ -2,6 +2,7 @@ use crate::job_manager::{JobManager, JobStatus};
 use crate::progress_logger::{ProgressLogger, ProgressState, Stage};
 use crate::rag_engine::RagEngine;
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -155,17 +156,6 @@ pub enum JobRequest {
     },
 }
 
-async fn save_engine_to_disk(rag_engine: &Arc<RwLock<RagEngine>>) -> Result<()> {
-    let rag_engine = Arc::clone(rag_engine);
-    tokio::task::spawn_blocking(move || {
-        let engine = rag_engine.blocking_read();
-        engine.save_to_disk_sync()
-    })
-    .await
-    .context("save_to_disk task failed")??;
-    Ok(())
-}
-
 /// Background worker supervisor for processing async reindex jobs.
 /// Manages job lifecycle, progress tracking, and document processing.
 pub struct WorkerSupervisor {
@@ -196,15 +186,99 @@ impl WorkerSupervisor {
     #[instrument(skip(self), name = "worker_supervisor_run")]
     pub async fn run(mut self) {
         // Resume any in-progress or pending jobs from DB
-        if let Ok(jobs) = self.job_manager.find_resumable_jobs().await {
-            for job in jobs {
-                tracing::info!(
-                    "Resuming job {} (status: {:?}) from restart",
-                    job.job_id,
-                    job.status
-                );
-                if let Some(payload) = job.payload {
-                    self.spawn_reindex_worker(job.job_id, payload).await;
+        if let Ok(mut jobs) = self.job_manager.find_resumable_jobs().await {
+            jobs.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then_with(|| b.started_at.cmp(&a.started_at))
+                    .then_with(|| b.job_id.cmp(&a.job_id))
+            });
+
+            if !jobs.is_empty() {
+                // Guardrail: only allow one active reindex job on startup.
+                // If multiple exist (common in dev/test cycles), fail older ones to avoid confusion.
+                let primary_idx = jobs.iter().position(|job| {
+                    job.payload
+                        .as_ref()
+                        .is_some_and(|payload| !payload.trim().is_empty())
+                });
+
+                if let Some(primary_idx) = primary_idx {
+                    let primary = jobs.remove(primary_idx);
+
+                    for stale in jobs {
+                        let msg = format!(
+                            "Superseded by newer reindex job {} on startup",
+                            primary.job_id
+                        );
+                        let _ = self
+                            .job_manager
+                            .update_status(&stale.job_id, JobStatus::Failed, Some(msg))
+                            .await;
+                    }
+
+                    tracing::info!(
+                        "Resuming job {} (status: {:?}) from restart",
+                        primary.job_id,
+                        primary.status
+                    );
+
+                    match primary.payload {
+                        Some(payload) => {
+                            let documents_dir = payload.trim().to_string();
+                            if documents_dir.is_empty() || !Path::new(&documents_dir).exists() {
+                                let _ = self
+                                    .job_manager
+                                    .update_status(
+                                        &primary.job_id,
+                                        JobStatus::Failed,
+                                        Some(format!(
+                                            "Invalid documents_dir in payload: '{}'",
+                                            documents_dir
+                                        )),
+                                    )
+                                    .await;
+                            } else if primary.total > 0 && primary.progress >= primary.total {
+                                let _ = self
+                                    .job_manager
+                                    .update_status(
+                                        &primary.job_id,
+                                        JobStatus::Completed,
+                                        Some(
+                                            "Recovered on startup: index already up to date"
+                                                .to_string(),
+                                        ),
+                                    )
+                                    .await;
+                            } else {
+                                self.spawn_reindex_worker(primary.job_id, documents_dir).await;
+                            }
+                        }
+                        None => {
+                            let _ = self
+                                .job_manager
+                                .update_status(
+                                    &primary.job_id,
+                                    JobStatus::Failed,
+                                    Some(
+                                        "Missing payload (documents_dir); cannot resume"
+                                            .to_string(),
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
+                } else {
+                    for job in jobs {
+                        let _ = self
+                            .job_manager
+                            .update_status(
+                                &job.job_id,
+                                JobStatus::Failed,
+                                Some("Missing payload (documents_dir); cannot resume".to_string()),
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -390,16 +464,32 @@ impl WorkerSupervisor {
         )
         .await;
 
+        let (index_store, model_id, embedding_dim) = {
+            let engine = rag_engine.read().await;
+            (
+                engine.index_store(),
+                engine.embedding_model().to_string(),
+                engine.backend_embedding_dim(),
+            )
+        };
+
         {
             let mut engine = TimedWriteLockGuard::acquire(rag_engine, "finalize_reindex").await?;
             engine.finalize_reindex().await?;
         }
-        save_engine_to_disk(rag_engine).await?;
+
+        index_store
+            .set_model_needs_reindex(&model_id, embedding_dim, false)
+            .await?;
         Ok(())
     }
 
     async fn try_process_single_pdf(
         rag_engine: &Arc<RwLock<RagEngine>>,
+        index_store: Arc<crate::SqliteIndexStore>,
+        model_id: String,
+        embedding_dim: usize,
+        needs_reindex: bool,
         progress_logger: &Option<ProgressLogger>,
         progress_state: &ProgressState,
         path: &Path,
@@ -475,6 +565,30 @@ impl WorkerSupervisor {
             let result = match prepared {
                 Ok(None) => Ok(0),
                 Ok(Some(prepared)) => {
+                    let document_hash = prepared.document_hash.as_deref().unwrap_or("");
+                    if document_hash.is_empty() {
+                        return Ok(Some((
+                            filename,
+                            Err(anyhow::anyhow!(
+                                "Prepared document missing hash; cannot persist safely"
+                            )),
+                        )));
+                    }
+
+                    if let Err(e) = index_store
+                        .upsert_document_atomic(
+                            &model_id,
+                            embedding_dim,
+                            needs_reindex,
+                            &prepared.document_name,
+                            document_hash,
+                            &prepared.chunks,
+                        )
+                        .await
+                    {
+                        return Ok(Some((filename, Err(e))));
+                    }
+
                     let chunk_count = {
                         let mut engine = match TimedWriteLockGuard::acquire(
                             rag_engine,
@@ -491,10 +605,6 @@ impl WorkerSupervisor {
                             Err(e) => return Ok(Some((filename, Err(e)))),
                         }
                     };
-
-                    if let Err(e) = save_engine_to_disk(rag_engine).await {
-                        return Ok(Some((filename, Err(e))));
-                    }
 
                     Ok(chunk_count)
                 }
@@ -531,6 +641,72 @@ impl WorkerSupervisor {
         )
         .await;
 
+        let mut failed_documents = Vec::new();
+
+        let (index_store, model_id, embedding_dim, needs_reindex) = {
+            let engine = rag_engine.read().await;
+            (
+                engine.index_store(),
+                engine.embedding_model().to_string(),
+                engine.backend_embedding_dim(),
+                engine.needs_reindex(),
+            )
+        };
+
+        // Phase 2: Deletion synchronization - prune indexed docs missing from disk
+        let current_docs: HashSet<String> = pdf_paths
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+            .collect();
+
+        let indexed_docs = {
+            let engine = rag_engine.read().await;
+            engine.list_documents()
+        };
+
+        let docs_to_prune: Vec<String> = indexed_docs
+            .into_iter()
+            .filter(|doc| !current_docs.contains(doc))
+            .collect();
+
+        if !docs_to_prune.is_empty() {
+            let note = format!("pruning {} deleted docs", docs_to_prune.len());
+            Self::emit_logger(&progress_logger, &progress_state, "stage", Some(&note)).await;
+
+            let mut removed_docs = Vec::new();
+            let mut removed_chunks = 0usize;
+
+            for doc in docs_to_prune {
+                match index_store.delete_document_atomic(&model_id, &doc).await {
+                    Ok(chunks_removed) => {
+                        removed_docs.push(doc);
+                        removed_chunks += chunks_removed;
+                    }
+                    Err(e) => {
+                        failed_documents.push(format!("prune {doc}: {e}"));
+                        progress_state.failed_docs += 1;
+                    }
+                }
+            }
+
+            if !removed_docs.is_empty() {
+                let mut engine =
+                    TimedWriteLockGuard::acquire(&rag_engine, "prune_deleted_documents").await?;
+                for doc in &removed_docs {
+                    if let Err(e) = engine.remove_document(doc) {
+                        failed_documents.push(format!("prune {doc}: {e}"));
+                        progress_state.failed_docs += 1;
+                    }
+                }
+            }
+
+            tracing::info!(
+                "Pruned {} deleted documents ({} chunks) from index",
+                removed_docs.len(),
+                removed_chunks
+            );
+        }
+
         {
             let engine = rag_engine.read().await;
             if engine.needs_reindex() {
@@ -542,7 +718,6 @@ impl WorkerSupervisor {
             }
         }
 
-        let mut failed_documents = Vec::new();
         let mut successful_docs = 0i64;
 
         progress_state.stage = Stage::Embedding;
@@ -557,6 +732,10 @@ impl WorkerSupervisor {
         for (idx, path) in pdf_paths.iter().enumerate() {
             let Some((filename, result)) = Self::try_process_single_pdf(
                 &rag_engine,
+                index_store.clone(),
+                model_id.clone(),
+                embedding_dim,
+                needs_reindex,
                 &progress_logger,
                 &progress_state,
                 path,

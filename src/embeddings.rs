@@ -41,6 +41,7 @@ pub struct EmbeddingService {
     model: String,
     query_cache: RwLock<LruCache<String, Vec<f32>>>,
     embedding_timeout: Duration,
+    embedding_dim: usize,
 }
 
 impl EmbeddingService {
@@ -67,7 +68,7 @@ impl EmbeddingService {
         tracing::info!("Ollama URL: {}", ollama_url);
         tracing::info!("Ollama Model: {}", model);
 
-        let service = Self {
+        let mut service = Self {
             client: reqwest::Client::builder()
                 .timeout(config.embedding_timeout) // per-batch for large documents
                 .build()?,
@@ -75,10 +76,12 @@ impl EmbeddingService {
             model,
             query_cache: RwLock::new(LruCache::new(config.embedding_cache_size)),
             embedding_timeout: config.embedding_timeout,
+            embedding_dim: 0,
         };
 
         service.test_connection().await?;
         service.verify_model().await?;
+        service.embedding_dim = service.discover_embedding_dimension().await?;
 
         Ok(service)
     }
@@ -283,6 +286,18 @@ impl EmbeddingService {
         tracing::info!("✅ Model '{}' verified", self.model);
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn discover_embedding_dimension(&self) -> Result<usize> {
+        const CANARY: &str = "The quick brown fox jumps over the lazy dog";
+        let embedding = self.get_embedding(CANARY).await?;
+        if embedding.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Embedding dimension discovery failed: empty embedding returned"
+            ));
+        }
+        Ok(embedding.len())
+    }
 }
 
 impl rag_core::EmbeddingBackend for EmbeddingService {
@@ -312,6 +327,6 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
     }
 
     fn dimension(&self) -> usize {
-        0
+        self.embedding_dim
     }
 }

@@ -67,6 +67,7 @@ impl JobManager {
             .busy_timeout(std::time::Duration::from_secs(30)) // Wait up to 30s for locks
             .journal_mode(SqliteJournalMode::Wal) // Write-Ahead Logging for better concurrency
             .synchronous(SqliteSynchronous::Normal) // Balance safety and performance
+            .foreign_keys(true)
             .create_if_missing(true);
 
         let pool = sqlx::SqlitePool::connect_with(options).await?;

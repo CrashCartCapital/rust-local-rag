@@ -1,5 +1,6 @@
 use crate::chunking::{ChunkFragment, chunk_text};
 use crate::error::{EmbeddingError, EngineError, Result};
+use crate::persistence::EngineState;
 use crate::search::{AnnIndex, LexicalIndex, SearchResultWithEmbedding, mmr_diversify};
 use crate::traits::{EmbeddingBackend, Rerank};
 use crate::types::{
@@ -16,9 +17,7 @@ pub struct RagEngine<B: EmbeddingBackend, R = ()> {
     reranker: Option<R>,
     config: RagConfig,
 
-    chunks: HashMap<String, DocumentChunk>,
-    document_hashes: HashMap<DocumentName, String>,
-    needs_reindex: bool,
+    state: EngineState,
 
     ann_index: Option<AnnIndex>,
     lexical_index: LexicalIndex,
@@ -37,13 +36,13 @@ impl<B: EmbeddingBackend> RagEngine<B, ()> {
     }
 
     pub fn with_config(backend: B, config: RagConfig) -> Self {
+        let embedding_model_id = backend.model_id().to_string();
+        let embedding_dim = backend.dimension();
         Self {
             backend,
             reranker: None,
             config,
-            chunks: HashMap::new(),
-            document_hashes: HashMap::new(),
-            needs_reindex: false,
+            state: EngineState::new(embedding_model_id, embedding_dim),
             ann_index: None,
             lexical_index: LexicalIndex::new(),
         }
@@ -64,21 +63,23 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     }
 
     pub fn needs_reindex(&self) -> bool {
-        self.needs_reindex
+        self.state.needs_reindex
     }
 
     pub fn set_needs_reindex(&mut self, value: bool) {
-        self.needs_reindex = value;
+        self.state.needs_reindex = value;
     }
 
     pub fn is_document_unchanged(&self, document_name: &str, document_hash: &str) -> bool {
-        self.document_hashes
+        self.state
+            .document_hashes
             .get(document_name)
             .is_some_and(|h| h == document_hash)
     }
 
     pub fn list_documents(&self) -> Vec<DocumentName> {
         let mut docs: Vec<DocumentName> = self
+            .state
             .chunks
             .values()
             .map(|chunk| chunk.document_name.clone())
@@ -90,7 +91,15 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     }
 
     pub fn chunk_count(&self) -> usize {
-        self.chunks.len()
+        self.state.chunks.len()
+    }
+
+    pub fn persisted_embedding_dim(&self) -> usize {
+        self.state.embedding_dim
+    }
+
+    pub fn backend_embedding_dim(&self) -> usize {
+        self.backend.dimension()
     }
 
     /// Returns health status for monitoring/observability.
@@ -106,20 +115,24 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     /// }
     /// ```
     pub fn health(&self) -> HealthStatus {
+        let embedding_dim = match self.backend.dimension() {
+            0 => self.state.embedding_dim,
+            dim => dim,
+        };
         HealthStatus {
             is_healthy: true,
             embedding_model: self.backend.model_id().to_string(),
-            embedding_dim: self.backend.dimension(),
+            embedding_dim,
             document_count: self.list_documents().len(),
-            chunk_count: self.chunks.len(),
-            needs_reindex: self.needs_reindex,
+            chunk_count: self.state.chunks.len(),
+            needs_reindex: self.state.needs_reindex,
             has_reranker: self.reranker.is_some(),
         }
     }
 
     pub fn remove_document(&mut self, document_name: &str) -> Result<usize> {
         let mut removed_ids = Vec::new();
-        self.chunks.retain(|chunk_id, chunk| {
+        self.state.chunks.retain(|chunk_id, chunk| {
             if chunk.document_name == document_name {
                 removed_ids.push(chunk_id.clone());
                 false
@@ -135,7 +148,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             }
         }
 
-        self.document_hashes.remove(document_name);
+        self.state.document_hashes.remove(document_name);
 
         self.validate_index_sync()?;
         Ok(removed_ids.len())
@@ -308,7 +321,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         if prepared.chunks.is_empty() {
             if let Some(hash) = prepared.document_hash {
-                self.document_hashes.insert(prepared.document_name, hash);
+                self.state.document_hashes.insert(prepared.document_name, hash);
             }
 
             self.validate_index_sync()?;
@@ -320,16 +333,31 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             if self.ann_index.is_none() && !chunk.embedding.is_empty() {
                 self.ann_index = Some(AnnIndex::new(chunk.embedding.len()));
             }
+
+            if !chunk.embedding.is_empty() {
+                if self.state.embedding_dim == 0 {
+                    self.state.embedding_dim = chunk.embedding.len();
+                } else if self.state.embedding_dim != chunk.embedding.len() {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::DimensionMismatch {
+                            expected: self.state.embedding_dim,
+                            got: chunk.embedding.len(),
+                        },
+                    ));
+                }
+            }
+
             if let Some(index) = self.ann_index.as_mut() {
                 index.insert(&chunk.id, &chunk.embedding);
             }
             self.lexical_index.add_chunk(&chunk.id, &chunk.text);
-            self.chunks.insert(chunk.id.clone(), chunk);
+            self.state.chunks.insert(chunk.id.clone(), chunk);
             chunk_count += 1;
         }
 
         if let Some(hash) = prepared.document_hash {
-            self.document_hashes.insert(prepared.document_name, hash);
+            self.state.document_hashes.insert(prepared.document_name, hash);
         }
 
         self.validate_index_sync()?;
@@ -410,7 +438,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         query: &str,
         count: usize,
     ) -> Result<Vec<RerankerCandidate>> {
-        if self.chunks.is_empty() || count == 0 {
+        if self.state.chunks.is_empty() || count == 0 {
             return Ok(vec![]);
         }
 
@@ -423,12 +451,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     .search(&query_embedding, count.saturating_mul(2))
                     .into_iter(),
             ),
-            None => Box::new(self.chunks.keys().cloned()),
+            None => Box::new(self.state.chunks.keys().cloned()),
         };
 
         let mut scores: Vec<(f32, &DocumentChunk)> = Vec::new();
         for chunk_id in candidate_iter {
-            if let Some(chunk) = self.chunks.get(&chunk_id) {
+            if let Some(chunk) = self.state.chunks.get(&chunk_id) {
                 let embedding_score =
                     crate::search::dot_product(&query_embedding, &chunk.embedding);
                 scores.push((embedding_score, chunk));
@@ -466,7 +494,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     where
         R: Rerank,
     {
-        if self.chunks.is_empty() {
+        if self.state.chunks.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::debug!("Search internal: index empty");
             return Ok(vec![]);
@@ -493,7 +521,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     .search(&query_embedding, top_k.saturating_mul(5))
                     .into_iter(),
             ),
-            None => Box::new(self.chunks.keys().cloned()),
+            None => Box::new(self.state.chunks.keys().cloned()),
         };
 
         let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
@@ -529,7 +557,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
-            if let Some(chunk) = self.chunks.get(&chunk_id) {
+            if let Some(chunk) = self.state.chunks.get(&chunk_id) {
                 let embedding_score =
                     crate::search::dot_product(&query_embedding, &chunk.embedding);
                 let lexical_score = lexical_map
@@ -716,12 +744,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self)))]
     fn validate_index_sync(&mut self) -> Result<()> {
-        let valid_chunk_ids: HashSet<String> = self.chunks.keys().cloned().collect();
+        let valid_chunk_ids: HashSet<String> = self.state.chunks.keys().cloned().collect();
 
         self.lexical_index.drop_stale(&valid_chunk_ids);
 
         for chunk_id in &valid_chunk_ids {
-            if let Some(chunk) = self.chunks.get(chunk_id)
+            if let Some(chunk) = self.state.chunks.get(chunk_id)
                 && !self.lexical_index.contains(chunk_id)
             {
                 #[cfg(feature = "tracing")]
@@ -731,8 +759,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         if self.ann_index.is_none()
-            && !self.chunks.is_empty()
-            && let Some(first_chunk) = self.chunks.values().next()
+            && !self.state.chunks.is_empty()
+            && let Some(first_chunk) = self.state.chunks.values().next()
         {
             let dim = first_chunk.embedding.len();
             if dim > 0 {
@@ -744,7 +772,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             ann_index.drop_stale(&valid_chunk_ids);
 
             for chunk_id in &valid_chunk_ids {
-                if let Some(chunk) = self.chunks.get(chunk_id)
+                if let Some(chunk) = self.state.chunks.get(chunk_id)
                     && !ann_index.contains(chunk_id)
                 {
                     #[cfg(feature = "tracing")]
@@ -755,11 +783,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         let valid_documents: HashSet<String> = self
+            .state
             .chunks
             .values()
             .map(|chunk| chunk.document_name.clone())
             .collect();
-        self.document_hashes.retain(|doc_name, _| {
+        self.state.document_hashes.retain(|doc_name, _| {
             let keep = valid_documents.contains(doc_name);
             if !keep {
                 #[cfg(feature = "tracing")]
@@ -774,26 +803,26 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
 impl<B: EmbeddingBackend, R: Rerank> RagEngine<B, R> {
     pub fn with_optional_reranker(backend: B, reranker: Option<R>, config: RagConfig) -> Self {
+        let embedding_model_id = backend.model_id().to_string();
+        let embedding_dim = backend.dimension();
         Self {
             backend,
             reranker,
             config,
-            chunks: HashMap::new(),
-            document_hashes: HashMap::new(),
-            needs_reindex: false,
+            state: EngineState::new(embedding_model_id, embedding_dim),
             ann_index: None,
             lexical_index: LexicalIndex::new(),
         }
     }
 
     pub fn with_reranker(backend: B, reranker: R) -> Self {
+        let embedding_model_id = backend.model_id().to_string();
+        let embedding_dim = backend.dimension();
         Self {
             backend,
             reranker: Some(reranker),
             config: RagConfig::default(),
-            chunks: HashMap::new(),
-            document_hashes: HashMap::new(),
-            needs_reindex: false,
+            state: EngineState::new(embedding_model_id, embedding_dim),
             ann_index: None,
             lexical_index: LexicalIndex::new(),
         }
@@ -809,190 +838,196 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R>
 where
     R: Rerank,
 {
-    pub fn save_to_dir(&self, data_dir: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::persistence::{INDEX_VERSION, index_path};
-        use serde::Serialize;
-
-        #[derive(Serialize)]
-        struct PersistedState<'a> {
-            version: u32,
-            model: &'a str,
-            chunks: &'a HashMap<String, DocumentChunk>,
-            needs_reindex: bool,
-            #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-            document_hashes: &'a HashMap<String, String>,
+    pub fn load_state(&mut self, mut state: crate::persistence::EngineState) -> Result<()> {
+        let current_model = self.backend.model_id();
+        if state.embedding_model_id != current_model {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                persisted_model = %state.embedding_model_id,
+                current_model = %current_model,
+                "Persisted state model mismatch. Marking for reindex."
+            );
+            self.state.needs_reindex = true;
+            return Ok(());
         }
 
-        let model_name = self.backend.model_id();
-        let final_path = index_path(data_dir.as_ref(), model_name);
-        let temp_path = final_path.with_extension("json.tmp");
+        if state.schema_version < crate::persistence::INDEX_VERSION {
+            self.state.chunks.clear();
+            self.state.document_hashes.clear();
+            self.state.needs_reindex = true;
+            self.state.schema_version = crate::persistence::INDEX_VERSION;
+            self.state.embedding_model_id = current_model.to_string();
+            return Ok(());
+        }
 
-        let state = PersistedState {
-            version: INDEX_VERSION,
-            model: model_name,
-            chunks: &self.chunks,
-            needs_reindex: self.needs_reindex,
-            document_hashes: &self.document_hashes,
-        };
+        if state.embedding_dim == 0 && !state.chunks.is_empty() {
+            state.embedding_dim = state
+                .chunks
+                .values()
+                .next()
+                .map(|c| c.embedding.len())
+                .unwrap_or(0);
+        }
 
-        let data = serde_json::to_string_pretty(&state).map_err(|e| {
-            EngineError::save_failed(&final_path, crate::error::PersistenceError::Json(e))
-        })?;
+        for chunk in state.chunks.values_mut() {
+            crate::search::normalize(&mut chunk.embedding);
+        }
 
-        std::fs::write(&temp_path, &data).map_err(|e| {
-            EngineError::save_failed(&temp_path, crate::error::PersistenceError::Io(e))
-        })?;
-        std::fs::rename(&temp_path, &final_path).map_err(|e| {
-            EngineError::save_failed(&final_path, crate::error::PersistenceError::Io(e))
-        })?;
+        self.state = state;
+
+        if self.state.document_hashes.is_empty() && !self.state.chunks.is_empty() {
+            self.state.needs_reindex = true;
+        }
+
+        self.ann_index = None;
+        self.lexical_index = LexicalIndex::new();
+        self.validate_index_sync()?;
+        Ok(())
+    }
+
+    pub fn save_to_dir(&self, data_dir: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::persistence::{JsonFileBackend, PersistenceBackend};
+
+        let backend = JsonFileBackend::new(data_dir.as_ref(), self.backend.model_id());
+        backend
+            .save(&self.state)
+            .map_err(|e| EngineError::save_failed(backend.index_path(), e))?;
         Ok(())
     }
 
     pub fn load_from_dir(&mut self, data_dir: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::persistence::{index_path, legacy_path};
+        use crate::persistence::{JsonFileBackend, PersistenceBackend};
         use serde::Deserialize;
 
-        #[derive(Deserialize)]
-        struct PersistedState {
-            version: u32,
-            #[allow(dead_code)]
-            model: String,
-            chunks: HashMap<String, DocumentChunk>,
-            #[serde(default)]
-            needs_reindex: bool,
-            #[serde(default)]
-            document_hashes: HashMap<String, String>,
-        }
-
-        #[derive(Deserialize)]
-        struct ModelOnly {
-            model: String,
-        }
-
+        let data_dir = data_dir.as_ref();
         let current_model = self.backend.model_id();
-        let model_specific_path = index_path(data_dir.as_ref(), current_model);
-        let legacy_path = legacy_path(data_dir.as_ref());
+        let backend = JsonFileBackend::new(data_dir, current_model);
 
-        if model_specific_path.exists() {
-            match std::fs::read_to_string(&model_specific_path) {
-                Ok(data) => match serde_json::from_str::<PersistedState>(&data) {
-                    Ok(state) => {
-                        return self.apply_loaded_state(
-                            state.version,
-                            state.chunks,
-                            state.needs_reindex,
-                            state.document_hashes,
-                            false,
-                            data_dir.as_ref(),
-                        );
-                    }
-                    Err(_e) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            "Failed to parse model-specific index at {:?}: {}. Marking for reindex.",
-                            model_specific_path,
-                            _e
-                        );
-                        self.needs_reindex = true;
-                        return Ok(());
-                    }
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        "Index file at {:?} contains invalid UTF-8 data. Marking for reindex.",
-                        model_specific_path
-                    );
-                    self.needs_reindex = true;
-                    return Ok(());
-                }
-                Err(e) => {
-                    return Err(EngineError::load_failed(
-                        &model_specific_path,
-                        crate::error::PersistenceError::Io(e),
-                    ));
-                }
-            }
-        }
+        let model_specific_path = backend.index_path();
+        let legacy_path = backend.legacy_path();
+        let model_specific_exists = model_specific_path.exists();
+        let legacy_exists = legacy_path.exists();
 
-        if legacy_path.exists() {
-            let data = std::fs::read_to_string(&legacy_path).map_err(|e| {
-                EngineError::load_failed(&legacy_path, crate::error::PersistenceError::Io(e))
-            })?;
+        let loaded = backend
+            .load()
+            .map_err(|e| EngineError::load_failed(model_specific_path.clone(), e))?;
 
-            if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
-                if info.model == current_model {
-                    match serde_json::from_str::<PersistedState>(&data) {
-                        Ok(state) => {
-                            return self.apply_loaded_state(
-                                state.version,
-                                state.chunks,
-                                state.needs_reindex,
-                                state.document_hashes,
-                                true,
-                                data_dir.as_ref(),
-                            );
-                        }
-                        Err(_e) => {
-                            #[cfg(feature = "tracing")]
-                            tracing::warn!("Failed to parse legacy index: {}. Starting fresh.", _e);
-                        }
-                    }
-                } else {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!(
-                        "Legacy index belongs to model '{}', current model is '{}'. Preserving legacy file.",
-                        info.model,
-                        current_model
-                    );
-                }
-            } else if let Ok(legacy_chunks) =
-                serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
-                && !legacy_chunks.is_empty()
-            {
+        let Some(mut state) = loaded else {
+            if model_specific_exists {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
-                    "Found legacy chunks without model info. Reindex required for model '{}'.",
-                    current_model
+                    "Failed to parse model-specific index at {:?}. Marking for reindex.",
+                    model_specific_path
                 );
-                self.needs_reindex = true;
+                self.state.needs_reindex = true;
+                return Ok(());
             }
+
+            if legacy_exists {
+                #[derive(Deserialize)]
+                struct ModelOnly {
+                    model: String,
+                }
+
+                match std::fs::read_to_string(&legacy_path) {
+                    Ok(data) => {
+                        if let Ok(info) = serde_json::from_str::<ModelOnly>(&data) {
+                            if info.model == current_model {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    "Failed to parse legacy index at {:?}. Marking for reindex.",
+                                    legacy_path
+                                );
+                                self.state.needs_reindex = true;
+                            } else {
+                                #[cfg(feature = "tracing")]
+                                tracing::info!(
+                                    "Legacy index belongs to model '{}', current model is '{}'. Preserving legacy file.",
+                                    info.model,
+                                    current_model
+                                );
+                            }
+                        } else if let Ok(legacy_chunks) =
+                            serde_json::from_str::<HashMap<String, DocumentChunk>>(&data)
+                            && !legacy_chunks.is_empty()
+                        {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                "Found legacy chunks without model info. Reindex required for model '{}'.",
+                                current_model
+                            );
+                            self.state.needs_reindex = true;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            "Legacy index at {:?} contains invalid UTF-8. Marking for reindex.",
+                            legacy_path
+                        );
+                        self.state.needs_reindex = true;
+                    }
+                    Err(e) => {
+                        return Err(EngineError::load_failed(
+                            &legacy_path,
+                            crate::error::PersistenceError::Io(e),
+                        ));
+                    }
+                }
+            }
+
+            return Ok(());
+        };
+
+        // If we successfully parsed state but it belongs to another model, treat it as incompatible.
+        if state.embedding_model_id != current_model {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                persisted_model = %state.embedding_model_id,
+                current_model = %current_model,
+                "Persisted state model mismatch. Marking for reindex."
+            );
+            self.state.needs_reindex = true;
+            return Ok(());
         }
 
-        Ok(())
-    }
-
-    fn apply_loaded_state(
-        &mut self,
-        version: u32,
-        chunks: HashMap<String, DocumentChunk>,
-        needs_reindex: bool,
-        document_hashes: HashMap<String, String>,
-        migrate_to_new_format: bool,
-        data_dir: &std::path::Path,
-    ) -> Result<()> {
-        if version < crate::persistence::INDEX_VERSION {
-            self.chunks.clear();
-            self.needs_reindex = true;
+        // Invalidate state if it is older than what we support.
+        if state.schema_version < crate::persistence::INDEX_VERSION {
+            self.state.chunks.clear();
+            self.state.document_hashes.clear();
+            self.state.needs_reindex = true;
+            self.state.schema_version = crate::persistence::INDEX_VERSION;
+            self.state.embedding_model_id = current_model.to_string();
             self.save_to_dir(data_dir)?;
             return Ok(());
         }
 
-        self.chunks = chunks;
-        for chunk in self.chunks.values_mut() {
+        if state.embedding_dim == 0 && !state.chunks.is_empty() {
+            state.embedding_dim = state
+                .chunks
+                .values()
+                .next()
+                .map(|c| c.embedding.len())
+                .unwrap_or(0);
+        }
+
+        self.state = state;
+
+        for chunk in self.state.chunks.values_mut() {
             crate::search::normalize(&mut chunk.embedding);
         }
 
-        self.needs_reindex = needs_reindex;
-        self.document_hashes = document_hashes;
-
-        if self.document_hashes.is_empty() && !self.chunks.is_empty() {
-            self.needs_reindex = true;
+        if self.state.document_hashes.is_empty() && !self.state.chunks.is_empty() {
+            self.state.needs_reindex = true;
         }
 
+        // Rebuild in-memory indexes from persisted chunk state.
+        self.ann_index = None;
+        self.lexical_index = LexicalIndex::new();
         self.validate_index_sync()?;
 
-        if migrate_to_new_format {
+        // If we loaded from the legacy path, write out the model-specific file.
+        if !model_specific_exists && legacy_exists {
             self.save_to_dir(data_dir)?;
         }
 
