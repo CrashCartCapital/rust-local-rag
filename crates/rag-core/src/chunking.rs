@@ -833,7 +833,7 @@ mod tests {
         // Based on logic: extract_sentences calls split_part_hard(limit=0) -> returns full text.
         // chunk_text loop token_sum >= 0 -> triggers every sentence.
         // Should produce 1 chunk.
-        let chunks = chunk_text(text, 0, 0);
+        let chunks = chunk_text(text, 0, 0).unwrap();
         assert!(!chunks.is_empty(), "Should produce at least one chunk");
         assert_eq!(chunks[0].text, "This is a test.");
     }
