@@ -189,10 +189,6 @@ fn extract_sentences(
             }
 
             let lines: Vec<&str> = block.lines().collect();
-            if lines.len() == 1 && is_heading(lines[0]) {
-                last_heading = Some(lines[0].trim().to_string());
-                continue;
-            }
 
             let mut paragraph_lines = Vec::new();
             for line in lines {
@@ -202,7 +198,6 @@ fn extract_sentences(
                 }
                 if paragraph_lines.is_empty() && is_heading(trimmed) {
                     last_heading = Some(trimmed.to_string());
-                    continue;
                 }
                 paragraph_lines.push(trimmed);
             }
@@ -867,5 +862,64 @@ mod tests {
         let chunks2 = split_massive_word(text2, 1);
         // Should split into 2 chunks of 4 emojis each (approx).
         assert!(chunks2.len() >= 2);
+    }
+
+    #[test]
+    fn test_heading_retention_in_text() {
+        // "1. Introduction" is detected as a heading.
+        // It is followed by content.
+        let text = "1. Introduction\n\nThis is content.";
+
+        let sentences = extract_sentences(text, None).unwrap();
+
+        // I assert the fix: it should be present.
+        let combined_text: String = sentences
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            combined_text.contains("1. Introduction"),
+            "Heading text should be preserved in content. Got: '{}'",
+            combined_text
+        );
+
+        // Also verify metadata
+        assert_eq!(sentences[0].heading.as_deref(), Some("1. Introduction"));
+    }
+
+    #[test]
+    fn test_heading_only_document_retention() {
+        let text = "1. Introduction";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        let combined_text: String = sentences
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            combined_text.contains("1. Introduction"),
+            "Heading only document should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_interleaved_headings_retention() {
+        let text = "Content A.\n\n2. Next Section\n\nContent B.";
+        let sentences = extract_sentences(text, None).unwrap();
+        let combined_text: String = sentences
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(combined_text.contains("Content A."), "Should have A");
+        assert!(
+            combined_text.contains("2. Next Section"),
+            "Should have heading text. Got: '{}'",
+            combined_text
+        );
+        assert!(combined_text.contains("Content B."), "Should have B");
     }
 }
