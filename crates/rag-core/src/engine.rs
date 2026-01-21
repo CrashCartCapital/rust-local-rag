@@ -890,33 +890,43 @@ where
         let legacy_path = legacy_path(data_dir.as_ref());
 
         if model_specific_path.exists() {
-            let data = std::fs::read_to_string(&model_specific_path).map_err(|e| {
-                EngineError::load_failed(
-                    &model_specific_path,
-                    crate::error::PersistenceError::Io(e),
-                )
-            })?;
-
-            match serde_json::from_str::<PersistedState>(&data) {
-                Ok(state) => {
-                    return self.apply_loaded_state(
-                        state.version,
-                        state.chunks,
-                        state.needs_reindex,
-                        state.document_hashes,
-                        false,
-                        data_dir.as_ref(),
-                    );
-                }
-                Err(_e) => {
+            match std::fs::read_to_string(&model_specific_path) {
+                Ok(data) => match serde_json::from_str::<PersistedState>(&data) {
+                    Ok(state) => {
+                        return self.apply_loaded_state(
+                            state.version,
+                            state.chunks,
+                            state.needs_reindex,
+                            state.document_hashes,
+                            false,
+                            data_dir.as_ref(),
+                        );
+                    }
+                    Err(_e) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            "Failed to parse model-specific index at {:?}: {}. Marking for reindex.",
+                            model_specific_path,
+                            _e
+                        );
+                        self.needs_reindex = true;
+                        return Ok(());
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
-                        "Failed to parse model-specific index at {:?}: {}. Marking for reindex.",
-                        model_specific_path,
-                        _e
+                        "Index file at {:?} contains invalid UTF-8 data. Marking for reindex.",
+                        model_specific_path
                     );
                     self.needs_reindex = true;
                     return Ok(());
+                }
+                Err(e) => {
+                    return Err(EngineError::load_failed(
+                        &model_specific_path,
+                        crate::error::PersistenceError::Io(e),
+                    ));
                 }
             }
         }
