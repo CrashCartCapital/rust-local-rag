@@ -42,6 +42,10 @@ mcp.db
 
 # Archives (tracked)
 # `.archive/` holds superseded docs kept in-repo.
+.archive/**
+!.archive/README.md
+!.archive/docs/
+!.archive/docs/**
 
 # Development artifacts (not for release)
 .jules/
