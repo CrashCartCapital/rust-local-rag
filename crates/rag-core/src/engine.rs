@@ -9,7 +9,7 @@ use crate::types::{
 };
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "tracing")]
-use tracing::{field, instrument};
+use tracing::{Instrument, field, instrument};
 use uuid::Uuid;
 
 pub struct RagEngine<B: EmbeddingBackend, R = ()> {
@@ -488,7 +488,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights, score_min = field::Empty, score_max = field::Empty, cutoff_score = field::Empty), err))]
     async fn search_internal(
         &self,
         query: &str,
@@ -506,87 +506,112 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         let top_k = top_k.max(1);
 
-        #[cfg(feature = "tracing")]
-        let start = std::time::Instant::now();
-
-        let mut query_embedding = self.backend.embed(query).await.inspect_err(|_e| {
+        // Phase 1: Embedding
+        let mut query_embedding = {
+            let fut = self.backend.embed(query);
             #[cfg(feature = "tracing")]
-            tracing::error!(error = ?_e, "Failed to generate query embedding");
-        })?;
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(duration_ms = ?start.elapsed().as_millis(), "Generated query embedding");
+            let fut = fut.instrument(tracing::debug_span!("generate_embedding"));
+            fut.await.inspect_err(|_e| {
+                #[cfg(feature = "tracing")]
+                tracing::error!(error = ?_e, "Failed to generate query embedding");
+            })?
+        };
 
         crate::search::normalize(&mut query_embedding);
 
-        let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
-            Some(index) => Box::new(
-                index
-                    .search(&query_embedding, top_k.saturating_mul(5))
-                    .into_iter(),
-            ),
-            None => Box::new(self.state.chunks.keys().cloned()),
-        };
+        // Phase 2: Candidate Selection & Initial Scoring
+        let scores = {
+            #[cfg(feature = "tracing")]
+            let parent_span = tracing::Span::current();
+            #[cfg(feature = "tracing")]
+            let _span = tracing::debug_span!("candidate_selection").entered();
 
-        let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
-        let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
+            let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
+                Some(index) => Box::new(
+                    index
+                        .search(&query_embedding, top_k.saturating_mul(5))
+                        .into_iter(),
+                ),
+                None => Box::new(self.state.chunks.keys().cloned()),
+            };
 
-        let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
+            let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
+            let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
-        #[cfg(feature = "tracing")]
-        let ann_count = candidate_ids.len();
+            let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
 
-        candidate_ids.extend(lexical_map.keys().cloned());
+            #[cfg(feature = "tracing")]
+            let ann_count = candidate_ids.len();
 
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            ann_candidates = ann_count,
-            lexical_candidates = lexical_map.len(),
-            candidates_overlap =
-                (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
-            total_unique_candidates = candidate_ids.len(),
-            "Candidate selection complete"
-        );
+            candidate_ids.extend(lexical_map.keys().cloned());
 
-        if candidate_ids.is_empty() {
-            return Ok(vec![]);
-        }
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                ann_candidates = ann_count,
+                lexical_candidates = lexical_map.len(),
+                candidates_overlap =
+                    (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
+                total_unique_candidates = candidate_ids.len(),
+                "Candidate selection complete"
+            );
 
-        let max_lexical = lexical_map
-            .values()
-            .copied()
-            .fold(0.0_f32, f32::max)
-            .max(f32::EPSILON);
-
-        let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
-
-        for chunk_id in candidate_ids {
-            if let Some(chunk) = self.state.chunks.get(&chunk_id) {
-                let embedding_score =
-                    crate::search::dot_product(&query_embedding, &chunk.embedding);
-                let lexical_score = lexical_map
-                    .get(&chunk_id)
-                    .map(|score| score / max_lexical)
-                    .unwrap_or(0.0);
-                let combined_score =
-                    weights.embedding * embedding_score + weights.lexical * lexical_score;
-
-                scores.push((combined_score, embedding_score, lexical_score, chunk));
+            if candidate_ids.is_empty() {
+                return Ok(vec![]);
             }
-        }
 
-        let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
-        if initial_k < scores.len() {
-            scores.select_nth_unstable_by(initial_k, |a, b| {
-                b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id))
-            });
-            scores.truncate(initial_k);
-        }
-        scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id)));
+            let max_lexical = lexical_map
+                .values()
+                .copied()
+                .fold(0.0_f32, f32::max)
+                .max(f32::EPSILON);
+
+            let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
+
+            for chunk_id in candidate_ids {
+                if let Some(chunk) = self.state.chunks.get(&chunk_id) {
+                    let embedding_score =
+                        crate::search::dot_product(&query_embedding, &chunk.embedding);
+                    let lexical_score = lexical_map
+                        .get(&chunk_id)
+                        .map(|score| score / max_lexical)
+                        .unwrap_or(0.0);
+                    let combined_score =
+                        weights.embedding * embedding_score + weights.lexical * lexical_score;
+
+                    scores.push((combined_score, embedding_score, lexical_score, chunk));
+                }
+            }
+
+            // Capture initial score range before truncation
+            #[cfg(feature = "tracing")]
+            if !scores.is_empty() {
+                let mut min_s = f32::MAX;
+                let mut max_s = f32::MIN;
+                for (s, _, _, _) in &scores {
+                    if *s < min_s {
+                        min_s = *s;
+                    }
+                    if *s > max_s {
+                        max_s = *s;
+                    }
+                }
+                parent_span.record("score_min", min_s);
+                parent_span.record("score_max", max_s);
+            }
+
+            let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
+            if initial_k < scores.len() {
+                scores.select_nth_unstable_by(initial_k, |a, b| {
+                    b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id))
+                });
+                scores.truncate(initial_k);
+            }
+            scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id)));
+            scores
+        }; // End of candidate_selection span
 
         let candidates: Vec<SearchResultWithEmbedding> = scores
             .into_iter()
-            .take(initial_k)
             .map(|(combined, embed, lex, chunk)| SearchResultWithEmbedding {
                 result: SearchResult {
                     chunk_id: chunk.id.clone(),
@@ -629,23 +654,21 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        // Phase 3: Reranking
         let reranked: Vec<RerankedResult> = match &self.reranker {
             Some(reranker) => {
+                let fut = reranker.rerank(query, &reranker_inputs);
                 #[cfg(feature = "tracing")]
-                let rerank_start = std::time::Instant::now();
+                let fut = fut.instrument(tracing::debug_span!("reranking"));
 
-                let res = reranker
-                    .rerank(query, &reranker_inputs)
-                    .await
-                    .unwrap_or_else(|_err| {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(error = ?_err, "Reranker failed, falling back to initial scores");
-                        Vec::new()
-                    });
+                let res = fut.await.unwrap_or_else(|_err| {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(error = ?_err, "Reranker failed, falling back to initial scores");
+                    Vec::new()
+                });
 
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
-                    duration_ms = ?rerank_start.elapsed().as_millis(),
                     input_count = reranker_inputs.len(),
                     output_count = res.len(),
                     "Reranking complete"
@@ -731,16 +754,21 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         }
 
         #[cfg(feature = "tracing")]
-        if let Some(first) = ordered_results.first() {
-            tracing::debug!(
-                top_match_id = %first.result.chunk_id,
-                top_match_score = %first.result.score,
-                top_match_doc = %first.result.document,
-                result_count = ordered_results.len(),
-                "Search internal finished"
-            );
-        } else {
-            tracing::debug!("Search internal finished with 0 results");
+        {
+            if let Some(last) = ordered_results.last() {
+                tracing::Span::current().record("cutoff_score", last.result.score);
+            }
+            if let Some(first) = ordered_results.first() {
+                tracing::debug!(
+                    top_match_id = %first.result.chunk_id,
+                    top_match_score = %first.result.score,
+                    top_match_doc = %first.result.document,
+                    result_count = ordered_results.len(),
+                    "Search internal finished"
+                );
+            } else {
+                tracing::debug!("Search internal finished with 0 results");
+            }
         }
 
         Ok(ordered_results)
