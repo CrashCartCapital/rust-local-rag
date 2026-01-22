@@ -922,4 +922,72 @@ mod tests {
         );
         assert!(combined_text.contains("Content B."), "Should have B");
     }
+
+    #[test]
+    fn test_null_bytes_handling() {
+        // \0 is treated as a character (1 byte), not whitespace.
+        let text = "Hello\0World";
+        // approximate_token_count:
+        // Bytes: 11.
+        // Spaces: 0.
+        // Words: 1.
+        // Chars: 11.
+        // Estimate: 11/4 = 3 (approx).
+        // It should remain as one sentence/token unless split.
+        let sentences = extract_sentences(text, None).unwrap();
+        assert!(!sentences.is_empty());
+        assert_eq!(sentences[0].text, "Hello\0World");
+        // Verify it didn't crash or truncate
+    }
+
+    #[test]
+    fn test_nbsp_handling() {
+        // NBSP (\u{00A0}) is 0xC2 0xA0 in UTF-8.
+        // split_whitespace() handles it.
+        // normalize_from_parts replaces it with ' '.
+        // So approximate_token_count should see it as a space.
+        let text = "Hello\u{00A0}World";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        // Check if normalized to space
+        assert_eq!(sentences[0].text, "Hello World");
+
+        // Check token count
+        // "Hello World" -> 11 chars, 1 space.
+        // Word count 2.
+        // Estimate max(11/4=3, 2*0.9=2) = 3.
+        assert_eq!(sentences[0].tokens, 3);
+    }
+
+    #[test]
+    fn test_limit_one_multibyte() {
+        let text = "😀";
+        // Limit 1.
+        // approximate_token_count("😀") -> 4 bytes. 0 spaces.
+        // continuation: 3 bytes (0x9F, 0x98, 0x80 - wait, F0 9F 98 80).
+        // 4 bytes. 3 continuation.
+        // Chars: 1.
+        // Word: 1.
+        // Estimate: max(1/4=1, 1). = 1.
+        // Fits in limit 1.
+        let chunks = chunk_text(text, 1, 0).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "😀");
+    }
+
+    #[test]
+    fn test_mixed_newline_handling() {
+        // \r\n should be normalized to space by normalize_from_parts
+        let text = "Line1\r\nLine2";
+        let sentences = extract_sentences(text, None).unwrap();
+        assert_eq!(sentences[0].text, "Line1 Line2");
+    }
+
+    #[test]
+    fn test_control_chars_preservation() {
+        // Tab \t should be normalized to space if treated as whitespace.
+        let text = "Col1\tCol2";
+        let sentences = extract_sentences(text, None).unwrap();
+        assert_eq!(sentences[0].text, "Col1 Col2");
+    }
 }
