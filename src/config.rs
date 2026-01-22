@@ -9,6 +9,7 @@ pub struct Config {
     pub reranker_timeout: Duration,
     pub reranker_concurrency: NonZeroUsize,
     pub default_logprob_fallback: f64,
+    pub embedding_weight: f32,
 }
 
 impl Default for Config {
@@ -20,6 +21,7 @@ impl Default for Config {
             reranker_timeout: Duration::from_secs(60),
             reranker_concurrency: NonZeroUsize::new(1).expect("1 is non-zero"),
             default_logprob_fallback: -10.0,
+            embedding_weight: 0.7,
         }
     }
 }
@@ -27,6 +29,17 @@ impl Default for Config {
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Self::default();
+
+        if let Some(weight) = parse_env_f32("RAG_EMBEDDING_WEIGHT")? {
+            if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_WEIGHT",
+                    value: weight.to_string(),
+                    message: "must be finite and between 0.0 and 1.0".to_string(),
+                });
+            }
+            config.embedding_weight = weight;
+        }
 
         if let Some(batch_size) = parse_env_nonzero_usize("RAG_EMBEDDING_BATCH_SIZE")? {
             if batch_size.get() > 1024 {
@@ -103,6 +116,7 @@ impl Config {
             reranker_timeout_secs = self.reranker_timeout.as_secs(),
             reranker_concurrency = self.reranker_concurrency.get(),
             default_logprob_fallback = self.default_logprob_fallback,
+            embedding_weight = self.embedding_weight,
             "Configuration loaded"
         );
     }
@@ -130,6 +144,22 @@ impl std::error::Error for ConfigError {}
 fn parse_env_u64(var: &'static str) -> Result<Option<u64>, ConfigError> {
     match std::env::var(var) {
         Ok(val) => val.parse::<u64>().map(Some).map_err(|e| ConfigError {
+            var,
+            value: val,
+            message: e.to_string(),
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ConfigError {
+            var,
+            value: String::new(),
+            message: e.to_string(),
+        }),
+    }
+}
+
+fn parse_env_f32(var: &'static str) -> Result<Option<f32>, ConfigError> {
+    match std::env::var(var) {
+        Ok(val) => val.parse::<f32>().map(Some).map_err(|e| ConfigError {
             var,
             value: val,
             message: e.to_string(),
@@ -361,6 +391,62 @@ mod tests {
         with_env_var("RAG_EMBEDDING_BATCH_SIZE", "1025", || {
             let err = Config::from_env().unwrap_err();
             assert!(err.message.contains("must be <= 1024"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_valid() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "0.5", || {
+            let config = Config::from_env().unwrap();
+            assert!((config.embedding_weight - 0.5).abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_zero() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "0.0", || {
+            let config = Config::from_env().unwrap();
+            assert!((config.embedding_weight - 0.0).abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_one() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "1.0", || {
+            let config = Config::from_env().unwrap();
+            assert!((config.embedding_weight - 1.0).abs() < f32::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_negative() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "-0.1", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and between 0.0 and 1.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_too_large() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "1.1", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and between 0.0 and 1.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_nan() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "NaN", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.message.contains("must be finite and between 0.0 and 1.0"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_invalid_format() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "chicken", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(!err.message.contains("must be finite")); // Should be parse error
         });
     }
 }

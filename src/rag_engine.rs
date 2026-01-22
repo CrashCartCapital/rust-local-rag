@@ -27,6 +27,7 @@ pub struct RagEngine {
     start_time: std::time::Instant,
     index_store: Arc<SqliteIndexStore>,
     incompatible_index_reason: Option<String>,
+    embedding_weight: f32,
 }
 
 impl RagEngine {
@@ -115,6 +116,7 @@ impl RagEngine {
             start_time: std::time::Instant::now(),
             index_store,
             incompatible_index_reason,
+            embedding_weight: config.embedding_weight,
         })
     }
 
@@ -277,7 +279,7 @@ impl RagEngine {
             return Err(anyhow::anyhow!(reason.clone()));
         }
         let start = std::time::Instant::now();
-        let resolved = ResolvedWeights::from_query_weights(weights);
+        let resolved = ResolvedWeights::from_query_weights(weights, self.embedding_weight);
         let weights = rag_core::SearchWeights {
             embedding: resolved.embedding,
             lexical: resolved.lexical,
@@ -311,7 +313,7 @@ impl RagEngine {
             return Err(anyhow::anyhow!(reason.clone()));
         }
         let start = std::time::Instant::now();
-        let resolved = ResolvedWeights::from_query_weights(weights);
+        let resolved = ResolvedWeights::from_query_weights(weights, self.embedding_weight);
         let weights = rag_core::SearchWeights {
             embedding: resolved.embedding,
             lexical: resolved.lexical,
@@ -571,13 +573,11 @@ fn compute_document_hash(data: &[u8]) -> String {
 }
 
 // Default score blending weights (can be overridden via environment variables)
-const DEFAULT_EMBEDDING_WEIGHT: f32 = 0.7;
 const DEFAULT_LEXICAL_WEIGHT: f32 = 0.3;
 const DEFAULT_RERANKER_WEIGHT: f32 = 0.7;
 const DEFAULT_INITIAL_SCORE_WEIGHT: f32 = 0.3;
 
 // Cached weight values using OnceLock for performance (avoids repeated env var reads)
-static EMBEDDING_WEIGHT: OnceLock<f32> = OnceLock::new();
 static LEXICAL_WEIGHT: OnceLock<f32> = OnceLock::new();
 static RERANKER_WEIGHT: OnceLock<f32> = OnceLock::new();
 static INITIAL_SCORE_WEIGHT: OnceLock<f32> = OnceLock::new();
@@ -589,10 +589,6 @@ fn parse_weight(env_var: &str, default: f32) -> f32 {
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|w| w.is_finite() && (0.0..=1.0).contains(w))
         .unwrap_or(default)
-}
-
-fn get_embedding_weight() -> f32 {
-    *EMBEDDING_WEIGHT.get_or_init(|| parse_weight("RAG_EMBEDDING_WEIGHT", DEFAULT_EMBEDDING_WEIGHT))
 }
 
 fn get_lexical_weight() -> f32 {
@@ -649,9 +645,9 @@ struct ResolvedWeights {
 }
 
 impl ResolvedWeights {
-    fn from_query_weights(weights: Option<&QueryWeights>) -> Self {
+    fn from_query_weights(weights: Option<&QueryWeights>, default_embedding: f32) -> Self {
         Self {
-            embedding: resolve_weight(weights.and_then(|w| w.embedding), get_embedding_weight()),
+            embedding: resolve_weight(weights.and_then(|w| w.embedding), default_embedding),
             lexical: resolve_weight(weights.and_then(|w| w.lexical), get_lexical_weight()),
             reranker: resolve_weight(weights.and_then(|w| w.reranker), get_reranker_weight()),
             initial: resolve_weight(weights.and_then(|w| w.initial), get_initial_score_weight()),
