@@ -511,6 +511,7 @@ impl SqliteIndexStore {
             return Ok(());
         };
 
+        #[allow(clippy::collapsible_if)]
         if state.embedding_dim == 0 && !state.chunks.is_empty() {
             if let Some(first) = state.chunks.values().next() {
                 state.embedding_dim = first.embedding.len();
@@ -651,6 +652,7 @@ fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
 }
 
 fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>> {
+    #[allow(clippy::manual_is_multiple_of)]
     if bytes.len() % 4 != 0 {
         return Err(anyhow::anyhow!(
             "Embedding blob length {} is not divisible by 4",
@@ -678,5 +680,38 @@ fn resolution_from_str(s: &str) -> Option<Resolution> {
         "section" => Some(Resolution::Section),
         "chunk" => Some(Resolution::Chunk),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_f32_blob_success() {
+        let input = vec![
+            0x00, 0x00, 0x80, 0x3f, // 1.0
+            0x00, 0x00, 0x00, 0x40, // 2.0
+        ];
+        let result = decode_f32_blob(&input).unwrap();
+        assert_eq!(result, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_decode_f32_blob_invalid_length() {
+        let input = vec![0x00, 0x00, 0x80]; // 3 bytes
+        let result = decode_f32_blob(&input);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Embedding blob length 3 is not divisible by 4"
+        );
+    }
+
+    #[test]
+    fn test_decode_f32_blob_empty() {
+        let input = vec![];
+        let result = decode_f32_blob(&input).unwrap();
+        assert!(result.is_empty());
     }
 }
