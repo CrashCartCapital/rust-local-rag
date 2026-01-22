@@ -92,3 +92,56 @@ async fn test_load_from_dir_handles_invalid_utf8() {
     );
     assert_eq!(engine.chunk_count(), 0, "Engine should be empty");
 }
+
+#[tokio::test]
+async fn test_load_from_dir_handles_inconsistent_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let backend = MockBackend;
+    let mut engine = RagEngine::new(backend);
+
+    let index_path = rag_core::persistence::index_path(temp_dir.path(), "mock-model");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+
+    // Valid JSON but inconsistent state (chunks exist, but document_hashes is empty)
+    // This simulates a partial flush or corruption where document tracking was lost.
+    let json = r#"{
+        "schema_version": 2,
+        "embedding_model_id": "mock-model",
+        "embedding_dim": 2,
+        "chunks": {
+            "chunk-1": {
+                "id": "chunk-1",
+                "document_name": "doc1.txt",
+                "text": "hello",
+                "embedding": [0.0, 0.0],
+                "chunk_index": 0,
+                "page_number": 0,
+                "section": null,
+                "metadata": {
+                    "page_range": null,
+                    "sentence_range": null,
+                    "section_title": null,
+                    "token_count": 1,
+                    "overlap_with_previous": 0
+                },
+                "tags": [],
+                "resolution": "Chunk",
+                "parent_id": null
+            }
+        },
+        "document_hashes": {},
+        "needs_reindex": false
+    }"#;
+
+    std::fs::write(&index_path, json).unwrap();
+
+    // Attempt to load
+    let result = engine.load_from_dir(temp_dir.path());
+
+    // Assertions
+    assert!(result.is_ok(), "Should load without error");
+    assert!(
+        engine.needs_reindex(),
+        "Should detect inconsistent state and request reindex"
+    );
+}

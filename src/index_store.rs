@@ -512,9 +512,12 @@ impl SqliteIndexStore {
         };
 
         if state.embedding_dim == 0 && !state.chunks.is_empty() {
-            if let Some(first) = state.chunks.values().next() {
-                state.embedding_dim = first.embedding.len();
-            }
+            state.embedding_dim = state
+                .chunks
+                .values()
+                .next()
+                .map(|c| c.embedding.len())
+                .unwrap_or(0);
         }
         if state.embedding_dim == 0 {
             self.set_model_needs_reindex(model_id, embedding_dim, true)
@@ -650,6 +653,7 @@ fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>> {
     if bytes.len() % 4 != 0 {
         return Err(anyhow::anyhow!(
