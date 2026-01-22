@@ -478,6 +478,7 @@ impl SqliteIndexStore {
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     pub async fn migrate_json_if_needed(
         &self,
         data_dir: &Path,
@@ -650,6 +651,7 @@ fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>> {
     if bytes.len() % 4 != 0 {
         return Err(anyhow::anyhow!(

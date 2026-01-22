@@ -404,7 +404,7 @@ fn pyerr_to_embedding_error(e: PyErr) -> EmbeddingError {
         if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) {
             EmbeddingError::ModelNotFound(err_str)
         } else if e.is_instance_of::<pyo3::exceptions::PyConnectionError>(py) {
-            EmbeddingError::Connection(err_str)
+            EmbeddingError::Unavailable(err_str)
         } else if e.is_instance_of::<pyo3::exceptions::PyTimeoutError>(py) {
             EmbeddingError::Timeout(std::time::Duration::from_secs(30))
         } else {

@@ -27,7 +27,7 @@ fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> EmbeddingError {
     if e.is_timeout() {
         EmbeddingError::Timeout(timeout)
     } else if e.is_connect() {
-        EmbeddingError::Connection(e.to_string())
+        EmbeddingError::Unavailable(e.to_string())
     } else {
         EmbeddingError::Api(e.to_string())
     }

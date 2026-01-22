@@ -67,7 +67,7 @@ pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
                 // Set embedding error subtype
                 if let Ok(exc) = pyerr.value(py).extract::<Bound<'_, PyAny>>() {
                     let kind = match emb_err {
-                        rag_core::EmbeddingError::Connection(_) => "connection",
+                        rag_core::EmbeddingError::Unavailable(_) => "unavailable",
                         rag_core::EmbeddingError::ModelNotFound(_) => "model_not_found",
                         rag_core::EmbeddingError::Api(_) => "api",
                         rag_core::EmbeddingError::Timeout(_) => "timeout",

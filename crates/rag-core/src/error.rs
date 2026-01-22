@@ -116,8 +116,8 @@ pub enum PersistenceError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
-    #[error("connection failed: {0}")]
-    Connection(String),
+    #[error("service unavailable: {0}")]
+    Unavailable(String),
 
     #[error("model not found: {0}")]
     ModelNotFound(String),
@@ -332,5 +332,11 @@ mod tests {
             }
             _ => panic!("Expected DimensionMismatch variant"),
         }
+    }
+
+    #[test]
+    fn test_embedding_error_unavailable() {
+        let err = EmbeddingError::Unavailable("connection refused".to_string());
+        assert_eq!(err.to_string(), "service unavailable: connection refused");
     }
 }
