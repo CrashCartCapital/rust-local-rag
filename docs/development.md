@@ -17,13 +17,18 @@ We use `make` for common tasks.
 make run                    # Run application (DEV=true)
 make dev-start              # Start Ollama + Run application
 make watch                  # Watch for changes and run checks
-make logs                   # View application logs
+make logs                   # View application logs (./logs/rust-local-rag.log)
 make kill                   # Kill all rust-local-rag processes
+make setup                  # Complete development environment setup (tools + ollama)
 
 # Build
 make build                  # Debug build
 make release                # Optimized release build
+
+# Cleaning
 make clean                  # Clean build artifacts
+make clean-build            # Clean Rust build cache (with size report)
+make clean-all              # Comprehensive clean (build + Ollama models)
 
 # Testing
 make test                   # Run tests
@@ -38,6 +43,7 @@ make fmt                    # Format code
 # Maintenance
 make update                 # Update dependencies
 make fix                    # Auto-fix clippy issues
+make install-tools          # Install required cargo tools
 
 # Full CI Pipeline
 make ci                     # check + lint + test + build
@@ -72,12 +78,15 @@ make ollama-models          # Pull required models
 *   `src/lib.rs`: Library definitions and module exports.
 *   `src/config.rs`: Centralized configuration loading.
 *   `src/mcp_server.rs`: MCP server entrypoint (re-exports `src/mcp`).
-*   `src/mcp/`: MCP implementation (HTTP, tools, models).
+*   `src/mcp/`: MCP implementation (HTTP, tools, models, formatting).
 *   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
+*   `src/index_store.rs`: Manages persistence of chunk embeddings and metadata.
+*   `src/job_payload.rs`: Definitions for job-related data structures.
+*   `src/progress_logger.rs`: Utilities for logging progress of long-running tasks.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
 *   `src/bin/rag_tui/`: TUI client application.
 
