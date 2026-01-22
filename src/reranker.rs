@@ -8,6 +8,15 @@ use crate::config::Config;
 
 pub use rag_core::{RerankError, RerankedResult, RerankerCandidate};
 
+/// Helper to sort results deterministically, handling ties and NaNs.
+fn sort_reranked_results(results: &mut [RerankedResult]) {
+    results.sort_by(|a, b| {
+        b.relevance
+            .total_cmp(&a.relevance)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
+}
+
 fn is_fatal_error(err: &anyhow::Error) -> bool {
     match err.root_cause().downcast_ref::<reqwest::Error>() {
         Some(e) if e.is_connect() => true,
@@ -278,12 +287,7 @@ Answer:"#
         }
 
         // Sort by relevance score (highest first)
-        results.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-        });
+        sort_reranked_results(&mut results);
 
         Ok(results)
     }
@@ -972,5 +976,53 @@ mod tests {
         assert!(result.is_some());
         let score = result.unwrap();
         assert_eq!(score.yes_logprob.unwrap(), -0.1);
+    }
+
+    #[test]
+    fn test_reranker_stability_with_nans() {
+        let mut results = vec![
+            RerankedResult {
+                chunk_id: "a".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "b".to_string(),
+                relevance: f32::NAN,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "c".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "d".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+        ];
+
+        sort_reranked_results(&mut results);
+
+        // total_cmp treats NaN as the largest value (greater than Infinity).
+        // Since we sort by b.total_cmp(a) (descending), NaNs come FIRST.
+        // Then 0.9, then 0.5s (sorted by ID).
+
+        assert!(results[0].relevance.is_nan());
+        assert_eq!(results[0].chunk_id, "b");
+
+        assert!((results[1].relevance - 0.9).abs() < f32::EPSILON);
+        assert_eq!(results[1].chunk_id, "d");
+
+        assert!((results[2].relevance - 0.5).abs() < f32::EPSILON);
+        assert_eq!(results[2].chunk_id, "a"); // ID 'a' < 'c'
+
+        assert!((results[3].relevance - 0.5).abs() < f32::EPSILON);
+        assert_eq!(results[3].chunk_id, "c");
     }
 }
