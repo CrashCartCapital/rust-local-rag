@@ -488,7 +488,27 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self, query),
+            fields(
+                query_len = query.len(),
+                top_k = top_k,
+                weights = ?weights,
+                embedding_ms = field::Empty,
+                retrieval_ms = field::Empty,
+                scoring_ms = field::Empty,
+                rerank_ms = field::Empty,
+                ann_hits = field::Empty,
+                lexical_hits = field::Empty,
+                total_candidates = field::Empty,
+                rerank_input_count = field::Empty,
+                final_count = field::Empty
+            ),
+            err
+        )
+    )]
     async fn search_internal(
         &self,
         query: &str,
@@ -507,7 +527,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let top_k = top_k.max(1);
 
         #[cfg(feature = "tracing")]
-        let start = std::time::Instant::now();
+        let embed_start = std::time::Instant::now();
 
         let mut query_embedding = self.backend.embed(query).await.inspect_err(|_e| {
             #[cfg(feature = "tracing")]
@@ -515,9 +535,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         })?;
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(duration_ms = ?start.elapsed().as_millis(), "Generated query embedding");
+        tracing::Span::current().record("embedding_ms", embed_start.elapsed().as_millis());
 
         crate::search::normalize(&mut query_embedding);
+
+        #[cfg(feature = "tracing")]
+        let retrieval_start = std::time::Instant::now();
 
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
             Some(index) => Box::new(
@@ -532,25 +555,26 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
-
         #[cfg(feature = "tracing")]
         let ann_count = candidate_ids.len();
 
         candidate_ids.extend(lexical_map.keys().cloned());
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(
-            ann_candidates = ann_count,
-            lexical_candidates = lexical_map.len(),
-            candidates_overlap =
-                (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
-            total_unique_candidates = candidate_ids.len(),
-            "Candidate selection complete"
-        );
+        {
+            let retrieval_duration = retrieval_start.elapsed().as_millis();
+            tracing::Span::current().record("retrieval_ms", retrieval_duration);
+            tracing::Span::current().record("ann_hits", ann_count);
+            tracing::Span::current().record("lexical_hits", lexical_map.len());
+            tracing::Span::current().record("total_candidates", candidate_ids.len());
+        }
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
         }
+
+        #[cfg(feature = "tracing")]
+        let scoring_start = std::time::Instant::now();
 
         let max_lexical = lexical_map
             .values()
@@ -607,6 +631,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("scoring_ms", scoring_start.elapsed().as_millis());
+
         if candidates.is_empty() {
             return Ok(vec![]);
         }
@@ -629,6 +656,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             })
             .collect();
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("rerank_input_count", reranker_inputs.len());
+
         let reranked: Vec<RerankedResult> = match &self.reranker {
             Some(reranker) => {
                 #[cfg(feature = "tracing")]
@@ -639,17 +669,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     .await
                     .unwrap_or_else(|_err| {
                         #[cfg(feature = "tracing")]
-                        tracing::error!(error = ?_err, "Reranker failed, falling back to initial scores");
+                        tracing::error!(
+                            error = ?_err,
+                            query_len = query.len(),
+                            weights = ?weights,
+                            "Reranker failed, falling back to initial scores"
+                        );
                         Vec::new()
                     });
 
                 #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    duration_ms = ?rerank_start.elapsed().as_millis(),
-                    input_count = reranker_inputs.len(),
-                    output_count = res.len(),
-                    "Reranking complete"
-                );
+                tracing::Span::current().record("rerank_ms", rerank_start.elapsed().as_millis());
                 res
             }
             None => Vec::new(),
@@ -729,6 +759,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 }
             }
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("final_count", ordered_results.len());
 
         #[cfg(feature = "tracing")]
         if let Some(first) = ordered_results.first() {
