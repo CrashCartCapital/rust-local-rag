@@ -1015,6 +1015,26 @@ where
                 .unwrap_or(0);
         }
 
+        // Validate that all chunks match the expected dimension
+        if state.embedding_dim > 0 {
+            for (id, chunk) in &state.chunks {
+                if chunk.embedding.len() != state.embedding_dim {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        "Chunk {} has mismatched dimension {}. Expected {}. Marking for reindex.",
+                        id,
+                        chunk.embedding.len(),
+                        state.embedding_dim
+                    );
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = id;
+
+                    self.state.needs_reindex = true;
+                    return Ok(());
+                }
+            }
+        }
+
         self.state = state;
 
         for chunk in self.state.chunks.values_mut() {

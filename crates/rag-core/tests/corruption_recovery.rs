@@ -92,3 +92,73 @@ async fn test_load_from_dir_handles_invalid_utf8() {
     );
     assert_eq!(engine.chunk_count(), 0, "Engine should be empty");
 }
+
+#[tokio::test]
+async fn test_load_from_dir_handles_dimension_mismatch() {
+    use rag_core::{persistence::EngineState, types::DocumentChunk};
+    use std::collections::HashSet;
+
+    let temp_dir = TempDir::new().unwrap();
+    let backend = MockBackend;
+    let mut engine = RagEngine::new(backend);
+
+    // Create state manually
+    let mut state = EngineState::new("mock-model", 2);
+
+    // Valid chunk (dim 2)
+    state.chunks.insert(
+        "valid".to_string(),
+        DocumentChunk {
+            id: "valid".to_string(),
+            document_name: "doc1".to_string(),
+            text: "text".to_string(),
+            embedding: vec![0.0, 0.0],
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            metadata: Default::default(),
+            tags: HashSet::new(),
+            resolution: Default::default(),
+            parent_id: None,
+        },
+    );
+
+    // Invalid chunk (dim 3)
+    state.chunks.insert(
+        "invalid".to_string(),
+        DocumentChunk {
+            id: "invalid".to_string(),
+            document_name: "doc1".to_string(),
+            text: "text".to_string(),
+            embedding: vec![0.0, 0.0, 0.0], // Invalid
+            chunk_index: 1,
+            page_number: 1,
+            section: None,
+            metadata: Default::default(),
+            tags: HashSet::new(),
+            resolution: Default::default(),
+            parent_id: None,
+        },
+    );
+
+    // Ensure hash exists so it doesn't trigger "missing hash" reindex
+    state
+        .document_hashes
+        .insert("doc1".to_string(), "hash".to_string());
+
+    let index_path = rag_core::persistence::index_path(temp_dir.path(), "mock-model");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+
+    let f = std::fs::File::create(&index_path).unwrap();
+    serde_json::to_writer(f, &state).unwrap();
+
+    // Load
+    engine.load_from_dir(temp_dir.path()).unwrap();
+
+    // Assertions
+    assert!(
+        engine.needs_reindex(),
+        "Should flag reindex due to dimension mismatch"
+    );
+    assert_eq!(engine.chunk_count(), 0, "Should abort loading state");
+}
