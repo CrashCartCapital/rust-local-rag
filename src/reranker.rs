@@ -280,8 +280,7 @@ Answer:"#
         // Sort by relevance score (highest first)
         results.sort_by(|a, b| {
             b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.relevance)
                 .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
@@ -973,4 +972,56 @@ mod tests {
         let score = result.unwrap();
         assert_eq!(score.yes_logprob.unwrap(), -0.1);
     }
+}
+
+#[test]
+fn test_reranker_stable_sorting() {
+    use rag_core::RerankedResult;
+
+    let mut results = vec![
+        RerankedResult {
+            chunk_id: "c".to_string(),
+            relevance: 0.5,
+            yes_logprob: None,
+            no_logprob: None,
+        },
+        RerankedResult {
+            chunk_id: "a".to_string(),
+            relevance: f32::NAN,
+            yes_logprob: None,
+            no_logprob: None,
+        },
+        RerankedResult {
+            chunk_id: "b".to_string(),
+            relevance: 0.5,
+            yes_logprob: None,
+            no_logprob: None,
+        },
+        RerankedResult {
+            chunk_id: "d".to_string(),
+            relevance: 0.8,
+            yes_logprob: None,
+            no_logprob: None,
+        },
+        RerankedResult {
+            chunk_id: "e".to_string(),
+            relevance: f32::NAN,
+            yes_logprob: None,
+            no_logprob: None,
+        },
+    ];
+
+    // Apply the same sort logic as in RerankerService::rerank
+    results.sort_by(|a, b| {
+        b.relevance
+            .total_cmp(&a.relevance)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
+
+    let ids: Vec<String> = results.into_iter().map(|r| r.chunk_id).collect();
+
+    // total_cmp orders NaNs > infinity > numbers
+    // We sort descending by score (b.total_cmp(a)), so NaNs come first.
+    // Then by ID ascending.
+    assert_eq!(ids, vec!["a", "e", "d", "b", "c"]);
 }
