@@ -538,7 +538,11 @@ async fn run_app(
             // Receive model fetch results (for settings dropdowns)
             // Uses if-guard pattern: branch only active when receiver exists
             result = async {
-                app.model_fetch_rx.as_mut().unwrap().await
+                if let Some(rx) = app.model_fetch_rx.as_mut() {
+                    rx.await
+                } else {
+                    std::future::pending().await
+                }
             }, if app.model_fetch_rx.is_some() => {
                 // Clear the receiver since it's consumed
                 app.model_fetch_rx = None;
