@@ -361,27 +361,41 @@ fn approximate_token_count(value: &str) -> usize {
     }
 
     let bytes = trimmed.as_bytes();
-    let mut space_count = 0;
-    let mut continuation_count = 0;
+    let mut space_count = 0usize;
+    let mut ascii_count = 0usize;
+    let mut complex_count = 0usize;
 
     // Optimization: Single pass byte scan avoids state machine overhead.
-    // 1. We know the input is normalized (from normalize_from_parts) so words are separated
-    //    by single spaces. Thus word_count = space_count + 1.
-    // 2. We can detect multi-byte chars by counting continuation bytes (10xxxxxx).
-    //    char_count = total_bytes - continuation_bytes.
+    // We categorize bytes into:
+    // - Spaces (count as word separators)
+    // - ASCII (0x00-0x7F): "cheap" characters (count as 1/4 token)
+    // - Complex (0x80+ start bytes): "expensive" characters (count as 0.75 token)
+    // - Continuation bytes (0x80-0xBF): ignored
     for &b in bytes {
-        if b == b' ' {
-            space_count += 1;
-        } else if (b & 0xC0) == 0x80 {
-            // Count UTF-8 continuation bytes to subtract from total length
-            continuation_count += 1;
+        if (b & 0xC0) == 0x80 {
+            // Continuation byte, ignore
+            continue;
+        }
+
+        if b < 128 {
+            if b == b' ' {
+                space_count += 1;
+            }
+            ascii_count += 1;
+        } else {
+            // Start of multi-byte sequence
+            complex_count += 1;
         }
     }
 
-    let char_count = bytes.len() - continuation_count;
     let word_count = space_count + 1;
 
-    let char_estimate = char_count.div_ceil(4);
+    // Heuristic:
+    // ASCII chars are avg 4 chars/token -> count/4.
+    // Complex chars (CJK, Emoji) are avg 1.3 chars/token -> count * 3/4.
+    // We use integer math: (ascii + complex * 3).div_ceil(4)
+    let char_estimate = (ascii_count + complex_count * 3).div_ceil(4);
+
     // (word_count * 0.9).ceil() is equivalent to (word_count * 9 + 9) / 10 in integer arithmetic
     #[allow(clippy::manual_div_ceil)]
     let word_estimate = (word_count * 9 + 9) / 10;
@@ -672,7 +686,18 @@ mod tests {
         let text = "😀😀😀😀";
 
         let chunks = split_massive_word(text, limit);
-        assert_eq!(chunks.len(), 1, "Should fit in one chunk");
+        // With improved heuristic:
+        // 4 emojis -> 4 complex chars. Est = (4*3)/4 = 3 tokens.
+        // Limit 2.
+        // 2 emojis -> 2 complex chars. Est = 6/4 = 2 tokens. Fits.
+        // So should split into 2 chunks of 2 emojis.
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Should split into 2 chunks due to accurate token count"
+        );
+        assert_eq!(chunks[0], "😀😀");
+        assert_eq!(chunks[1], "😀😀");
 
         // Let's use something that generates more tokens.
         // "a".repeat(20).
@@ -851,17 +876,22 @@ mod tests {
         // Emojis are 4 bytes.
         let text = "😀😃😄😁";
         // Limit 1.
-        // With current token estimation (chars/4), 4 chars = 1 token.
-        // So this should fit in 1 chunk.
+        // With improved heuristic:
+        // 1 emoji -> 1 complex char -> 1 token.
+        // So this should split into 4 chunks.
         let chunks = split_massive_word(text, 1);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], text);
+        assert_eq!(
+            chunks.len(),
+            4,
+            "Should split into 4 chunks (1 emoji per chunk)"
+        );
+        assert_eq!(chunks[0], "😀");
 
-        // Try with 8 emojis -> 2 tokens. Limit 1.
+        // Try with 8 emojis -> 8 tokens. Limit 1.
         let text2 = "😀😃😄😁😀😃😄😁";
         let chunks2 = split_massive_word(text2, 1);
-        // Should split into 2 chunks of 4 emojis each (approx).
-        assert!(chunks2.len() >= 2);
+        // Should split into 8 chunks.
+        assert_eq!(chunks2.len(), 8);
     }
 
     #[test]
@@ -921,5 +951,63 @@ mod tests {
             combined_text
         );
         assert!(combined_text.contains("Content B."), "Should have B");
+    }
+
+    #[test]
+    fn test_token_estimation_emoji() {
+        // 10 emojis. Emojis are usually 4 bytes.
+        let text = "😀".repeat(10);
+        let tokens = approximate_token_count(&text);
+        // Heuristic: (0 ascii + 10 complex * 3) / 4 = 30 / 4 = 8.
+        assert_eq!(tokens, 8, "Expected 8 tokens for 10 emojis, got {}", tokens);
+    }
+
+    #[test]
+    fn test_token_estimation_cjk() {
+        // CJK characters. 3 bytes each.
+        // "你好世界" (Hello World) -> 4 chars.
+        // Ascii 0. Complex 4.
+        // Est: (12)/4 = 3.
+        let text = "你好世界";
+        let tokens = approximate_token_count(text);
+        assert_eq!(tokens, 3);
+
+        // Long CJK
+        let text_long = "你好".repeat(50); // 100 chars.
+        // Est: (300)/4 = 75.
+        let tokens_long = approximate_token_count(&text_long);
+        assert_eq!(tokens_long, 75);
+    }
+
+    #[test]
+    fn test_chunking_mixed_scripts() {
+        let english = "Hello world. ";
+        let cjk = "你好世界。";
+        let text = format!("{}{}", english, cjk);
+        // "Hello world. " -> 13 chars. 13 ascii (spaces included).
+        // "你好世界。" -> 5 chars (period is 3 bytes). 5 complex.
+        // Total: 13 ascii + 5 * 3 = 13 + 15 = 28. / 4 = 7.
+        // Word estimate:
+        // "Hello world. " -> 2 spaces. 3 words.
+        // "你好世界。" -> no spaces.
+        // Total spaces 2. Words 3.
+        // Word est: (3*9+9)/10 = 3.6 -> 3.
+        // Max(7, 3) = 7.
+
+        let tokens = approximate_token_count(&text);
+        assert_eq!(tokens, 7);
+    }
+
+    #[test]
+    fn test_chunking_with_zero_width_spaces() {
+        // ZWSP \u{200B}. 3 bytes (0xE2, 0x80, 0x8B).
+        // It is complex char.
+        let text = "A\u{200B}B";
+        // 'A' (ascii), ZWSP (complex), 'B' (ascii).
+        // Ascii 2. Complex 1.
+        // Est: (2 + 3)/4 = 1.25 -> 2.
+
+        let tokens = approximate_token_count(text);
+        assert_eq!(tokens, 2);
     }
 }
