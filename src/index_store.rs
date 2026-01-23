@@ -511,7 +511,8 @@ impl SqliteIndexStore {
             return Ok(());
         };
 
-        if state.embedding_dim == 0 && !state.chunks.is_empty() {
+        #[allow(clippy::collapsible_if)]
+        if state.embedding_dim == 0 {
             if let Some(first) = state.chunks.values().next() {
                 state.embedding_dim = first.embedding.len();
             }
@@ -651,7 +652,7 @@ fn encode_f32_blob(values: &[f32]) -> Vec<u8> {
 }
 
 fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(anyhow::anyhow!(
             "Embedding blob length {} is not divisible by 4",
             bytes.len()
