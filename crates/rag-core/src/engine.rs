@@ -316,6 +316,34 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, prepared), fields(doc = %prepared.document_name, chunks = prepared.chunks.len())))]
     pub fn upsert_prepared_document(&mut self, prepared: PreparedDocument) -> Result<usize> {
+        // Pass 1: Validate all chunks before modifying state
+        let mut target_dim = self.state.embedding_dim;
+
+        // If engine dim is not set, infer it from the first non-empty chunk
+        if target_dim == 0 {
+            for chunk in &prepared.chunks {
+                if !chunk.embedding.is_empty() {
+                    target_dim = chunk.embedding.len();
+                    break;
+                }
+            }
+        }
+
+        if target_dim > 0 {
+            for chunk in &prepared.chunks {
+                if !chunk.embedding.is_empty() && chunk.embedding.len() != target_dim {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::DimensionMismatch {
+                            expected: target_dim,
+                            got: chunk.embedding.len(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        // Pass 2: Apply changes (remove old, insert new)
         // Remove existing chunks even if we end up with zero usable chunks.
         let _ = self.remove_document(&prepared.document_name);
 
@@ -330,26 +358,18 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             return Ok(0);
         }
 
+        // Initialize engine state from inferred dim if needed
+        if self.state.embedding_dim == 0 && target_dim > 0 {
+            self.state.embedding_dim = target_dim;
+        }
+
+        // Initialize ANN index if needed
+        if self.ann_index.is_none() && target_dim > 0 {
+            self.ann_index = Some(AnnIndex::new(target_dim));
+        }
+
         let mut chunk_count = 0usize;
         for chunk in prepared.chunks {
-            if self.ann_index.is_none() && !chunk.embedding.is_empty() {
-                self.ann_index = Some(AnnIndex::new(chunk.embedding.len()));
-            }
-
-            if !chunk.embedding.is_empty() {
-                if self.state.embedding_dim == 0 {
-                    self.state.embedding_dim = chunk.embedding.len();
-                } else if self.state.embedding_dim != chunk.embedding.len() {
-                    return Err(EngineError::validation(
-                        chunk.id.clone(),
-                        crate::error::ValidationKind::DimensionMismatch {
-                            expected: self.state.embedding_dim,
-                            got: chunk.embedding.len(),
-                        },
-                    ));
-                }
-            }
-
             if let Some(index) = self.ann_index.as_mut() {
                 index.insert(&chunk.id, &chunk.embedding);
             }
@@ -1281,5 +1301,97 @@ mod tests {
                 res.map(|d| d.chunks.len()).unwrap_or(0)
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_prepared_document_atomic_failure() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        // 1. Setup: Insert a valid document "doc1"
+        let valid_chunk = DocumentChunk {
+            id: "chunk1".to_string(),
+            document_name: "doc1".to_string(),
+            text: "Valid content".to_string(),
+            embedding: vec![1.0, 0.0],
+            chunk_index: 0,
+            page_number: 1,
+            section: None,
+            metadata: crate::types::ChunkMetadata::default(),
+            tags: std::collections::HashSet::new(),
+            resolution: crate::types::Resolution::default(),
+            parent_id: None,
+        };
+
+        let prepared_valid = PreparedDocument {
+            document_name: "doc1".to_string(),
+            document_hash: Some("hash1".to_string()),
+            chunks: vec![valid_chunk],
+        };
+
+        engine.upsert_prepared_document(prepared_valid).unwrap();
+
+        assert_eq!(engine.chunk_count(), 1);
+        assert_eq!(engine.list_documents(), vec!["doc1".to_string()]);
+
+        // 2. Attempt to update "doc1" with mixed valid/invalid chunks
+        let mixed_chunks = vec![
+            DocumentChunk {
+                id: "chunk2".to_string(),
+                document_name: "doc1".to_string(),
+                text: "New valid content".to_string(),
+                embedding: vec![0.0, 1.0], // Valid dim (2)
+                chunk_index: 0,
+                page_number: 1,
+                section: None,
+                metadata: crate::types::ChunkMetadata::default(),
+                tags: std::collections::HashSet::new(),
+                resolution: crate::types::Resolution::default(),
+                parent_id: None,
+            },
+            DocumentChunk {
+                id: "chunk3".to_string(),
+                document_name: "doc1".to_string(),
+                text: "Invalid content".to_string(),
+                embedding: vec![1.0, 0.0, 0.0], // Invalid dim (3)
+                chunk_index: 1,
+                page_number: 1,
+                section: None,
+                metadata: crate::types::ChunkMetadata::default(),
+                tags: std::collections::HashSet::new(),
+                resolution: crate::types::Resolution::default(),
+                parent_id: None,
+            },
+        ];
+
+        let prepared_mixed = PreparedDocument {
+            document_name: "doc1".to_string(),
+            document_hash: Some("hash2".to_string()),
+            chunks: mixed_chunks,
+        };
+
+        // This should fail due to dimension mismatch
+        let result = engine.upsert_prepared_document(prepared_mixed);
+        assert!(result.is_err());
+
+        match result {
+            Err(EngineError::Validation {
+                kind: crate::error::ValidationKind::DimensionMismatch { .. },
+                ..
+            }) => {}
+            _ => panic!("Expected Validation::DimensionMismatch error"),
+        }
+
+        // 3. Verify INVARIANT: The engine state should be unchanged
+        // If atomic, we should still have the original chunk1, and NOT chunk2 or chunk3.
+        assert_eq!(engine.chunk_count(), 1, "Chunk count should remain 1");
+        assert_eq!(
+            engine.list_documents(),
+            vec!["doc1".to_string()],
+            "Document should still exist"
+        );
+
+        let results = engine.search("Valid", 1, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, "chunk1");
     }
 }
