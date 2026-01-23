@@ -1,10 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
-use uuid::Uuid;
 
 use crate::{
     config::Config,
@@ -227,7 +226,7 @@ impl RagEngine {
             return Ok(None);
         }
 
-        let text = self.extract_pdf_text(data.to_vec()).await?;
+        let text = crate::pdf::PdfExtractor::extract_text(data.to_vec()).await?;
         if text.trim().is_empty() {
             return Err(rag_core::EngineError::validation_no_chunk(
                 rag_core::ValidationKind::EmptyText,
@@ -370,198 +369,6 @@ impl RagEngine {
             "uptime_seconds": self.start_time.elapsed().as_secs(),
             "version": env!("CARGO_PKG_VERSION")
         })
-    }
-
-    /// Async wrapper for PDF text extraction using spawn_blocking.
-    ///
-    /// Uses a two-stage fallback strategy:
-    /// 1. Try pure-Rust extraction (lopdf) first for deployment flexibility
-    /// 2. Fall back to pdftotext binary if lopdf fails
-    async fn extract_pdf_text(&self, data: Vec<u8>) -> Result<String> {
-        // Use Arc to share data between fallback tasks without cloning the underlying buffer
-        let shared_data = std::sync::Arc::new(data);
-        let data_for_lopdf = std::sync::Arc::clone(&shared_data);
-        let data_for_fallback = std::sync::Arc::clone(&shared_data);
-
-        let lopdf_result =
-            tokio::task::spawn_blocking(move || Self::lopdf_extract_sync(&data_for_lopdf))
-                .await
-                .context("lopdf extraction task failed")?;
-
-        match lopdf_result {
-            Ok(text) => {
-                tracing::info!(
-                    "✅ PDF extracted using pure-Rust backend (lopdf): {} chars",
-                    text.chars().count()
-                );
-                Ok(text)
-            }
-            Err(lopdf_err) => {
-                tracing::warn!(
-                    error = %lopdf_err,
-                    "Pure-Rust PDF extraction failed, falling back to pdftotext"
-                );
-
-                let lopdf_empty = lopdf_err
-                    .downcast_ref::<rag_core::EngineError>()
-                    .map(|e| {
-                        matches!(
-                            e,
-                            rag_core::EngineError::Validation {
-                                kind: rag_core::ValidationKind::EmptyText,
-                                ..
-                            }
-                        )
-                    })
-                    .unwrap_or(false);
-
-                let pdftotext_result = tokio::task::spawn_blocking(move || {
-                    Self::pdftotext_extract_sync(&data_for_fallback)
-                })
-                .await
-                .context("pdftotext extraction task failed")?;
-
-                match pdftotext_result {
-                    Ok(text) => {
-                        tracing::info!(
-                            "✅ PDF extracted using pdftotext fallback: {} chars",
-                            text.chars().count()
-                        );
-                        Ok(text)
-                    }
-                    Err(pdftotext_err) => {
-                        // Check if pdftotext also returned EmptyText
-                        let pdftotext_empty = pdftotext_err
-                            .downcast_ref::<rag_core::EngineError>()
-                            .map(|e| {
-                                matches!(
-                                    e,
-                                    rag_core::EngineError::Validation {
-                                        kind: rag_core::ValidationKind::EmptyText,
-                                        ..
-                                    }
-                                )
-                            })
-                            .unwrap_or(false);
-
-                        if pdftotext_empty {
-                            return Err(pdftotext_err);
-                        }
-
-                        if lopdf_empty {
-                            return Err(rag_core::EngineError::validation_no_chunk(
-                                rag_core::ValidationKind::EmptyText,
-                            )
-                            .into());
-                        }
-
-                        tracing::error!(
-                            lopdf_error = %lopdf_err,
-                            pdftotext_error = %pdftotext_err,
-                            "Both PDF extraction backends failed"
-                        );
-                        Err(anyhow::anyhow!(
-                            "PDF extraction failed: lopdf error: {}, pdftotext error: {}",
-                            lopdf_err,
-                            pdftotext_err
-                        ))
-                    }
-                }
-            }
-        }
-    }
-
-    fn lopdf_extract_sync(data: &[u8]) -> Result<String> {
-        use lopdf::Document;
-
-        let doc = Document::load_mem(data)
-            .map_err(|e| anyhow::anyhow!("lopdf failed to parse PDF: {}", e))?;
-
-        let pages = doc.get_pages();
-        let mut all_text = String::with_capacity(pages.len() * 500);
-
-        for (page_num, _page_id) in pages {
-            match doc.extract_text(&[page_num]) {
-                Ok(page_text) => {
-                    if !all_text.is_empty() && !page_text.is_empty() {
-                        all_text.push('\n');
-                    }
-                    all_text.push_str(&page_text);
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        "lopdf: failed to extract text from page {}: {}",
-                        page_num,
-                        e
-                    );
-                }
-            }
-        }
-
-        if all_text.trim().is_empty() {
-            return Err(rag_core::EngineError::validation_no_chunk(
-                rag_core::ValidationKind::EmptyText,
-            )
-            .into());
-        }
-
-        Ok(all_text)
-    }
-
-    /// Synchronous PDF extraction using pdftotext binary.
-    /// Uses UUID for temp filename to prevent race conditions in concurrent calls.
-    fn pdftotext_extract_sync(data: &[u8]) -> Result<String> {
-        use std::process::Command;
-
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("temp_pdf_{}.pdf", Uuid::new_v4()));
-
-        std::fs::write(&temp_file, data)
-            .map_err(|e| anyhow::anyhow!("Failed to write temp PDF: {}", e))?;
-
-        let output = Command::new("pdftotext")
-            .arg("-layout")
-            .arg("-enc")
-            .arg("UTF-8")
-            .arg(&temp_file)
-            .arg("-")
-            .output();
-        if let Err(e) = std::fs::remove_file(&temp_file) {
-            tracing::debug!(
-                error = %e,
-                path = %temp_file.display(),
-                "Failed to remove temp file after pdftotext"
-            );
-        }
-
-        match output {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8(output.stdout)
-                    .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).to_string());
-
-                if text.trim().is_empty() {
-                    tracing::warn!("pdftotext extracted 0 characters");
-                    Err(rag_core::EngineError::validation_no_chunk(
-                        rag_core::ValidationKind::EmptyText,
-                    )
-                    .into())
-                } else {
-                    Ok(text)
-                }
-            }
-            Ok(output) => {
-                let error_msg = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("pdftotext failed with error: {}", error_msg);
-                Err(anyhow::anyhow!("pdftotext failed: {}", error_msg))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to run pdftotext command: {}", e);
-                Err(anyhow::anyhow!(
-                    "pdftotext command failed: {} (is poppler installed?)",
-                    e
-                ))
-            }
-        }
     }
 }
 

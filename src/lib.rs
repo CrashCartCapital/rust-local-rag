@@ -5,6 +5,7 @@ pub mod job_manager;
 pub mod job_payload;
 mod mcp;
 pub mod mcp_server;
+pub mod pdf;
 pub mod progress_logger;
 pub mod rag_engine;
 pub mod reranker;
