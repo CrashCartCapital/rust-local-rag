@@ -90,6 +90,9 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
             axum::http::StatusCode::NOT_FOUND,
             format!("Document {name} not found"),
         ),
+        EngineError::Embedding(EmbeddingError::Validation(kind)) => {
+            (axum::http::StatusCode::BAD_REQUEST, kind.to_string())
+        }
         EngineError::Embedding(EmbeddingError::Timeout(_)) => {
             (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
         }
@@ -356,6 +359,11 @@ mod tests {
         let (status, msg) = map_engine_error(&err);
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
         assert!(msg.contains("Document test.pdf not found"));
+
+        // Test Embedding Validation (New)
+        let err = EngineError::Embedding(EmbeddingError::Validation(ValidationKind::EmptyText));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
 
         // Test Embedding Connection (Changed to 503)
         let err = EngineError::Embedding(EmbeddingError::Connection("refused".to_string()));
