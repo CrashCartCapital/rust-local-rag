@@ -9,6 +9,7 @@ pub struct Config {
     pub reranker_timeout: Duration,
     pub reranker_concurrency: NonZeroUsize,
     pub default_logprob_fallback: f64,
+    pub embedding_weight: f32,
 }
 
 impl Default for Config {
@@ -20,6 +21,7 @@ impl Default for Config {
             reranker_timeout: Duration::from_secs(60),
             reranker_concurrency: NonZeroUsize::new(1).expect("1 is non-zero"),
             default_logprob_fallback: -10.0,
+            embedding_weight: 0.7,
         }
     }
 }
@@ -92,6 +94,17 @@ impl Config {
             config.default_logprob_fallback = value;
         }
 
+        if let Some(weight) = parse_env_f64("RAG_EMBEDDING_WEIGHT")? {
+            if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
+                return Err(ConfigError {
+                    var: "RAG_EMBEDDING_WEIGHT",
+                    value: weight.to_string(),
+                    message: "must be finite and between 0.0 and 1.0".to_string(),
+                });
+            }
+            config.embedding_weight = weight as f32;
+        }
+
         Ok(config)
     }
 
@@ -103,6 +116,7 @@ impl Config {
             reranker_timeout_secs = self.reranker_timeout.as_secs(),
             reranker_concurrency = self.reranker_concurrency.get(),
             default_logprob_fallback = self.default_logprob_fallback,
+            embedding_weight = self.embedding_weight,
             "Configuration loaded"
         );
     }
@@ -361,6 +375,55 @@ mod tests {
         with_env_var("RAG_EMBEDDING_BATCH_SIZE", "1025", || {
             let err = Config::from_env().unwrap_err();
             assert!(err.message.contains("must be <= 1024"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_valid() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "0.5", || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.embedding_weight, 0.5);
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_invalid_format() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "abc", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(!err.message.contains("must be"));
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_nan() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "NaN", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(
+                err.message
+                    .contains("must be finite and between 0.0 and 1.0")
+            );
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_too_low() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "-0.1", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(
+                err.message
+                    .contains("must be finite and between 0.0 and 1.0")
+            );
+        });
+    }
+
+    #[test]
+    fn test_rag_embedding_weight_too_high() {
+        with_env_var("RAG_EMBEDDING_WEIGHT", "1.1", || {
+            let err = Config::from_env().unwrap_err();
+            assert!(
+                err.message
+                    .contains("must be finite and between 0.0 and 1.0")
+            );
         });
     }
 }
