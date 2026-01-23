@@ -13,6 +13,13 @@ This guide covers building, running, and contributing to `rust-local-rag`.
 We use `make` for common tasks.
 
 ```bash
+# Setup & Maintenance
+make setup                  # Complete development environment setup
+make update                 # Update dependencies within constraints
+make upgrade                # Upgrade to latest versions (including breaking changes)
+make install-tools          # Install required development tools
+make fix                    # Auto-fix clippy issues
+
 # Development
 make run                    # Run application (DEV=true)
 make dev-start              # Start Ollama + Run application
@@ -24,6 +31,8 @@ make kill                   # Kill all rust-local-rag processes
 make build                  # Debug build
 make release                # Optimized release build
 make clean                  # Clean build artifacts
+make clean-build            # Clean Rust build cache only
+make clean-all              # Comprehensive cleanup (build + models)
 
 # Testing
 make test                   # Run tests
@@ -34,10 +43,6 @@ make check                  # Cargo check
 make lint                   # Clippy
 make clippy                 # Clippy with warnings as errors
 make fmt                    # Format code
-
-# Maintenance
-make update                 # Update dependencies
-make fix                    # Auto-fix clippy issues
 
 # Full CI Pipeline
 make ci                     # check + lint + test + build
@@ -57,12 +62,15 @@ make which-installed        # Check if installed and location
 
 Helpers for managing the Ollama dependency.
 
+**Note:** These commands primarily manage the embedding model (`nomic-embed-text`) which is required. The reranker model is optional and must be pulled manually if desired (see [Setup](setup.md)).
+
 ```bash
-make setup-ollama           # Start Ollama + pull nomic-embed-text
+make setup-ollama           # Start Ollama + pull embedding model
 make ollama-start           # Start Ollama server
 make ollama-stop            # Stop Ollama server
 make ollama-status          # Check status and list models
-make ollama-models          # Pull required models
+make ollama-models          # Pull required embedding model
+make clean-ollama           # Clean Ollama models (WARNING: Re-download needed)
 ```
 
 ## Repository Layout
@@ -77,7 +85,10 @@ make ollama-models          # Pull required models
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
+*   `src/job_payload.rs`: Job data structures.
+*   `src/index_store.rs`: SQLite index management (Chunks/Embeddings).
 *   `src/worker.rs`: Background worker for indexing.
+*   `src/progress_logger.rs`: Progress logging utilities.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
 *   `src/bin/rag_tui/`: TUI client application.
 
@@ -86,11 +97,15 @@ make ollama-models          # Pull required models
 *   `data/`: Local data storage (SQLite DB, embeddings).
 *   `logs/`: Application logs.
 *   `prompts/`: System prompts (e.g. for reranker).
+*   `active-prd/`: Active Product Requirements Documents.
+*   `.archive/`: Archived documents and code.
 
 ### Documentation & Analysis
 *   `docs/`: User and developer documentation.
-*   `analysis/`: Product Requirements Documents (PRDs) and technical debt analysis.
+*   `analysis/`: Technical debt analysis and older PRDs.
 *   `eval/`: Python evaluation harness and configs.
+*   `frontend/`: Frontend application code.
+*   `tests/`: Integration tests.
 
 ## Testing & Evaluation
 
