@@ -361,27 +361,36 @@ fn approximate_token_count(value: &str) -> usize {
     }
 
     let bytes = trimmed.as_bytes();
-    let mut space_count = 0;
-    let mut continuation_count = 0;
+    let mut space_count = 0usize;
+    let mut ascii_count = 0usize;
+    let mut non_ascii_count = 0usize;
 
     // Optimization: Single pass byte scan avoids state machine overhead.
     // 1. We know the input is normalized (from normalize_from_parts) so words are separated
     //    by single spaces. Thus word_count = space_count + 1.
-    // 2. We can detect multi-byte chars by counting continuation bytes (10xxxxxx).
-    //    char_count = total_bytes - continuation_bytes.
+    // 2. We distinguish ASCII vs Non-ASCII for better token weighting.
     for &b in bytes {
-        if b == b' ' {
-            space_count += 1;
+        if b < 0x80 {
+            ascii_count += 1;
+            if b == b' ' {
+                space_count += 1;
+            }
         } else if (b & 0xC0) == 0x80 {
-            // Count UTF-8 continuation bytes to subtract from total length
-            continuation_count += 1;
+            // UTF-8 continuation byte. Ignore.
+            continue;
+        } else {
+            // Start of multi-byte sequence (b >= 0xC0).
+            non_ascii_count += 1;
         }
     }
 
-    let char_count = bytes.len() - continuation_count;
-    let word_count = space_count + 1;
+    // Heuristic:
+    // ASCII chars: ~0.25 tokens each (4 chars/token). Weight = 1.
+    // Non-ASCII (CJK/Emoji/etc): ~0.75 tokens each (1.33 chars/token). Weight = 3.
+    let char_token_sum = ascii_count + non_ascii_count * 3;
+    let char_estimate = char_token_sum.div_ceil(4);
 
-    let char_estimate = char_count.div_ceil(4);
+    let word_count = space_count + 1;
     // (word_count * 0.9).ceil() is equivalent to (word_count * 9 + 9) / 10 in integer arithmetic
     #[allow(clippy::manual_div_ceil)]
     let word_estimate = (word_count * 9 + 9) / 10;
@@ -672,7 +681,9 @@ mod tests {
         let text = "😀😀😀😀";
 
         let chunks = split_massive_word(text, limit);
-        assert_eq!(chunks.len(), 1, "Should fit in one chunk");
+        // With weighted token counting (0.75 per emoji), 4 emojis = 3 tokens.
+        // Limit 2. Expect split into 2 chunks (2 emojis each).
+        assert_eq!(chunks.len(), 2, "Should split into two chunks");
 
         // Let's use something that generates more tokens.
         // "a".repeat(20).
@@ -851,11 +862,12 @@ mod tests {
         // Emojis are 4 bytes.
         let text = "😀😃😄😁";
         // Limit 1.
-        // With current token estimation (chars/4), 4 chars = 1 token.
-        // So this should fit in 1 chunk.
+        // With weighted token counting, 1 emoji = 0.75 -> 1 token.
+        // 4 emojis -> 3 tokens total.
+        // Should split into 4 chunks of 1 emoji each.
         let chunks = split_massive_word(text, 1);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], text);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks[0], "😀");
 
         // Try with 8 emojis -> 2 tokens. Limit 1.
         let text2 = "😀😃😄😁😀😃😄😁";
@@ -921,5 +933,39 @@ mod tests {
             combined_text
         );
         assert!(combined_text.contains("Content B."), "Should have B");
+    }
+
+    #[test]
+    fn test_cjk_token_estimation() {
+        // CJK characters are generally token-heavy (often 1-2 tokens per char in many tokenizers).
+        // Our naive char/4 estimate yields 0.25 tokens/char, which is dangerously low
+        // and can lead to context window overflows.
+        // We want to verify we are estimating closer to 0.75 or 1.0.
+
+        // 16 CJK chars.
+        // Naive (current): 16 / 4 = 4 tokens.
+        // Desired: ~12 tokens.
+        let text = "你好世界你好世界你好世界你好世界";
+        let tokens = approximate_token_count(text);
+
+        assert!(
+            tokens >= 10,
+            "CJK token estimation too low. Got {}, expected >= 10 for 16 chars",
+            tokens
+        );
+    }
+
+    #[test]
+    fn test_mixed_script_token_estimation() {
+        // 10 ASCII chars (2.5 tokens) + 10 CJK chars (~7.5 tokens) -> ~10 tokens.
+        // Naive: 20 chars -> 5 tokens.
+        let text = "abcdefghij你好世界你好世界";
+        let tokens = approximate_token_count(text);
+
+        assert!(
+            tokens >= 8,
+            "Mixed script token estimation too low. Got {}, expected >= 8 for 20 mixed chars",
+            tokens
+        );
     }
 }
