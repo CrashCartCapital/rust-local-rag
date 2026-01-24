@@ -489,12 +489,12 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
-    async fn search_internal(
-        &self,
+    async fn search_internal<'a>(
+        &'a self,
         query: &str,
         top_k: usize,
         weights: SearchWeights,
-    ) -> Result<Vec<SearchResultWithEmbedding>>
+    ) -> Result<Vec<SearchResultWithEmbedding<'a>>>
     where
         R: Rerank,
     {
@@ -603,7 +603,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     yes_logprob: None,
                     no_logprob: None,
                 },
-                embedding: chunk.embedding.clone(),
+                embedding: &chunk.embedding,
             })
             .collect();
 
@@ -696,7 +696,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                             yes_logprob: result.yes_logprob,
                             no_logprob: result.no_logprob,
                         },
-                        embedding: candidate.embedding.clone(),
+                        embedding: candidate.embedding,
                     });
                 }
             }

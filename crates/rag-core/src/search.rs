@@ -36,9 +36,9 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SearchResultWithEmbedding {
+pub(crate) struct SearchResultWithEmbedding<'a> {
     pub(crate) result: SearchResult,
-    pub(crate) embedding: Vec<f32>,
+    pub(crate) embedding: &'a [f32],
 }
 
 #[cfg_attr(
@@ -52,8 +52,8 @@ pub(crate) struct SearchResultWithEmbedding {
         )
     )
 )]
-pub(crate) fn mmr_diversify(
-    candidates: Vec<SearchResultWithEmbedding>,
+pub(crate) fn mmr_diversify<'a>(
+    candidates: Vec<SearchResultWithEmbedding<'a>>,
     top_k: usize,
     diversity_factor: f32,
 ) -> Vec<SearchResult> {
@@ -61,8 +61,8 @@ pub(crate) fn mmr_diversify(
         return vec![];
     }
 
-    let mut selected: Vec<SearchResultWithEmbedding> = Vec::with_capacity(top_k);
-    let mut remaining: Vec<SearchResultWithEmbedding> = candidates;
+    let mut selected: Vec<SearchResultWithEmbedding<'a>> = Vec::with_capacity(top_k);
+    let mut remaining: Vec<SearchResultWithEmbedding<'a>> = candidates;
 
     if !remaining.is_empty() {
         let first = remaining.swap_remove(0);
@@ -517,18 +517,12 @@ impl LexicalIndex {
         // instead of sorting the whole vector in O(N log N).
         if limit > 0 && results.len() > limit {
             results.select_nth_unstable_by(limit, |a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
+                b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
             });
             results.truncate(limit);
         }
 
-        results.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         #[cfg(feature = "tracing")]
         {
@@ -786,8 +780,7 @@ impl IndexSet {
         // Sort by combined score descending, with deterministic tie-breaker
         candidates.sort_by(|a, b| {
             b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.combined_score)
                 .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
@@ -1010,7 +1003,11 @@ mod tests {
         assert!(ann_index.contains("id3"));
     }
 
-    fn build_candidate(id: &str, score: f32, embedding: Vec<f32>) -> SearchResultWithEmbedding {
+    fn build_candidate<'a>(
+        id: &str,
+        score: f32,
+        embedding: &'a [f32],
+    ) -> SearchResultWithEmbedding<'a> {
         SearchResultWithEmbedding {
             result: SearchResult {
                 text: format!("text-{id}"),
@@ -1039,7 +1036,8 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_single_candidate() {
-        let candidates = vec![build_candidate("a", 1.0, vec![1.0, 0.0])];
+        let e = vec![1.0, 0.0];
+        let candidates = vec![build_candidate("a", 1.0, &e)];
         let result = mmr_diversify(candidates, 5, 0.3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].chunk_id, "a");
@@ -1047,9 +1045,11 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_top_k_larger_than_candidates() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", 0.9, vec![0.0, 1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", 0.9, &e2),
         ];
         let result = mmr_diversify(candidates, 10, 0.3);
         assert_eq!(result.len(), 2);
@@ -1057,10 +1057,11 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_zero_diversity_factor() {
+        let e1 = vec![1.0, 0.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", 0.9, vec![1.0, 0.0]),
-            build_candidate("c", 0.8, vec![1.0, 0.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", 0.9, &e1),
+            build_candidate("c", 0.8, &e1),
         ];
         let result = mmr_diversify(candidates, 3, 0.0);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
@@ -1069,10 +1070,12 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_high_diversity_factor() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", 0.9, vec![1.0, 0.0]),
-            build_candidate("c", 0.8, vec![0.0, 1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", 0.9, &e1),
+            build_candidate("c", 0.8, &e2),
         ];
         let result = mmr_diversify(candidates, 2, 0.9);
         assert_eq!(result.len(), 2);
@@ -1082,10 +1085,12 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_nan_score_handling() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", f32::NAN, vec![0.0, 1.0]),
-            build_candidate("c", 0.8, vec![0.0, 1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", f32::NAN, &e2),
+            build_candidate("c", 0.8, &e2),
         ];
         let result = mmr_diversify(candidates, 3, 0.3);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
@@ -1096,10 +1101,12 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_inf_score_handling() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", f32::INFINITY, vec![0.0, 1.0]),
-            build_candidate("c", 0.8, vec![0.0, 1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", f32::INFINITY, &e2),
+            build_candidate("c", 0.8, &e2),
         ];
         let result = mmr_diversify(candidates, 3, 0.3);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
@@ -1110,11 +1117,15 @@ mod tests {
 
     #[test]
     fn test_mmr_diversify_preserves_relevance_order_when_orthogonal() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
+        let e3 = vec![-1.0, 0.0];
+        let e4 = vec![0.0, -1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", 0.9, vec![0.0, 1.0]),
-            build_candidate("c", 0.8, vec![-1.0, 0.0]),
-            build_candidate("d", 0.7, vec![0.0, -1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", 0.9, &e2),
+            build_candidate("c", 0.8, &e3),
+            build_candidate("d", 0.7, &e4),
         ];
         let result = mmr_diversify(candidates, 4, 0.3);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
@@ -1130,11 +1141,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mmr_formula_correctness() {
+    fn test_mmr_diversify_formula_correctness() {
+        let e1 = vec![1.0, 0.0];
+        let e2 = vec![0.0, 1.0];
         let candidates = vec![
-            build_candidate("a", 1.0, vec![1.0, 0.0]),
-            build_candidate("b", 0.8, vec![1.0, 0.0]),
-            build_candidate("c", 0.7, vec![0.0, 1.0]),
+            build_candidate("a", 1.0, &e1),
+            build_candidate("b", 0.8, &e1),
+            build_candidate("c", 0.7, &e2),
         ];
         let result = mmr_diversify(candidates, 2, 0.5);
         let ids: Vec<String> = result.into_iter().map(|r| r.chunk_id).collect();
@@ -1499,5 +1512,22 @@ mod tests {
         let mut results2 = index2.search(&v, 3);
         results2.sort();
         assert_eq!(results2, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_index_set_search_candidates_with_nan_weights() {
+        let mut index = IndexSet::new();
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        index
+            .add_chunk("chunk1", "hello", &embedding)
+            .unwrap();
+
+        // Pass NaN weight. This produces NaN combined scores.
+        // total_cmp sorts NaN as > other values.
+        // We expect it to not panic.
+        let candidates = index.search_candidates(&embedding, "hello", f32::NAN, 0.0, 10);
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].combined_score.is_nan());
     }
 }
