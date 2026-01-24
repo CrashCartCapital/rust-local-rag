@@ -1,4 +1,4 @@
-use crate::error::EngineError;
+use crate::error::{EmbeddingError, EngineError};
 use crate::types::ChunkMetadata;
 use regex::Regex;
 use std::str::FromStr;
@@ -39,8 +39,9 @@ pub(crate) fn chunk_text(
     text: &str,
     chunk_tokens: usize,
     sentence_overlap: usize,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Vec<ChunkFragment>, EngineError> {
-    let sentences = extract_sentences(text, Some(chunk_tokens))?;
+    let sentences = extract_sentences(text, Some(chunk_tokens), deadline)?;
     if sentences.is_empty() {
         #[cfg(feature = "tracing")]
         tracing::debug!("No sentences extracted from text");
@@ -53,6 +54,13 @@ pub(crate) fn chunk_text(
     let mut max_emitted_index: Option<usize> = None;
 
     for (idx, sentence) in sentences.iter().enumerate() {
+        if let Some(deadline) = deadline {
+            if std::time::Instant::now() > deadline {
+                return Err(EngineError::Embedding(EmbeddingError::Timeout(
+                    deadline.elapsed(),
+                )));
+            }
+        }
         window.push(idx);
         token_sum += sentence.tokens;
 
@@ -173,16 +181,31 @@ fn finalize_chunk(
 fn extract_sentences(
     text: &str,
     hard_token_limit: Option<usize>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Vec<SentenceInfo>, EngineError> {
     let splitter = sentence_splitter().map_err(EngineError::Config)?;
     let mut sentences: Vec<SentenceInfo> = Vec::new();
     let mut sentence_index = 0usize;
 
     for (page_idx, page_text) in text.split('\u{0c}').enumerate() {
+        if let Some(deadline) = deadline {
+            if std::time::Instant::now() > deadline {
+                return Err(EngineError::Embedding(EmbeddingError::Timeout(
+                    deadline.elapsed(),
+                )));
+            }
+        }
         let page_number = page_idx + 1;
         let mut last_heading: Option<String> = None;
 
         for block in page_text.split("\n\n") {
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() > deadline {
+                    return Err(EngineError::Embedding(EmbeddingError::Timeout(
+                        deadline.elapsed(),
+                    )));
+                }
+            }
             let block = block.trim();
             if block.is_empty() {
                 continue;
@@ -489,7 +512,7 @@ mod tests {
     fn test_sentence_info_creation() {
         let test_text = "Dr. Smith presented findings.\u{c}This is page two. Results show success.";
 
-        let sentences = extract_sentences(test_text, None).unwrap();
+        let sentences = extract_sentences(test_text, None, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should extract sentences");
 
@@ -502,7 +525,7 @@ mod tests {
     #[test]
     fn test_finalize_chunk_creates_metadata() {
         let test_text = "Sentence one. Sentence two.\u{c}Page two sentence.";
-        let sentences = extract_sentences(test_text, None).unwrap();
+        let sentences = extract_sentences(test_text, None, None).unwrap();
 
         assert!(!sentences.is_empty(), "Should have sentences");
 
@@ -528,7 +551,7 @@ mod tests {
     fn test_chunk_boundaries_align_to_sentences() {
         let text = "Sentence one. Sentence two.";
         // Limit 4 is exactly enough for one sentence (~4 tokens).
-        let chunks = chunk_text(text, 4, 0).unwrap();
+        let chunks = chunk_text(text, 4, 0, None).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(
             chunk_texts,
@@ -565,7 +588,7 @@ mod tests {
         // Chunk 1: "Sentence one." (4) < 5.
         // Chunk 1: "Sentence one. Sentence two." (8) >= 5.
         // Overlap 10.
-        let chunks = chunk_text(text, 5, 10).unwrap();
+        let chunks = chunk_text(text, 5, 10, None).unwrap();
         let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
 
         // If bug exists (overlap=0 calc):
@@ -600,7 +623,7 @@ mod tests {
         let text = "This is a very long sentence that exceeds the token limit all by itself.";
         // Approx tokens: ~60 chars -> 15 tokens.
         // Limit: 5.
-        let chunks = chunk_text(text, 5, 0).unwrap();
+        let chunks = chunk_text(text, 5, 0, None).unwrap();
         // Should be split into multiple chunks
         assert!(chunks.len() > 1);
         for chunk in chunks {
@@ -619,7 +642,7 @@ mod tests {
         let text = "First. Second. Third.";
         // Limit 2. Each sentence is ~1-2 tokens.
         // Should produce 3 chunks.
-        let chunks = chunk_text(text, 2, 0).unwrap();
+        let chunks = chunk_text(text, 2, 0, None).unwrap();
         let texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
         assert_eq!(texts, vec!["First.", "Second.", "Third."]);
     }
@@ -632,7 +655,7 @@ mod tests {
         // 100 chars -> 25 tokens.
         let text = "a".repeat(100);
 
-        let chunks = chunk_text(&text, limit, 0).unwrap();
+        let chunks = chunk_text(&text, limit, 0, None).unwrap();
 
         // Currently this returns 1 chunk of size 25.
         // We want it to split.
@@ -701,7 +724,7 @@ mod tests {
         let text = format!("{} {}", s1, s2);
 
         // Debug sentences
-        let sentences = extract_sentences(&text, None).unwrap();
+        let sentences = extract_sentences(&text, None, None).unwrap();
         for s in &sentences {
             println!("S: '{}' ({})", s.text, s.tokens);
         }
@@ -718,7 +741,7 @@ mod tests {
         // Final window [S2]. Last index is S2.
         // S2 was part of Chunk 1. Redundant.
 
-        let chunks = chunk_text(&text, 6, 1).unwrap();
+        let chunks = chunk_text(&text, 6, 1, None).unwrap();
         for (i, c) in chunks.iter().enumerate() {
             println!("Chunk {}: {}", i, c.text);
         }
@@ -747,7 +770,7 @@ mod tests {
         // This setup produces [S1, S2], [S2, S3].
         // Both are kept. The final residue [S3] is dropped.
 
-        let chunks = chunk_text(&text, 6, 1).unwrap();
+        let chunks = chunk_text(&text, 6, 1, None).unwrap();
 
         assert_eq!(chunks.len(), 2, "Should have 2 chunks");
         assert_eq!(chunks[0].text, format!("{} {}", s1, s2));
@@ -807,7 +830,7 @@ mod tests {
         // [S2, S3] -> 11 < 15.
         // Final emit [S2, S3].
 
-        let chunks3 = chunk_text(&text3, 15, 1).unwrap();
+        let chunks3 = chunk_text(&text3, 15, 1, None).unwrap();
         assert_eq!(chunks3.len(), 2, "Should emit tail chunk with new content");
         assert_eq!(chunks3[0].text, format!("{} {}", s1_big, s2_big));
         assert_eq!(chunks3[1].text, format!("{} {}", s2_big, s3_small));
@@ -828,7 +851,7 @@ mod tests {
         // Based on logic: extract_sentences calls split_part_hard(limit=0) -> returns full text.
         // chunk_text loop token_sum >= 0 -> triggers every sentence.
         // Should produce 1 chunk.
-        let chunks = chunk_text(text, 0, 0).unwrap();
+        let chunks = chunk_text(text, 0, 0, None).unwrap();
         assert!(!chunks.is_empty(), "Should produce at least one chunk");
         assert_eq!(chunks[0].text, "This is a test.");
     }
@@ -870,7 +893,7 @@ mod tests {
         // It is followed by content.
         let text = "1. Introduction\n\nThis is content.";
 
-        let sentences = extract_sentences(text, None).unwrap();
+        let sentences = extract_sentences(text, None, None).unwrap();
 
         // I assert the fix: it should be present.
         let combined_text: String = sentences
@@ -891,7 +914,7 @@ mod tests {
     #[test]
     fn test_heading_only_document_retention() {
         let text = "1. Introduction";
-        let sentences = extract_sentences(text, None).unwrap();
+        let sentences = extract_sentences(text, None, None).unwrap();
 
         let combined_text: String = sentences
             .iter()
@@ -907,7 +930,7 @@ mod tests {
     #[test]
     fn test_interleaved_headings_retention() {
         let text = "Content A.\n\n2. Next Section\n\nContent B.";
-        let sentences = extract_sentences(text, None).unwrap();
+        let sentences = extract_sentences(text, None, None).unwrap();
         let combined_text: String = sentences
             .iter()
             .map(|s| s.text.clone())
@@ -921,5 +944,22 @@ mod tests {
             combined_text
         );
         assert!(combined_text.contains("Content B."), "Should have B");
+    }
+
+    #[test]
+    fn test_chunk_text_timeout() {
+        let text = "Sentence 1. Sentence 2. Sentence 3. Sentence 4.";
+        // Create a deadline that is already passed
+        let deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+
+        let result = chunk_text(text, 10, 0, Some(deadline));
+
+        match result {
+            Err(EngineError::Embedding(EmbeddingError::Timeout(_))) => {
+                // Success
+            }
+            Err(e) => panic!("Expected Timeout error, got {:?}", e),
+            Ok(_) => panic!("Expected Timeout error, got Ok"),
+        }
     }
 }
