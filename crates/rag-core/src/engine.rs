@@ -1282,4 +1282,58 @@ mod tests {
             ),
         }
     }
+
+    #[cfg(feature = "persistence")]
+    #[tokio::test]
+    async fn test_load_truncated_file_recovery() {
+        use tempfile::TempDir;
+
+        struct TestBackend;
+        impl EmbeddingBackend for TestBackend {
+            fn model_id(&self) -> &str {
+                "test-trunc"
+            }
+            fn dimension(&self) -> usize {
+                2
+            }
+            async fn embed(&self, _: &str) -> std::result::Result<Vec<f32>, EmbeddingError> {
+                Ok(vec![0.0, 0.0])
+            }
+            async fn embed_batch(
+                &self,
+                texts: &[String],
+            ) -> std::result::Result<Vec<Vec<f32>>, EmbeddingError> {
+                Ok(vec![vec![0.0, 0.0]; texts.len()])
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut engine = RagEngine::new(TestBackend);
+
+        // Path: chunks_test-trunc.json
+        let index_path = temp_dir.path().join("chunks_test-trunc.json");
+
+        // Write truncated JSON (e.g. starts writing chunks but stops abruptly)
+        let truncated_content = r#"{
+            "schema_version": 2,
+            "embedding_model_id": "test-trunc",
+            "embedding_dim": 2,
+            "chunks": {
+                "some-uuid": {
+                    "id": "some-uuid",
+                    "text": "truncated content
+        "#;
+        std::fs::write(&index_path, truncated_content).unwrap();
+
+        // Load
+        let result = engine.load_from_dir(temp_dir.path());
+
+        // Should not panic, return Ok, and mark for reindex
+        assert!(
+            result.is_ok(),
+            "Load should succeed gracefully on truncated file"
+        );
+        assert!(engine.needs_reindex(), "Should mark for reindex");
+        assert_eq!(engine.chunk_count(), 0, "Should have 0 chunks");
+    }
 }
