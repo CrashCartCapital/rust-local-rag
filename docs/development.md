@@ -75,10 +75,12 @@ make ollama-models          # Pull required models
 *   `src/mcp/`: MCP implementation (HTTP, tools, models).
 *   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
+*   `src/index_store.rs`: SQLite-based index persistence.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `crates/rag-core-py/`: Python bindings for `rag-core`.
 *   `src/bin/rag_tui/`: TUI client application.
 
 ### Data & Configuration
@@ -104,6 +106,11 @@ cargo test --bin rag-tui
 Located in `eval/`. Requires Python >= 3.11.
 
 ```bash
+# Install dependencies
+uv pip install -e eval/
+# OR
+pip install -e eval/
+
 # Start server first
 make run
 
