@@ -2,6 +2,8 @@ use crate::error::PersistenceError;
 use crate::types::DocumentChunk;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(all(feature = "tracing", feature = "persistence"))]
+use tracing::{field, instrument};
 
 pub const INDEX_VERSION: u32 = 2;
 
@@ -243,13 +245,29 @@ impl PersistenceBackend for JsonFileBackend {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self),
+            fields(
+                path = %self.index_path().display(),
+                file_size = field::Empty,
+                legacy_fallback = false
+            ),
+            err
+        )
+    )]
     fn load(&self) -> Result<Option<EngineState>, PersistenceError> {
         let path = self.index_path();
 
         // Try model-specific path first
         if path.exists() {
             let data = match std::fs::read_to_string(&path) {
-                Ok(data) => data,
+                Ok(data) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::Span::current().record("file_size", data.len());
+                    data
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Ok(None),
                 Err(e) => return Err(PersistenceError::Io(e)),
             };
@@ -265,6 +283,9 @@ impl PersistenceBackend for JsonFileBackend {
                 }
             }
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("legacy_fallback", true);
 
         // Try legacy path
         self.try_load_legacy()
