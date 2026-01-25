@@ -519,6 +519,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         crate::search::normalize(&mut query_embedding);
 
+        #[cfg(feature = "tracing")]
+        let ann_start = std::time::Instant::now();
+
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
             Some(index) => Box::new(
                 index
@@ -528,7 +531,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             None => Box::new(self.state.chunks.keys().cloned()),
         };
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(ann_search_ms = ?ann_start.elapsed().as_millis());
+
+        #[cfg(feature = "tracing")]
+        let lex_start = std::time::Instant::now();
+
         let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(lexical_search_ms = ?lex_start.elapsed().as_millis());
+
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
@@ -557,6 +570,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .copied()
             .fold(0.0_f32, f32::max)
             .max(f32::EPSILON);
+
+        #[cfg(feature = "tracing")]
+        let score_start = std::time::Instant::now();
 
         let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
 
@@ -606,6 +622,20 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 embedding: chunk.embedding.clone(),
             })
             .collect();
+
+        #[cfg(feature = "tracing")]
+        {
+            tracing::debug!(scoring_ms = ?score_start.elapsed().as_millis());
+            if let Some(top) = candidates.first() {
+                tracing::debug!(
+                    pre_rerank_top_id = %top.result.chunk_id,
+                    pre_rerank_score = %top.result.score,
+                    pre_rerank_embed = ?top.result.embedding_score,
+                    pre_rerank_lex = ?top.result.lexical_score,
+                    "Top candidate before reranking"
+                );
+            }
+        }
 
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -735,6 +765,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             tracing::debug!(
                 top_match_id = %first.result.chunk_id,
                 top_match_score = %first.result.score,
+                top_match_embed = ?first.result.embedding_score,
+                top_match_lex = ?first.result.lexical_score,
+                top_match_rerank = ?first.result.reranker_score,
                 top_match_doc = %first.result.document,
                 result_count = ordered_results.len(),
                 "Search internal finished"
