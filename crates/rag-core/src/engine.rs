@@ -1282,4 +1282,30 @@ mod tests {
             ),
         }
     }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn test_load_truncated_file_recovery() {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+
+        let mut engine = RagEngine::new(MockBackend);
+
+        // Construct path: chunks_mock-embed.json
+        // MockBackend returns "mock-embed"
+        // sanitize_model_name("mock-embed") -> "mock-embed"
+        let path = temp_dir.path().join("chunks_mock-embed.json");
+
+        // Write truncated JSON
+        std::fs::write(&path, r#"{"chunks": {"#).unwrap();
+
+        // Load
+        engine.load_from_dir(temp_dir.path()).unwrap();
+
+        // Assert
+        assert!(
+            engine.needs_reindex(),
+            "Should flag for reindex on truncated file"
+        );
+    }
 }
