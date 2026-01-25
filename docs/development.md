@@ -7,6 +7,7 @@ This guide covers building, running, and contributing to `rust-local-rag`.
 *   Rust toolchain (stable)
 *   Ollama (running)
 *   Poppler (optional, for fallback PDF extraction)
+*   Python >= 3.11 (for evaluation)
 
 ## Common Commands
 
@@ -62,8 +63,10 @@ make setup-ollama           # Start Ollama + pull nomic-embed-text
 make ollama-start           # Start Ollama server
 make ollama-stop            # Stop Ollama server
 make ollama-status          # Check status and list models
-make ollama-models          # Pull required models
+make ollama-models          # Pull required embedding model (nomic-embed-text)
 ```
+
+> **Note:** The reranker model (`dengcao/Qwen3-Reranker-4B:Q5_K_M`) is optional but recommended. `make ollama-models` does not pull it to save bandwidth. Pull it manually with `ollama pull dengcao/Qwen3-Reranker-4B:Q5_K_M` if you want to use reranking.
 
 ## Repository Layout
 
@@ -76,9 +79,12 @@ make ollama-models          # Pull required models
 *   `src/rag_engine.rs`: Server wrapper: PDF extraction + env/config + calls into `rag-core`.
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
+*   `src/index_store.rs`: SQLite index management.
 *   `src/job_manager.rs`: SQLite job persistence.
+*   `src/progress_logger.rs`: Structured logging for progress events.
 *   `src/worker.rs`: Background worker for indexing.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `crates/rag-core-py/`: Python bindings for the core library (used in eval).
 *   `src/bin/rag_tui/`: TUI client application.
 
 ### Data & Configuration
@@ -104,6 +110,9 @@ cargo test --bin rag-tui
 Located in `eval/`. Requires Python >= 3.11.
 
 ```bash
+# Install dependencies
+uv pip install -e eval/  # or: pip install -e eval/
+
 # Start server first
 make run
 
