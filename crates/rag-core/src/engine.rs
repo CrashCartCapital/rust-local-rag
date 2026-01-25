@@ -316,6 +316,26 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, prepared), fields(doc = %prepared.document_name, chunks = prepared.chunks.len())))]
     pub fn upsert_prepared_document(&mut self, prepared: PreparedDocument) -> Result<usize> {
+        // Validation: Ensure all chunks are valid before modifying state.
+        // This guarantees atomicity: we won't delete the old document or insert partial data
+        // if any chunk is invalid (e.g., wrong embedding dimension).
+        let mut expected_dim = self.state.embedding_dim;
+        for chunk in &prepared.chunks {
+            if !chunk.embedding.is_empty() {
+                if expected_dim == 0 {
+                    expected_dim = chunk.embedding.len();
+                } else if expected_dim != chunk.embedding.len() {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::DimensionMismatch {
+                            expected: expected_dim,
+                            got: chunk.embedding.len(),
+                        },
+                    ));
+                }
+            }
+        }
+
         // Remove existing chunks even if we end up with zero usable chunks.
         let _ = self.remove_document(&prepared.document_name);
 
@@ -340,6 +360,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 if self.state.embedding_dim == 0 {
                     self.state.embedding_dim = chunk.embedding.len();
                 } else if self.state.embedding_dim != chunk.embedding.len() {
+                    // Should be caught by validation above, but kept for safety
                     return Err(EngineError::validation(
                         chunk.id.clone(),
                         crate::error::ValidationKind::DimensionMismatch {
@@ -1281,5 +1302,78 @@ mod tests {
                 res.map(|d| d.chunks.len()).unwrap_or(0)
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn test_atomic_upsert_failure() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        // 1. Insert a valid document
+        let doc_name = "doc1.txt";
+        let text = "Cats are great.";
+        engine
+            .upsert_document(doc_name, text, None)
+            .await
+            .unwrap();
+
+        // Verify it exists
+        assert_eq!(engine.chunk_count(), 1);
+        let docs = engine.list_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0], doc_name);
+
+        // 2. Prepare a document with mixed/invalid chunks (manually)
+        // We'll prepare it correctly first, then corrupt one chunk.
+        let mut prepared = engine
+            .prepare_document(doc_name, "Dogs are also great.", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Corrupt the second chunk (if any) or add a corrupted one.
+        // The text "Dogs are also great." is short, so it likely produces 1 chunk.
+        // Let's force add a bad chunk.
+        let bad_chunk = DocumentChunk {
+            id: "bad-chunk".to_string(),
+            document_name: doc_name.to_string(),
+            text: "bad".to_string(),
+            embedding: vec![0.0, 0.0, 0.0], // 3 dimensions, expected 2 (MockBackend)
+            chunk_index: 1,
+            page_number: 0,
+            section: None,
+            metadata: Default::default(),
+            tags: Default::default(),
+            resolution: Default::default(),
+            parent_id: None,
+        };
+        prepared.chunks.push(bad_chunk);
+
+        // 3. Attempt upsert - should fail validation
+        let result = engine.upsert_prepared_document(prepared);
+        assert!(
+            result.is_err(),
+            "Upsert should fail due to dimension mismatch"
+        );
+        match result {
+            Err(EngineError::Validation { kind, .. }) => match kind {
+                crate::error::ValidationKind::DimensionMismatch { expected, got } => {
+                    assert_eq!(expected, 2);
+                    assert_eq!(got, 3);
+                }
+                _ => panic!("Expected DimensionMismatch"),
+            },
+            _ => panic!("Expected Validation error"),
+        }
+
+        // 4. Verify previous document is UNTOUCHED
+        assert_eq!(engine.chunk_count(), 1, "Chunk count should remain 1");
+        let docs = engine.list_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0], doc_name);
+
+        // Search should still return the old document
+        let results = engine.search("cats", 1, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "Cats are great.");
     }
 }
