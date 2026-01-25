@@ -51,6 +51,7 @@ pub(crate) fn chunk_text(
     let mut token_sum = 0usize;
     let mut fragments = Vec::new();
     let mut max_emitted_index: Option<usize> = None;
+    let mut current_overlap = 0;
 
     for (idx, sentence) in sentences.iter().enumerate() {
         window.push(idx);
@@ -58,7 +59,7 @@ pub(crate) fn chunk_text(
 
         if token_sum >= chunk_tokens {
             if let Some((chunk_text, metadata)) =
-                finalize_chunk(&window, &sentences, sentence_overlap)
+                finalize_chunk(&window, &sentences, current_overlap)
             {
                 if let Some((_, end)) = metadata.sentence_range {
                     max_emitted_index = Some(max_emitted_index.map_or(end, |m| m.max(end)));
@@ -68,6 +69,7 @@ pub(crate) fn chunk_text(
 
             let overlap_start = window.len().saturating_sub(sentence_overlap).max(1);
             window = window.split_off(overlap_start);
+            current_overlap = window.len();
             token_sum = window.iter().map(|&i| sentences[i].tokens).sum();
         }
     }
@@ -83,7 +85,9 @@ pub(crate) fn chunk_text(
         };
 
         if !is_redundant {
-            if let Some((chunk_text, metadata)) = finalize_chunk(&window, &sentences, 0) {
+            if let Some((chunk_text, metadata)) =
+                finalize_chunk(&window, &sentences, current_overlap)
+            {
                 fragments.push(ChunkFragment::from_metadata(chunk_text, metadata));
             }
         }
@@ -921,5 +925,87 @@ mod tests {
             combined_text
         );
         assert!(combined_text.contains("Content B."), "Should have B");
+    }
+
+    #[test]
+    fn test_overlap_metadata_first_chunk() {
+        let s1 = "This is sentence one.";
+        let s2 = "This is sentence two.";
+        let text = format!("{} {}", s1, s2);
+
+        // chunk_tokens: small enough to trigger after s1+s2.
+        // Approx: 4 tokens each. Sum 8. Limit 7.
+        let chunks = chunk_text(&text, 7, 1).unwrap();
+
+        assert!(!chunks.is_empty());
+        // First chunk should have 0 overlap_with_previous
+        assert_eq!(
+            chunks[0].metadata.overlap_with_previous, 0,
+            "First chunk should have 0 overlap"
+        );
+    }
+
+    #[test]
+    fn test_overlap_metadata_residue_chunk() {
+        let s1 = "This is sentence one.";
+        let s2 = "This is sentence two.";
+        let s3 = "Small.";
+        let text = format!("{} {} {}", s1, s2, s3);
+
+        // Limit 10. S1(6)+S2(6)=12 >= 10. Trigger Chunk 1 [S1, S2].
+        // Overlap 1 (S2).
+        // Residue [S2, S3]. S2(6)+S3(2)=8 < 10.
+        // Loop ends.
+        // Residue [S2, S3].
+        // S3 is new. Kept.
+
+        let chunks = chunk_text(&text, 10, 1).unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        // Chunk 2 (residue) should have overlap 1 (S2)
+        assert_eq!(
+            chunks[1].metadata.overlap_with_previous, 1,
+            "Residue chunk should have correct overlap"
+        );
+    }
+
+    #[test]
+    fn test_overlap_metadata_middle_chunk() {
+        // S1(4), S2(4), S3(4), S4(4). Limit 7. Overlap 1.
+        // [S1, S2] = 8. Trigger 1.
+        // Overlap [S2].
+        // [S2, S3] = 8. Trigger 2.
+        // Overlap [S3].
+        // [S3, S4] = 8. Trigger 3.
+        // Overlap [S4].
+        // Residue [S4]. Redundant.
+
+        let text = "This is sentence one. This is sentence two. This is sentence three. This is sentence four.";
+        let chunks = chunk_text(text, 7, 1).unwrap();
+
+        assert_eq!(chunks.len(), 3);
+        // Chunk 2 (middle) should have overlap 1.
+        assert_eq!(
+            chunks[1].metadata.overlap_with_previous, 1,
+            "Middle chunk should have correct overlap"
+        );
+        // Chunk 3 should have overlap 1.
+        assert_eq!(
+            chunks[2].metadata.overlap_with_previous, 1,
+            "Last chunk should have correct overlap"
+        );
+    }
+
+    #[test]
+    fn test_overlap_metadata_no_overlap() {
+        let s1 = "This is sentence one.";
+        let s2 = "This is sentence two.";
+        let text = format!("{} {}", s1, s2);
+
+        // Limit 7. Overlap 0.
+        let chunks = chunk_text(&text, 7, 0).unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].metadata.overlap_with_previous, 0);
     }
 }
