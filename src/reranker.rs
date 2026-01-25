@@ -32,6 +32,8 @@ fn map_rerank_error(err: anyhow::Error, timeout_duration: Duration) -> RerankErr
                 RerankError::Timeout(timeout_duration)
             } else if s.contains("Reranker API error") {
                 RerankError::Api(s)
+            } else if s.contains("Failed to parse reranker response") {
+                RerankError::InvalidResponse(s)
             } else {
                 RerankError::Error(s)
             }
@@ -972,5 +974,18 @@ mod tests {
         assert!(result.is_some());
         let score = result.unwrap();
         assert_eq!(score.yes_logprob.unwrap(), -0.1);
+    }
+
+    #[test]
+    fn test_map_rerank_error_invalid_response() {
+        use rag_core::RerankError;
+        let err = anyhow::anyhow!("Context: Failed to parse reranker response: syntax error");
+        let mapped = map_rerank_error_for_test(err);
+        match mapped {
+            RerankError::InvalidResponse(msg) => {
+                assert!(msg.contains("Failed to parse reranker response"))
+            }
+            _ => panic!("Expected InvalidResponse for parsing error"),
+        }
     }
 }
