@@ -35,6 +35,12 @@ pub const API_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default polling interval for stats updates
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 2;
 
+/// Minimum polling interval to prevent tight loops
+pub const MIN_POLL_INTERVAL_SECS: u64 = 1;
+
+/// Maximum polling interval to prevent staleness
+pub const MAX_POLL_INTERVAL_SECS: u64 = 300;
+
 /// Interval for health check polling
 pub const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 

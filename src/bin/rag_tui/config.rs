@@ -2,7 +2,9 @@
 //!
 //! Centralizes environment variable reading into a single struct.
 
-use crate::constants::{DEFAULT_POLL_INTERVAL_SECS, DEFAULT_TOP_K};
+use crate::constants::{
+    DEFAULT_POLL_INTERVAL_SECS, DEFAULT_TOP_K, MAX_POLL_INTERVAL_SECS, MIN_POLL_INTERVAL_SECS,
+};
 
 /// TUI configuration loaded from environment variables
 #[derive(Debug, Clone)]
@@ -40,10 +42,7 @@ impl Config {
                 .unwrap_or_else(|_| "./documents".to_string()),
             ollama_url: std::env::var("OLLAMA_URL")
                 .unwrap_or_else(|_| "localhost:11434".to_string()),
-            poll_interval_secs: std::env::var("RAG_TUI_POLL_INTERVAL_S")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_POLL_INTERVAL_SECS),
+            poll_interval_secs: parse_poll_interval(std::env::var("RAG_TUI_POLL_INTERVAL_S").ok()),
             top_k: std::env::var("RAG_TUI_TOP_K")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -58,6 +57,16 @@ impl Config {
             "DATA_DIR={}  DOCS_DIR={}  OLLAMA={}",
             self.data_dir, self.documents_dir, self.ollama_url
         )
+    }
+}
+
+fn parse_poll_interval(env_val: Option<String>) -> u64 {
+    match env_val {
+        Some(s) => match s.parse::<u64>() {
+            Ok(val) => val.clamp(MIN_POLL_INTERVAL_SECS, MAX_POLL_INTERVAL_SECS),
+            Err(_) => DEFAULT_POLL_INTERVAL_SECS,
+        },
+        None => DEFAULT_POLL_INTERVAL_SECS,
     }
 }
 
@@ -109,5 +118,41 @@ mod tests {
         let config = Config::from_env();
         // Theme should have a value (dark is default)
         assert!(!config.theme.is_empty());
+    }
+
+    #[test]
+    fn test_parse_poll_interval() {
+        // Valid values
+        assert_eq!(parse_poll_interval(Some("5".to_string())), 5);
+        assert_eq!(parse_poll_interval(Some("10".to_string())), 10);
+
+        // Clamping min
+        assert_eq!(
+            parse_poll_interval(Some("0".to_string())),
+            MIN_POLL_INTERVAL_SECS
+        );
+
+        // Clamping max
+        assert_eq!(
+            parse_poll_interval(Some("10000".to_string())),
+            MAX_POLL_INTERVAL_SECS
+        );
+
+        // Invalid parsing -> default
+        assert_eq!(
+            parse_poll_interval(Some("abc".to_string())),
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+        assert_eq!(
+            parse_poll_interval(Some("".to_string())),
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+        assert_eq!(
+            parse_poll_interval(Some("-5".to_string())),
+            DEFAULT_POLL_INTERVAL_SECS
+        ); // u64 parse fail
+
+        // None -> default
+        assert_eq!(parse_poll_interval(None), DEFAULT_POLL_INTERVAL_SECS);
     }
 }
