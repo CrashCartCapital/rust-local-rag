@@ -1308,4 +1308,39 @@ mod tests {
     fn test_server_status_default() {
         assert_eq!(ServerStatus::default(), ServerStatus::Connecting);
     }
+
+    #[test]
+    fn test_model_fetch_state_lifecycle() {
+        let mut app = App::new("http://localhost:8140".to_string());
+
+        // Initial state
+        assert_eq!(app.model_fetch_state, ModelFetchState::Idle);
+        assert!(!app.has_pending_model_fetch());
+
+        // Simulate start (manually set state/rx as start_model_fetch is async and uses internal client)
+        app.model_fetch_state = ModelFetchState::Loading;
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        app.model_fetch_rx = Some(rx);
+
+        assert!(app.has_pending_model_fetch());
+
+        // Take rx (mimic select! branch guarding)
+        let taken_rx = app.take_model_fetch_rx();
+        assert!(taken_rx.is_some());
+        assert!(!app.has_pending_model_fetch());
+
+        // Handle result
+        app.handle_model_fetch_result(Ok(vec![crate::ollama::OllamaModel {
+            name: "test-model".to_string(),
+            size: 100,
+            details: Some(crate::ollama::ModelDetails {
+                family: Some("llama".to_string()),
+                parameter_size: Some("7B".to_string()),
+            }),
+        }]));
+
+        assert_eq!(app.model_fetch_state, ModelFetchState::Loaded);
+        assert_eq!(app.available_models.len(), 1);
+        assert_eq!(app.available_models[0].name, "test-model");
+    }
 }
