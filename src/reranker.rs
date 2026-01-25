@@ -278,14 +278,19 @@ Answer:"#
         }
 
         // Sort by relevance score (highest first)
-        results.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-        });
+        Self::sort_results(&mut results);
 
         Ok(results)
+    }
+
+    /// Sorts reranked results by relevance score (descending) and chunk ID (ascending).
+    /// Uses total_cmp for stable floating-point comparison.
+    fn sort_results(results: &mut [RerankedResult]) {
+        results.sort_by(|a, b| {
+            b.relevance
+                .total_cmp(&a.relevance)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
     }
 
     #[instrument(skip(self, candidate), fields(chunk_id = %candidate.chunk_id))]
@@ -972,5 +977,55 @@ mod tests {
         assert!(result.is_some());
         let score = result.unwrap();
         assert_eq!(score.yes_logprob.unwrap(), -0.1);
+    }
+
+    #[test]
+    fn test_reranker_sort_stability() {
+        let mut results = vec![
+            RerankedResult {
+                chunk_id: "B".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "A".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "C".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "D".to_string(),
+                relevance: f32::NAN,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+        ];
+
+        RerankerService::sort_results(&mut results);
+
+        // Expected order:
+        // 1. D (NaN) - total_cmp considers NaN > Infinity, so it comes first in Descending sort
+        // 2. C (0.9)
+        // 3. A (0.5, ID "A")
+        // 4. B (0.5, ID "B")
+
+        assert!(results[0].relevance.is_nan());
+        assert_eq!(results[0].chunk_id, "D");
+
+        assert_eq!(results[1].chunk_id, "C");
+        assert_eq!(results[1].relevance, 0.9);
+
+        assert_eq!(results[2].chunk_id, "A");
+        assert_eq!(results[2].relevance, 0.5);
+
+        assert_eq!(results[3].chunk_id, "B");
+        assert_eq!(results[3].relevance, 0.5);
     }
 }
