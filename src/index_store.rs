@@ -1,3 +1,6 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::manual_is_multiple_of)]
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::TryStreamExt;
