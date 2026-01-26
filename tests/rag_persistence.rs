@@ -58,6 +58,53 @@ fn make_chunk(
 
 #[tokio::test]
 #[serial]
+async fn test_recover_from_truncated_file() {
+    let mock_server = setup_mock_ollama().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().to_str().unwrap();
+
+    let model_name = "nomic-embed-text";
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", model_name);
+    }
+
+    // 1. Manually create a truncated index file
+    let index_filename = format!("chunks_{model_name}.json");
+    let index_path = temp_dir.path().join(index_filename);
+
+    let mut file = std::fs::File::create(&index_path).unwrap();
+    // Write valid start of JSON but cut it off abruptly
+    writeln!(
+        file,
+        "{{ \"version\": 2, \"model\": \"{model_name}\", \"chunks\": {{ \"chunk-1\": {{ \"id\": \"chunk-1\", \"text\": \"some text\""
+    )
+    .unwrap();
+
+    // 2. Initialize RagEngine
+    // This should detect the corrupted/truncated file and handle it gracefully
+    let engine = RagEngine::new(data_dir, &Config::default()).await;
+
+    // 3. Verify
+    assert!(
+        engine.is_ok(),
+        "RagEngine should recover from truncated index file"
+    );
+    let engine = engine.unwrap();
+
+    // It should have marked itself for reindex because the file was unparseable
+    assert!(
+        engine.needs_reindex(),
+        "Should mark for reindex after truncation"
+    );
+    assert!(
+        engine.list_documents().is_empty(),
+        "Should have empty state after recovery"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_recover_from_corrupt_index() {
     let mock_server = setup_mock_ollama().await;
     let temp_dir = tempfile::tempdir().unwrap();
