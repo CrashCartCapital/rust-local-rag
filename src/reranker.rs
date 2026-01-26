@@ -115,6 +115,24 @@ struct TopLogprob {
     logprob: f64,
 }
 
+/// Sort reranked results by score (descending) and chunk_id (ascending) for deterministic ordering.
+///
+/// Note: `total_cmp` provides a deterministic ordering for floats (including NaNs). For ranking
+/// purposes, we treat NaN scores as the *least* relevant to avoid promoting invalid scores.
+fn sort_reranked_results(results: &mut [RerankedResult]) {
+    results.sort_by(|a, b| {
+        match (a.relevance.is_nan(), b.relevance.is_nan()) {
+            (true, true) => a.chunk_id.cmp(&b.chunk_id),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => b
+                .relevance
+                .total_cmp(&a.relevance)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id)),
+        }
+    });
+}
+
 /// LLM-based relevance reranking service using Ollama.
 /// Scores search candidates using Yes/No classification for binary relevance.
 pub struct RerankerService {
@@ -278,12 +296,7 @@ Answer:"#
         }
 
         // Sort by relevance score (highest first)
-        results.sort_by(|a, b| {
-            b.relevance
-                .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-        });
+        sort_reranked_results(&mut results);
 
         Ok(results)
     }
@@ -972,5 +985,57 @@ mod tests {
         assert!(result.is_some());
         let score = result.unwrap();
         assert_eq!(score.yes_logprob.unwrap(), -0.1);
+    }
+
+    #[test]
+    fn test_reranker_sort_stability() {
+        // Test deterministic ordering: Score DESC, ChunkID ASC
+        // Also test handling of NaNs (NaNs are treated as least relevant)
+        let mut results = vec![
+            RerankedResult {
+                chunk_id: "c".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "a".to_string(),
+                relevance: 0.5,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "b".to_string(),
+                relevance: 0.9,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "d".to_string(),
+                relevance: f32::NAN,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+            RerankedResult {
+                chunk_id: "e".to_string(),
+                relevance: f32::NAN,
+                yes_logprob: None,
+                no_logprob: None,
+            },
+        ];
+
+        sort_reranked_results(&mut results);
+
+        // Verify ordering.
+        // 1. 0.9 -> "b"
+        // 2. 0.5 (id "a") -> "a"
+        // 3. 0.5 (id "c") -> "c"
+        // 4. NaN -> "d"
+        // 5. NaN -> "e"
+        assert_eq!(results[0].chunk_id, "b");
+        assert_eq!(results[1].chunk_id, "a");
+        assert_eq!(results[2].chunk_id, "c");
+        assert_eq!(results[3].chunk_id, "d");
+        assert_eq!(results[4].chunk_id, "e");
     }
 }
