@@ -488,7 +488,22 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            skip(self, query),
+            fields(
+                query_len = query.len(),
+                top_k = top_k,
+                weights = ?weights,
+                ann_search_ms = field::Empty,
+                lexical_search_ms = field::Empty,
+                scoring_ms = field::Empty,
+                reranking_ms = field::Empty
+            ),
+            err
+        )
+    )]
     async fn search_internal(
         &self,
         query: &str,
@@ -519,6 +534,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         crate::search::normalize(&mut query_embedding);
 
+        #[cfg(feature = "tracing")]
+        let ann_start = std::time::Instant::now();
+
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
             Some(index) => Box::new(
                 index
@@ -528,7 +546,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             None => Box::new(self.state.chunks.keys().cloned()),
         };
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("ann_search_ms", ann_start.elapsed().as_millis());
+
+        #[cfg(feature = "tracing")]
+        let lex_start = std::time::Instant::now();
+
         let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("lexical_search_ms", lex_start.elapsed().as_millis());
+
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
@@ -558,6 +586,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .fold(0.0_f32, f32::max)
             .max(f32::EPSILON);
 
+        #[cfg(feature = "tracing")]
+        let scoring_start = std::time::Instant::now();
+
         let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
 
         for chunk_id in candidate_ids {
@@ -583,6 +614,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             scores.truncate(initial_k);
         }
         scores.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.3.id.cmp(&b.3.id)));
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("scoring_ms", scoring_start.elapsed().as_millis());
 
         let candidates: Vec<SearchResultWithEmbedding> = scores
             .into_iter()
@@ -644,12 +678,16 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     });
 
                 #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    duration_ms = ?rerank_start.elapsed().as_millis(),
-                    input_count = reranker_inputs.len(),
-                    output_count = res.len(),
-                    "Reranking complete"
-                );
+                {
+                    let elapsed = rerank_start.elapsed().as_millis();
+                    tracing::Span::current().record("reranking_ms", elapsed);
+                    tracing::debug!(
+                        duration_ms = ?elapsed,
+                        input_count = reranker_inputs.len(),
+                        output_count = res.len(),
+                        "Reranking complete"
+                    );
+                }
                 res
             }
             None => Vec::new(),
