@@ -452,31 +452,43 @@ fn split_massive_word(text: &str, limit: usize) -> Vec<String> {
         return vec![text.to_string()];
     }
     let mut result = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut start = 0;
+    // limit * 4 is the max characters allowed.
+    // approximate_token_count uses max(chars/4, 1) for single words.
+    // So tokens <= limit means ceil(chars/4) <= limit => chars <= limit * 4.
+    let max_chars = limit.saturating_mul(4);
 
-    while start < chars.len() {
-        // Use saturating_add to prevent overflow if limit is very large (e.g. usize::MAX / 4)
-        // Although unlikely, start + limit*4 could wrap around in release mode without this.
-        let mut end = (start.saturating_add(limit.saturating_mul(4))).min(chars.len());
+    let mut start_byte = 0;
+    while start_byte < text.len() {
+        let mut end_byte = start_byte;
+        let mut char_count = 0;
 
-        loop {
-            let slice: String = chars[start..end].iter().collect();
-            let tokens = approximate_token_count(&slice);
+        for (idx, ch) in text[start_byte..].char_indices() {
+            char_count += 1;
 
-            if tokens <= limit {
-                result.push(slice);
-                start = end;
+            if char_count > max_chars {
+                // This char puts us over the limit. Split before it.
+                end_byte = start_byte + idx;
                 break;
+            }
+
+            // Include this char
+            end_byte = start_byte + idx + ch.len_utf8();
+        }
+
+        // Safety check: ensure we made progress.
+        // If max_chars is huge, we might consume everything.
+        // If max_chars is small (>=4), we should take at least one char.
+        if end_byte == start_byte {
+            // Force take at least one char to avoid infinite loop
+            if let Some(ch) = text[start_byte..].chars().next() {
+                end_byte = start_byte + ch.len_utf8();
             } else {
-                if end - start <= 1 {
-                    result.push(slice);
-                    start = end;
-                    break;
-                }
-                end -= 1;
+                break; // End of string
             }
         }
+
+        result.push(text[start_byte..end_byte].to_string());
+        start_byte = end_byte;
     }
     result
 }
@@ -922,4 +934,81 @@ mod tests {
         );
         assert!(combined_text.contains("Content B."), "Should have B");
     }
+}
+
+#[test]
+fn test_split_massive_word_emoji_boundaries() {
+    // Emojis are 4 bytes. 4 chars -> 1 token approx.
+    // But our limit check is char-based in new logic (and approx based in old).
+    // Old logic: limit=1. char_est = len/4.
+    // "😀" -> 1 char. est 1.
+    // "😀😀" -> 2 chars. est 1.
+    // "😀😀😀😀" -> 4 chars. est 1.
+    // "😀😀😀😀😀" -> 5 chars. est 2.
+
+    let text = "😀".repeat(10);
+    // 10 chars. Limit 1 (4 chars).
+    // Should split: [4 chars], [4 chars], [2 chars].
+
+    let chunks = split_massive_word(&text, 1);
+
+    // With current implementation, it might vary slightly due to "end -= 1" search,
+    // but it should definitely split and not panic.
+    assert!(chunks.len() >= 2, "Should split 10 emojis with limit 1");
+
+    for chunk in chunks {
+        assert!(
+            chunk.chars().count() <= 8,
+            "Should not exceed limit excessively"
+        ); // Allow some slack for old algo
+    }
+}
+
+#[test]
+fn test_split_massive_word_mixed_content() {
+    // ASCII + CJK.
+    // "a" (1 byte) "中" (3 bytes).
+    // "a中a中". 4 chars.
+    // Limit 1 -> 4 chars.
+    // Should take all 4.
+    let text = "a中a中";
+    let chunks = split_massive_word(text, 1);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0], text);
+
+    // "a中".repeat(10). 20 chars. Limit 1 (4 chars).
+    // Should split into ~5 chunks.
+    let text2 = "a中".repeat(10);
+    let chunks2 = split_massive_word(&text2, 1);
+    assert!(chunks2.len() >= 4);
+}
+
+#[test]
+fn test_split_massive_word_large_input() {
+    // 1MB string.
+    // 'a' is 1 byte.
+    let text = "a".repeat(1_000_000);
+    let limit = 1000; // 4000 chars per chunk.
+    // Expect ~250 chunks.
+
+    let start = std::time::Instant::now();
+    let chunks = split_massive_word(&text, limit);
+    let duration = start.elapsed();
+
+    assert_eq!(chunks.len(), 250);
+    // We can't strictly assert time in CI, but it ensures it runs.
+    println!("Split 1MB took {:?}", duration);
+}
+
+#[test]
+fn test_split_massive_word_progress() {
+    // Limit 1 (4 chars). Text with weird boundaries?
+    // Just ensure it doesn't infinite loop.
+    let text = "abcde";
+    let chunks = split_massive_word(text, 1);
+    // 5 chars. Limit 4.
+    // Split: "abcd", "e".
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0], "abcd");
+    assert_eq!(chunks[1], "e");
 }
