@@ -14,6 +14,7 @@ We use `make` for common tasks.
 
 ```bash
 # Development
+make setup                  # Complete development environment setup
 make run                    # Run application (DEV=true)
 make dev-start              # Start Ollama + Run application
 make watch                  # Watch for changes and run checks
@@ -24,6 +25,7 @@ make kill                   # Kill all rust-local-rag processes
 make build                  # Debug build
 make release                # Optimized release build
 make clean                  # Clean build artifacts
+make clean-all              # Deep clean (build + optionally Ollama)
 
 # Testing
 make test                   # Run tests
@@ -37,6 +39,7 @@ make fmt                    # Format code
 
 # Maintenance
 make update                 # Update dependencies
+make upgrade                # Upgrade dependencies to latest versions
 make fix                    # Auto-fix clippy issues
 
 # Full CI Pipeline
@@ -77,14 +80,17 @@ make ollama-models          # Pull required models
 *   `src/embeddings.rs`: Ollama embeddings client.
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
+*   `src/job_payload.rs`: Job data structures.
+*   `src/index_store.rs`: SQLite index management.
 *   `src/worker.rs`: Background worker for indexing.
+*   `src/progress_logger.rs`: Progress logging utilities.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
 *   `src/bin/rag_tui/`: TUI client application.
 
 ### Data & Configuration
 *   `documents/`: Directory for PDF documents to be indexed.
 *   `data/`: Local data storage (SQLite DB, embeddings).
-*   `logs/`: Application logs.
+*   `logs/`: Application logs (created at runtime).
 *   `prompts/`: System prompts (e.g. for reranker).
 
 ### Documentation & Analysis
