@@ -190,6 +190,10 @@ pub fn engine_error_to_pyerr(err: EngineError) -> PyErr {
                             let _ = exc.setattr("expected_hash", expected.as_str());
                             let _ = exc.setattr("got_hash", got.as_str());
                         }
+                        ValidationKind::InputRejected(msg) => {
+                            let _ = exc.setattr("kind", "input_rejected");
+                            let _ = exc.setattr("message", msg.as_str());
+                        }
                     }
                 }
                 pyerr

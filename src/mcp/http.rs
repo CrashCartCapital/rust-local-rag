@@ -90,6 +90,9 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
             axum::http::StatusCode::NOT_FOUND,
             format!("Document {name} not found"),
         ),
+        EngineError::Embedding(EmbeddingError::Validation(_)) => {
+            (axum::http::StatusCode::BAD_REQUEST, e.to_string())
+        }
         EngineError::Embedding(EmbeddingError::Timeout(_)) => {
             (axum::http::StatusCode::GATEWAY_TIMEOUT, e.to_string())
         }
@@ -350,6 +353,14 @@ mod tests {
         };
         let (status, _) = map_engine_error(&err);
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Test Embedding Validation (New)
+        let err = EngineError::Embedding(EmbeddingError::Validation(
+            ValidationKind::InputRejected("too long".to_string()),
+        ));
+        let (status, msg) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(msg.contains("input rejected by backend"));
 
         // Test DocumentNotFound mapping
         let err = EngineError::DocumentNotFound("test.pdf".to_string());

@@ -71,6 +71,8 @@ pub enum ValidationKind {
     EmptyText,
     /// Document hash mismatch (corruption or concurrent modification)
     HashMismatch { expected: String, got: String },
+    /// Input rejected by the backend (e.g., too long, invalid format)
+    InputRejected(String),
 }
 
 impl std::fmt::Display for ValidationKind {
@@ -84,6 +86,9 @@ impl std::fmt::Display for ValidationKind {
             ValidationKind::EmptyText => write!(f, "text is empty or whitespace-only"),
             ValidationKind::HashMismatch { expected, got } => {
                 write!(f, "hash mismatch: expected {expected}, got {got}")
+            }
+            ValidationKind::InputRejected(msg) => {
+                write!(f, "input rejected by backend: {msg}")
             }
         }
     }
@@ -255,6 +260,10 @@ mod tests {
             }
             .to_string(),
             "dimension mismatch: expected 384, got 768"
+        );
+        assert_eq!(
+            ValidationKind::InputRejected("too long".to_string()).to_string(),
+            "input rejected by backend: too long"
         );
     }
 

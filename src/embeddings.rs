@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lru::LruCache;
-use rag_core::EmbeddingError;
+use rag_core::{EmbeddingError, ValidationKind};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -111,11 +111,12 @@ impl EmbeddingService {
         };
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Ollama API error: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                return Err(EmbeddingError::Validation(ValidationKind::InputRejected(body)).into());
+            }
+            return Err(anyhow::anyhow!("Ollama API error: {} - {}", status, body));
         }
         let embedding_response: OllamaEmbeddingResponse = response.json().await?;
 
@@ -180,11 +181,14 @@ impl EmbeddingService {
             };
 
             if !response.status().is_success() {
-                return Err(anyhow::anyhow!(
-                    "Ollama API error: {} - {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                ));
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if status == reqwest::StatusCode::BAD_REQUEST {
+                    return Err(
+                        EmbeddingError::Validation(ValidationKind::InputRejected(body)).into(),
+                    );
+                }
+                return Err(anyhow::anyhow!("Ollama API error: {} - {}", status, body));
             }
 
             let embedding_response: OllamaEmbeddingResponse = response.json().await?;
@@ -328,5 +332,62 @@ impl rag_core::EmbeddingBackend for EmbeddingService {
 
     fn dimension(&self) -> usize {
         self.embedding_dim
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_embedding_validation_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [{"name": "nomic-embed-text"}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock dimension discovery (successful embedding)
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .and(wiremock::matchers::body_string_contains("The quick brown fox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "embedding": vec![0.0; 384]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock invalid input (returns 400)
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .and(wiremock::matchers::body_string_contains("invalid input"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Input too long"))
+            .mount(&mock_server)
+            .await;
+
+        let config = Config::default();
+        let service = EmbeddingService::new_with_settings(
+            mock_server.uri(),
+            "nomic-embed-text".to_string(),
+            &config,
+        )
+        .await
+        .expect("Failed to create service");
+
+        let err = service.get_embedding("invalid input").await.unwrap_err();
+        let embedding_err = err.downcast::<EmbeddingError>().unwrap();
+
+        match embedding_err {
+            EmbeddingError::Validation(ValidationKind::InputRejected(msg)) => {
+                assert_eq!(msg, "Input too long");
+            }
+            _ => panic!("Expected Validation error, got {:?}", embedding_err),
+        }
     }
 }
