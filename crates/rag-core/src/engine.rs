@@ -316,6 +316,34 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
     #[cfg_attr(feature = "tracing", instrument(skip(self, prepared), fields(doc = %prepared.document_name, chunks = prepared.chunks.len())))]
     pub fn upsert_prepared_document(&mut self, prepared: PreparedDocument) -> Result<usize> {
+        // Validation Phase: Ensure all chunks match the expected embedding dimension
+        // BEFORE modifying the index (Atomic Upsert invariant).
+        let target_dim = if self.state.embedding_dim > 0 {
+            Some(self.state.embedding_dim)
+        } else {
+            // If state is empty, infer dimension from the first non-empty chunk
+            prepared
+                .chunks
+                .iter()
+                .find(|c| !c.embedding.is_empty())
+                .map(|c| c.embedding.len())
+        };
+
+        if let Some(dim) = target_dim {
+            for chunk in &prepared.chunks {
+                if !chunk.embedding.is_empty() && chunk.embedding.len() != dim {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::DimensionMismatch {
+                            expected: dim,
+                            got: chunk.embedding.len(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        // Modification Phase: Remove old chunks and insert new ones.
         // Remove existing chunks even if we end up with zero usable chunks.
         let _ = self.remove_document(&prepared.document_name);
 
@@ -336,18 +364,8 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 self.ann_index = Some(AnnIndex::new(chunk.embedding.len()));
             }
 
-            if !chunk.embedding.is_empty() {
-                if self.state.embedding_dim == 0 {
-                    self.state.embedding_dim = chunk.embedding.len();
-                } else if self.state.embedding_dim != chunk.embedding.len() {
-                    return Err(EngineError::validation(
-                        chunk.id.clone(),
-                        crate::error::ValidationKind::DimensionMismatch {
-                            expected: self.state.embedding_dim,
-                            got: chunk.embedding.len(),
-                        },
-                    ));
-                }
+            if !chunk.embedding.is_empty() && self.state.embedding_dim == 0 {
+                self.state.embedding_dim = chunk.embedding.len();
             }
 
             if let Some(index) = self.ann_index.as_mut() {
@@ -1281,5 +1299,70 @@ mod tests {
                 res.map(|d| d.chunks.len()).unwrap_or(0)
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn test_atomic_upsert_failure() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        // 1. Upsert a valid document
+        let inserted = engine
+            .upsert_document("doc1.txt", "Cats are great.", None)
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        // Verify it's there
+        let results = engine.search("cats", 1, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].document, "doc1.txt");
+
+        // 2. Prepare a document with invalid embedding dimension
+        // We manually construct a PreparedDocument with wrong dimension
+        // MockBackend returns dim=2. We'll use dim=3.
+        let bad_chunk = DocumentChunk {
+            id: Uuid::new_v4().to_string(),
+            document_name: "doc1.txt".to_string(), // Trying to update doc1
+            text: "This update should fail".to_string(),
+            embedding: vec![1.0, 2.0, 3.0], // Dimension 3 != 2
+            chunk_index: 0,
+            page_number: 0,
+            section: None,
+            metadata: crate::types::ChunkMetadata::default(),
+            tags: std::collections::HashSet::new(),
+            resolution: crate::types::Resolution::default(),
+            parent_id: None,
+        };
+
+        let prepared = PreparedDocument {
+            document_name: "doc1.txt".to_string(),
+            document_hash: None,
+            chunks: vec![bad_chunk],
+        };
+
+        // 3. Attempt upsert - should fail
+        let result = engine.upsert_prepared_document(prepared);
+        assert!(result.is_err());
+        match result {
+            Err(EngineError::Validation { kind, .. }) => match kind {
+                crate::error::ValidationKind::DimensionMismatch { expected, got } => {
+                    assert_eq!(expected, 2);
+                    assert_eq!(got, 3);
+                }
+                _ => panic!("Wrong validation error kind"),
+            },
+            _ => panic!("Expected validation error"),
+        }
+
+        // 4. Verify original document is STILL there (Atomic Upsert)
+        // If atomic upsert wasn't working, doc1 would have been removed before the error.
+        let results = engine.search("cats", 1, None).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Original document should persist after failed update"
+        );
+        assert_eq!(results[0].document, "doc1.txt");
+        assert_eq!(results[0].text, "Cats are great."); // Original text
     }
 }
