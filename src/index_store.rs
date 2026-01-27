@@ -511,6 +511,7 @@ impl SqliteIndexStore {
             return Ok(());
         };
 
+        #[allow(clippy::collapsible_if)]
         if state.embedding_dim == 0 {
             if let Some(first) = state.chunks.values().next() {
                 state.embedding_dim = first.embedding.len();
