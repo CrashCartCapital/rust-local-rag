@@ -23,6 +23,27 @@ impl JobStatus {
             JobStatus::Failed => "failed",
         }
     }
+
+    pub fn is_valid_next_state(&self, next: &JobStatus) -> bool {
+        match (self, next) {
+            // Idempotent updates are allowed
+            (s, n) if s == n => true,
+
+            // Pending can go to anything (Start -> InProgress, or direct Fail/Complete)
+            (JobStatus::Pending, _) => true,
+
+            // InProgress can finish
+            (JobStatus::InProgress, JobStatus::Completed) => true,
+            (JobStatus::InProgress, JobStatus::Failed) => true,
+
+            // Terminal states are final
+            (JobStatus::Completed, _) => false,
+            (JobStatus::Failed, _) => false,
+
+            // Invalid: InProgress -> Pending
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -145,6 +166,19 @@ impl JobManager {
         error: Option<String>,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
+
+        // Enforce valid job state transitions
+        if let Some(current_job) = self.get_job(job_id).await? {
+            if !current_job.status.is_valid_next_state(&status) {
+                return Err(anyhow::anyhow!(
+                    "Invalid job state transition from {:?} to {:?}",
+                    current_job.status,
+                    status
+                ));
+            }
+        } else {
+            return Err(anyhow::anyhow!("Job {} not found", job_id));
+        }
 
         sqlx::query("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE job_id = ?")
             .bind(status.as_str())
