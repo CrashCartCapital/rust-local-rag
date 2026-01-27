@@ -150,7 +150,7 @@ Proposed:
   - DoD: Warn and skip symlinked files unless `RAG_ALLOW_SYMLINKS=1`.
 
 ### Section: P2 — Compounding ROI
-- [ ] T2.1 — Add `rag-doctor` command
+- [x] T2.1 — Add `rag-doctor` command
   - Files: new `src/bin/rag_doctor.rs`, shared helpers in `src/guardrails.rs` or `src/doctor/`
   - Tests:
     - Unit tests for the pure checks.

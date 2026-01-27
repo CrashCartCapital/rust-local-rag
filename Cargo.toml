@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "rag-tui"
 path = "src/bin/rag_tui/main.rs"
 
+[[bin]]
+name = "rag-doctor"
+path = "src/bin/rag_doctor.rs"
+
 [dependencies]
 # TUI dependencies
 ratatui = "0.29"

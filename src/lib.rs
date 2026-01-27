@@ -1,4 +1,5 @@
 pub mod config;
+pub mod doctor;
 pub mod embeddings;
 pub mod guardrails;
 pub mod index_store;

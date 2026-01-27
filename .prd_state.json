@@ -1,9 +1,9 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T02:21:01Z",
+  "last_updated": "2026-01-27T02:39:27Z",
   "current_phase": "Phase 3: Task Execution Loop",
   "current_section": "P2",
-  "current_task": "T2.1",
+  "current_task": "T2.2",
   "tdd_state": "RED",
   "completed_tasks": [
     "T0.1",
@@ -12,8 +12,9 @@
     "T0.4",
     "T1.1",
     "T1.2",
-    "T1.3"
+    "T1.3",
+    "T2.1"
   ],
   "blocked_tasks": [],
-  "notes": "Completed T1.3. Next: T2.1 add rag-doctor command."
+  "notes": "Completed T2.1. Next: T2.2 repo hygiene (.gitignore)."
 }
