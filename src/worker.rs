@@ -487,19 +487,45 @@ impl WorkerSupervisor {
     async fn discover_pdf_paths(documents_dir: &str) -> Result<Vec<PathBuf>> {
         use walkdir::WalkDir;
 
+        let allow_symlinks = std::env::var("RAG_ALLOW_SYMLINKS")
+            .ok()
+            .is_some_and(|v| v == "1");
+
         tokio::task::spawn_blocking({
             let dir = documents_dir.to_string();
+            let allow_symlinks = allow_symlinks;
             move || {
-                WalkDir::new(&dir)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("pdf"))
-                    .map(|e| e.path().to_path_buf())
-                    .collect::<Vec<_>>()
+                let walker = WalkDir::new(&dir).follow_links(allow_symlinks);
+                let mut paths = Vec::new();
+                let mut skipped_symlinks = 0usize;
+
+                for entry in walker.into_iter().filter_map(|e| e.ok()) {
+                    if entry.path().extension().and_then(|s| s.to_str()) != Some("pdf") {
+                        continue;
+                    }
+
+                    if !allow_symlinks && entry.file_type().is_symlink() {
+                        skipped_symlinks += 1;
+                        continue;
+                    }
+
+                    paths.push(entry.path().to_path_buf());
+                }
+
+                (paths, skipped_symlinks)
             }
         })
         .await
         .context("discover_pdf_paths task failed")
+        .map(|(paths, skipped_symlinks)| {
+            if skipped_symlinks > 0 {
+                tracing::warn!(
+                    skipped_symlinks,
+                    "Skipped symlinked PDFs during ingestion. Set RAG_ALLOW_SYMLINKS=1 to allow indexing symlinks."
+                );
+            }
+            paths
+        })
     }
 
     async fn emit_logger(
@@ -933,7 +959,119 @@ impl WorkerSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::os::unix::fs::symlink;
     use std::time::Duration;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_prd_t1_3_discover_pdf_paths_skips_symlinks_by_default() {
+        let _env = EnvVarGuard::unset("RAG_ALLOW_SYMLINKS");
+
+        let documents_dir = tempfile::tempdir().unwrap();
+        let real_pdf = documents_dir.path().join("real.pdf");
+        std::fs::write(&real_pdf, b"%PDF-1.7\n").unwrap();
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_pdf = outside_dir.path().join("outside.pdf");
+        std::fs::write(&outside_pdf, b"%PDF-1.7\n").unwrap();
+
+        let linked_pdf = documents_dir.path().join("linked.pdf");
+        symlink(&outside_pdf, &linked_pdf).unwrap();
+
+        let outside_subdir = tempfile::tempdir().unwrap();
+        let outside_folder = outside_subdir.path().join("folder");
+        std::fs::create_dir_all(&outside_folder).unwrap();
+        let outside_folder_pdf = outside_folder.join("inside.pdf");
+        std::fs::write(&outside_folder_pdf, b"%PDF-1.7\n").unwrap();
+
+        let linked_dir = documents_dir.path().join("linked_dir");
+        symlink(&outside_folder, &linked_dir).unwrap();
+        let linked_dir_pdf = linked_dir.join("inside.pdf");
+
+        let paths = WorkerSupervisor::discover_pdf_paths(
+            documents_dir.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(paths.contains(&real_pdf));
+        assert!(!paths.contains(&linked_pdf));
+        assert!(!paths.contains(&linked_dir_pdf));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_prd_t1_3_discover_pdf_paths_allows_symlinks_with_override() {
+        let _env = EnvVarGuard::set("RAG_ALLOW_SYMLINKS", "1");
+
+        let documents_dir = tempfile::tempdir().unwrap();
+        let real_pdf = documents_dir.path().join("real.pdf");
+        std::fs::write(&real_pdf, b"%PDF-1.7\n").unwrap();
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_pdf = outside_dir.path().join("outside.pdf");
+        std::fs::write(&outside_pdf, b"%PDF-1.7\n").unwrap();
+
+        let linked_pdf = documents_dir.path().join("linked.pdf");
+        symlink(&outside_pdf, &linked_pdf).unwrap();
+
+        let outside_subdir = tempfile::tempdir().unwrap();
+        let outside_folder = outside_subdir.path().join("folder");
+        std::fs::create_dir_all(&outside_folder).unwrap();
+        let outside_folder_pdf = outside_folder.join("inside.pdf");
+        std::fs::write(&outside_folder_pdf, b"%PDF-1.7\n").unwrap();
+
+        let linked_dir = documents_dir.path().join("linked_dir");
+        symlink(&outside_folder, &linked_dir).unwrap();
+        let linked_dir_pdf = linked_dir.join("inside.pdf");
+
+        let paths = WorkerSupervisor::discover_pdf_paths(
+            documents_dir.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(paths.contains(&real_pdf));
+        assert!(paths.contains(&linked_pdf));
+        assert!(paths.contains(&linked_dir_pdf));
+    }
 
     /// Test that TimedWriteLockGuard correctly records lock duration.
     #[tokio::test]

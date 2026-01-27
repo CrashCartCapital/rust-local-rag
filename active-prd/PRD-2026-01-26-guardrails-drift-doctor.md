@@ -144,7 +144,7 @@ Proposed:
   - Files: `start-server.sh` (rewrite) or delete; docs update as needed.
   - DoD: Meets R6.
 
-- [ ] T1.3 — (Optional) Skip symlinks by default during ingestion
+- [x] T1.3 — (Optional) Skip symlinks by default during ingestion
   - Motivation: avoid accidental indexing of outside-tree files via symlinks in `DOCUMENTS_DIR`.
   - Files: `src/rag_engine.rs` (doc discovery), docs
   - DoD: Warn and skip symlinked files unless `RAG_ALLOW_SYMLINKS=1`.
