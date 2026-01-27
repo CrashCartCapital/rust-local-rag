@@ -54,7 +54,6 @@ PRODUCTION_POLISHING_GUIDE.md
 scripts/
 docs/tracking/
 prompts/reranker_v2.txt
-start-server.sh
 test_*.sh
 test_*.py
 cleanup_*.py

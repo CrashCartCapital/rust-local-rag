@@ -140,7 +140,7 @@ Proposed:
     - Minimal integration test verifying HTTP and MCP clamp equivalently (table-driven).
   - DoD: Meets R5.
 
-- [ ] T1.2 — Replace/remove `start-server.sh`
+- [x] T1.2 — Replace/remove `start-server.sh`
   - Files: `start-server.sh` (rewrite) or delete; docs update as needed.
   - DoD: Meets R6.
 

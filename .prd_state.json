@@ -1,17 +1,18 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T01:59:04Z",
+  "last_updated": "2026-01-27T02:08:07Z",
   "current_phase": "Phase 3: Task Execution Loop",
   "current_section": "P1",
-  "current_task": "T1.2",
+  "current_task": "T1.3",
   "tdd_state": "RED",
   "completed_tasks": [
     "T0.1",
     "T0.2",
     "T0.3",
     "T0.4",
-    "T1.1"
+    "T1.1",
+    "T1.2"
   ],
   "blocked_tasks": [],
-  "notes": "Completed T1.1. Next: T1.2 (replace/remove start-server.sh without fragile env parsing)."
+  "notes": "Completed T1.2. Next: T1.3 (optional) skip symlinks by default during ingestion."
 }
