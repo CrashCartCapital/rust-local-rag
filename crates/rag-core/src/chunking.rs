@@ -182,7 +182,10 @@ fn extract_sentences(
         let page_number = page_idx + 1;
         let mut last_heading: Option<String> = None;
 
-        for block in page_text.split("\n\n") {
+        // Normalize Windows line endings to simple newlines to ensure paragraph splitting works
+        let normalized_page_text = page_text.replace("\r\n", "\n");
+
+        for block in normalized_page_text.split("\n\n") {
             let block = block.trim();
             if block.is_empty() {
                 continue;
@@ -921,5 +924,78 @@ mod tests {
             combined_text
         );
         assert!(combined_text.contains("Content B."), "Should have B");
+    }
+
+    #[test]
+    fn test_windows_line_endings_split_blocks() {
+        // Test 1: Reproduction
+        // Should produce separate blocks for Heading 1 and Heading 2.
+        // If merged, Heading 2 won't be detected as a heading because it's in the middle of a block.
+        // We use "1. Heading" format to ensure the heuristic detects it as a heading.
+        let text = "1. Heading\r\n\r\nText 1.\r\n\r\n2. Heading\r\n\r\nText 2.";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        // Debug output
+        for s in &sentences {
+            println!("S: '{}', H: {:?}", s.text, s.heading);
+        }
+
+        // Find the sentence corresponding to "Text 2"
+        // We skip searching for "2. Heading" directly as SRX might split it (e.g. "2.", "Heading").
+        // But "Text 2" should definitely have the correct heading context.
+        let s_t2 = sentences
+            .iter()
+            .find(|s| s.text.contains("Text 2"))
+            .expect("Should find Text 2 text");
+
+        // If the bug exists, heading will be "1. Heading" (inherited from first block)
+        assert_eq!(
+            s_t2.heading.as_deref(),
+            Some("2. Heading"),
+            "Text 2 should be under 2. Heading"
+        );
+    }
+
+    #[test]
+    fn test_mixed_line_endings() {
+        // Test 2: Mix of \n\n and \r\n\r\n
+        let text = "Block 1.\n\nBlock 2.\r\n\r\nBlock 3.";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        assert!(
+            sentences.len() >= 3,
+            "Should split into at least 3 sentences/blocks"
+        );
+        let combined = sentences
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("Block 1."));
+        assert!(combined.contains("Block 2."));
+        assert!(combined.contains("Block 3."));
+    }
+
+    #[test]
+    fn test_trailing_leading_windows_newlines() {
+        // Test 3: Trailing/Leading \r\n\r\n
+        // Use "TITLE" (all caps) to pass heading heuristic
+        let text = "\r\n\r\nTITLE\r\n\r\n";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        assert!(!sentences.is_empty());
+        assert_eq!(sentences[0].heading.as_deref(), Some("TITLE"));
+    }
+
+    #[test]
+    fn test_single_windows_newline_does_not_split_block() {
+        // Test 4: Single \r\n should behave like single \n (join with space)
+        let text = "Line 1\r\nLine 2";
+        let sentences = extract_sentences(text, None).unwrap();
+
+        // Should be one sentence/block joined
+        assert_eq!(sentences.len(), 1);
+        // Normalize replaces newline with space
+        assert_eq!(sentences[0].text, "Line 1 Line 2");
     }
 }
