@@ -43,7 +43,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `RAG_ALLOW_REMOTE_OLLAMA` | Allow non-loopback `OLLAMA_URL` (unsafe; sends document/query text off-machine) | _unset_ |
 | `RAG_ALLOW_REMOTE_BIND` | Allow non-loopback `MCP_HTTP_BIND` (unsafe; exposes unauthenticated server) | _unset_ |
 | `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
-| `MCP_HTTP_BIND` | Server bind address for MCP, REST endpoints, and health checks | `127.0.0.1:8140` |
+| `MCP_HTTP_BIND` | Server bind address (IP:port) for MCP, REST endpoints, and health checks | `127.0.0.1:8140` |
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` or `DEV` | Prefer console logging (development friendly) | _unset_ |
 | `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |
