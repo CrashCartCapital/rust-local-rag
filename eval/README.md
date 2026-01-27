@@ -14,6 +14,24 @@ cd eval
 python -m eval.run evaluate --config baseline -v
 ```
 
+## Golden Fixtures (Repo-Contained)
+
+This repo includes a tiny PDF fixture corpus in `eval/fixtures/` plus a matching ground-truth file.
+
+```bash
+# Terminal 1: run the server against the fixture corpus
+export DOCUMENTS_DIR=./eval/fixtures
+export DATA_DIR=./data-fixtures
+make run
+
+# Terminal 2: trigger a reindex (wait for completion)
+curl -X POST http://127.0.0.1:8140/reindex
+
+# Terminal 2: run the fixture evaluation
+cd eval
+python -m eval.run evaluate --config fixtures -v
+```
+
 ## Architecture
 
 ```

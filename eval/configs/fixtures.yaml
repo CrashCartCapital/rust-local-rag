@@ -1,0 +1,23 @@
+# Golden fixtures evaluation configuration
+name: "fixtures"
+description: "Small, repo-contained PDF fixtures for smoke-testing retrieval"
+
+# RAG Server Settings
+rag_endpoint: "http://localhost:8140"
+connection_mode: "http"
+
+# Retrieval Settings
+top_k: 3
+retrieval_top_k: 10
+
+# Evaluation Settings
+ground_truth_path: "eval/ground_truth/fixtures.jsonl"
+metrics:
+  - "hit_rate@3"
+  - "mrr@3"
+  - "ndcg@3"
+  - "latency_p95"
+
+# Matching Settings
+page_tolerance: 0
+

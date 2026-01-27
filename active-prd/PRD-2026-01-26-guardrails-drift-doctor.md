@@ -161,7 +161,7 @@ Proposed:
   - Files: `.gitignore` (or relevant tooling ignore)
   - DoD: ignore `frontend/node_modules`, `frontend/dist` (and any other bulky derived outputs).
 
-- [ ] T2.3 — Golden eval fixtures
+- [x] T2.3 — Golden eval fixtures
   - Files: `eval/` harness + new fixtures in `eval/fixtures/` (or similar)
   - DoD:
     - 2–3 stable queries with expected doc IDs/sections.
