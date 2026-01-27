@@ -42,6 +42,7 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `dengcao/Qwen3-Reranker-4B:Q5_K_M` |
 | `RAG_ALLOW_REMOTE_OLLAMA` | Allow non-loopback `OLLAMA_URL` (unsafe; sends document/query text off-machine) | _unset_ |
 | `RAG_ALLOW_REMOTE_BIND` | Allow non-loopback `MCP_HTTP_BIND` (unsafe; exposes unauthenticated server) | _unset_ |
+| `RAG_ALLOW_SYMLINKS` | Allow indexing PDFs via symlinks in `DOCUMENTS_DIR` (unsafe; may index outside the folder) | _unset_ |
 | `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
 | `MCP_HTTP_BIND` | Server bind address (IP:port) for MCP, REST endpoints, and health checks | `127.0.0.1:8140` |
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
