@@ -133,7 +133,7 @@ Proposed:
   - DoD: Meets R4.
 
 ### Section: P1 — Reduce drift + remove footguns
-- [/] T1.1 — Unify search validation + add HTTP `weights`
+- [x] T1.1 — Unify search validation + add HTTP `weights`
   - Files: `src/mcp/http.rs`, `src/mcp/tools.rs`, `src/mcp/models.rs`, new `src/mcp/validation.rs`
   - Tests:
     - Unit tests for validator clamp behavior.

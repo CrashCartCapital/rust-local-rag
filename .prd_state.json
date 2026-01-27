@@ -1,16 +1,17 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T01:41:29Z",
+  "last_updated": "2026-01-27T01:59:04Z",
   "current_phase": "Phase 3: Task Execution Loop",
   "current_section": "P1",
-  "current_task": "T1.1",
+  "current_task": "T1.2",
   "tdd_state": "RED",
   "completed_tasks": [
     "T0.1",
     "T0.2",
     "T0.3",
-    "T0.4"
+    "T0.4",
+    "T1.1"
   ],
   "blocked_tasks": [],
-  "notes": "Starting T1.1: unify MCP+HTTP search validation and add HTTP weights support."
+  "notes": "Completed T1.1. Next: T1.2 (replace/remove start-server.sh without fragile env parsing)."
 }

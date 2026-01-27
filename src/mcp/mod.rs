@@ -12,6 +12,7 @@ mod http;
 mod models;
 mod responses;
 mod tools;
+mod validation;
 
 pub use models::{CalibrateRerankerRequest, GetJobStatusRequest, SearchRequest};
 

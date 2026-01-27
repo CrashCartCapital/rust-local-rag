@@ -8,8 +8,9 @@ use tokio::sync::RwLock;
 use tracing::{Instrument, instrument};
 use uuid::Uuid;
 
-use super::MAX_TOP_K;
+use super::models::SearchRequest;
 use super::responses::{JobStatusResponse, ReindexResponse};
+use super::validation::validate_search_request;
 use tokio::sync::mpsc;
 
 /// Shared application state for HTTP handlers
@@ -41,22 +42,6 @@ async fn readyz(
         Ok(_guard) => axum::http::StatusCode::OK,
         Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
     }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct HttpSearchRequest {
-    query: String,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-    #[serde(default = "default_diversity_factor")]
-    diversity_factor: f32,
-}
-
-fn default_top_k() -> usize {
-    5
-}
-fn default_diversity_factor() -> f32 {
-    0.3
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -118,18 +103,22 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
     }
 }
 
-#[instrument(skip(app_state), fields(query_len = request.query.len(), top_k = %request.top_k, diversity = %request.diversity_factor))]
+#[instrument(skip(app_state), fields(query_len = request.query.len(), top_k = ?request.top_k, diversity = ?request.diversity_factor))]
 async fn http_search(
     axum::extract::State(app_state): axum::extract::State<AppState>,
-    axum::extract::Json(request): axum::extract::Json<HttpSearchRequest>,
+    axum::extract::Json(request): axum::extract::Json<SearchRequest>,
 ) -> Result<axum::Json<HttpSearchResponse>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
 {
     let start = std::time::Instant::now();
-    let top_k = request.top_k.min(MAX_TOP_K);
-    let diversity_factor = request.diversity_factor.clamp(0.0, 1.0);
+    let validated = validate_search_request(request);
     let engine = app_state.rag_state.read().await;
     match engine
-        .search_with_diversity(&request.query, top_k, diversity_factor, None)
+        .search_with_diversity(
+            &validated.query,
+            validated.top_k,
+            validated.diversity_factor,
+            validated.weights.as_ref(),
+        )
         .await
     {
         Ok(results) => {
@@ -140,7 +129,7 @@ async fn http_search(
                 results.len()
             );
 
-            let highlight_re = super::formatting::get_highlight_regex(&request.query);
+            let highlight_re = super::formatting::get_highlight_regex(&validated.query);
             let formatted_results = results
                 .into_iter()
                 .map(|result| {

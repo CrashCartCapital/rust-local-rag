@@ -12,10 +12,10 @@ use crate::rag_engine::RagEngine;
 use crate::worker::JobRequest;
 use tokio::sync::mpsc;
 
-use super::MAX_TOP_K;
 use super::formatting::format_search_results;
 use super::models::{CalibrateRerankerRequest, GetJobStatusRequest, SearchRequest};
 use super::responses::{JobStatusResponse, ReindexResponse};
+use super::validation::validate_search_request;
 
 #[derive(Clone)]
 pub(crate) struct RagMcpServer {
@@ -52,24 +52,27 @@ impl RagMcpServer {
         Parameters(params): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, McpError> {
         let start = std::time::Instant::now();
-        let top_k = params.top_k.unwrap_or(5).min(MAX_TOP_K);
-        let diversity_factor = params.diversity_factor.unwrap_or(0.3).clamp(0.0, 1.0);
-        let query = params.query;
-        let weights = params.weights;
+        let validated = validate_search_request(params);
         let engine = self.rag_state.read().await;
 
         match engine
-            .search_with_diversity(&query, top_k, diversity_factor, weights.as_ref())
+            .search_with_diversity(
+                &validated.query,
+                validated.top_k,
+                validated.diversity_factor,
+                validated.weights.as_ref(),
+            )
             .await
         {
             Ok(results) => {
                 let duration = start.elapsed();
                 let count = results.len();
                 tracing::info!("Search completed in {:?} with {} results", duration, count);
-                let formatted_results = format_search_results(&results, &query);
+                let formatted_results = format_search_results(&results, &validated.query);
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Found {count} results for '{query}':\n\n{formatted_results}"
+                    "Found {count} results for '{}':\n\n{formatted_results}",
+                    validated.query
                 ))]))
             }
             Err(e) => {

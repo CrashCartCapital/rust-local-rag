@@ -1,14 +1,92 @@
 use super::formatting::format_search_results;
+use super::models::SearchRequest;
+use super::validation::validate_search_request;
+use super::MAX_TOP_K;
 use crate::embeddings::EmbeddingService;
 use crate::job_manager::JobManager;
 use crate::rag_engine::RagEngine;
 use crate::rag_engine::SearchResult;
+use crate::rag_engine::QueryWeights;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream};
 use serial_test::serial;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
+
+#[test]
+fn test_prd_t1_1_validate_search_defaults_and_clamps() {
+    let request = SearchRequest {
+        query: "test query".to_string(),
+        top_k: None,
+        diversity_factor: None,
+        weights: None,
+    };
+
+    let validated = validate_search_request(request);
+    assert_eq!(validated.query, "test query");
+    assert_eq!(validated.top_k, 5);
+    assert!((validated.diversity_factor - 0.3).abs() < 1e-6);
+    assert!(validated.weights.is_none());
+
+    let request = SearchRequest {
+        query: "test query".to_string(),
+        top_k: Some(MAX_TOP_K + 123),
+        diversity_factor: Some(2.0),
+        weights: None,
+    };
+    let validated = validate_search_request(request);
+    assert_eq!(validated.top_k, MAX_TOP_K);
+    assert!((validated.diversity_factor - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_prd_t1_1_http_json_compatibility_defaults() {
+    let request: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "hello"
+    }))
+    .unwrap();
+
+    let validated = validate_search_request(request);
+    assert_eq!(validated.query, "hello");
+    assert_eq!(validated.top_k, 5);
+    assert!((validated.diversity_factor - 0.3).abs() < 1e-6);
+}
+
+#[test]
+fn test_prd_t1_1_weights_passthrough() {
+    let request: SearchRequest = serde_json::from_value(serde_json::json!({
+        "query": "hello",
+        "weights": {
+            "embedding": 0.1,
+            "lexical": 0.9
+        }
+    }))
+    .unwrap();
+
+    let validated = validate_search_request(request);
+    let weights = validated.weights.expect("expected weights to be set");
+    assert_eq!(weights.embedding, Some(0.1));
+    assert_eq!(weights.lexical, Some(0.9));
+    assert_eq!(weights.reranker, None);
+    assert_eq!(weights.initial, None);
+
+    let manual_validated = validate_search_request(SearchRequest {
+        query: "hello".to_string(),
+        top_k: None,
+        diversity_factor: None,
+        weights: Some(QueryWeights {
+            embedding: Some(0.1),
+            lexical: Some(0.9),
+            reranker: None,
+            initial: None,
+        }),
+    });
+    assert_eq!(validated.query, manual_validated.query);
+    assert_eq!(validated.top_k, manual_validated.top_k);
+    assert!((validated.diversity_factor - manual_validated.diversity_factor).abs() < 1e-6);
+    assert!(manual_validated.weights.is_some());
+}
 
 #[test]
 fn test_format_search_results() {
