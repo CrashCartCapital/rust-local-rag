@@ -478,6 +478,7 @@ impl SqliteIndexStore {
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     pub async fn migrate_json_if_needed(
         &self,
         data_dir: &Path,

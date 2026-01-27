@@ -87,6 +87,9 @@ fn map_engine_error(e: &EngineError) -> (axum::http::StatusCode, String) {
         EngineError::Embedding(EmbeddingError::ModelNotFound(_)) => {
             (axum::http::StatusCode::BAD_GATEWAY, e.to_string())
         }
+        EngineError::Embedding(EmbeddingError::Validation(kind)) => {
+            (axum::http::StatusCode::BAD_REQUEST, kind.to_string())
+        }
         EngineError::Rerank(RerankError::Unavailable(_)) => {
             (axum::http::StatusCode::SERVICE_UNAVAILABLE, e.to_string())
         }
@@ -387,5 +390,10 @@ mod tests {
         let err = EngineError::Config("bad config".to_string());
         let (status, _) = map_engine_error(&err);
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Test Embedding Validation (New - Regression Check)
+        let err = EngineError::Embedding(EmbeddingError::Validation(ValidationKind::EmptyText));
+        let (status, _) = map_engine_error(&err);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     }
 }
