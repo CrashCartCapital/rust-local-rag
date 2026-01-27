@@ -65,6 +65,8 @@ impl EmbeddingService {
         model: String,
         config: &Config,
     ) -> Result<Self> {
+        crate::guardrails::check_ollama_url(&ollama_url)?;
+
         tracing::info!("Ollama URL: {}", ollama_url);
         tracing::info!("Ollama Model: {}", model);
 

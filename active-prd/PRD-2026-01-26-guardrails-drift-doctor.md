@@ -103,7 +103,7 @@ Proposed:
 ## Tasks
 
 ### Section: P0 — Stop the bleeding (trust + safety)
-- [ ] T0.1 — Add `OLLAMA_URL` guardrail
+- [x] T0.1 — Add `OLLAMA_URL` guardrail
   - Files: `src/embeddings.rs`, new `src/guardrails.rs`
   - Tests:
     - Unit: remote URL rejected without override.

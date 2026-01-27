@@ -1,5 +1,6 @@
 pub mod config;
 pub mod embeddings;
+pub mod guardrails;
 pub mod index_store;
 pub mod job_manager;
 pub mod job_payload;
