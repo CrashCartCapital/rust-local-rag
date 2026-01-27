@@ -80,7 +80,7 @@ async fn test_worker_completes_job() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -103,8 +103,9 @@ async fn test_worker_completes_job() {
     // 3. Initialize Components
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -182,7 +183,7 @@ async fn test_worker_completes_job_with_corrupt_pdf() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -202,8 +203,9 @@ async fn test_worker_completes_job_with_corrupt_pdf() {
 
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -283,7 +285,7 @@ async fn test_worker_prunes_deleted_documents() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -305,8 +307,9 @@ async fn test_worker_prunes_deleted_documents() {
     // 3. Initialize Components
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -418,7 +421,7 @@ async fn test_supervisor_fails_stale_jobs_on_startup() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -435,8 +438,9 @@ async fn test_supervisor_fails_stale_jobs_on_startup() {
 
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -514,7 +518,7 @@ async fn test_supervisor_marks_job_completed_when_progress_reached_total() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -531,8 +535,9 @@ async fn test_supervisor_marks_job_completed_when_progress_reached_total() {
 
     let db_path = format!("sqlite:{}/jobs.db", data_dir.to_str().unwrap());
     let job_manager = Arc::new(JobManager::new(&db_path).await.unwrap());
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -604,7 +609,7 @@ async fn test_reindex_resets_incompatible_index_to_avoid_mixed_dimensions() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -658,8 +663,9 @@ async fn test_reindex_resets_incompatible_index_to_avoid_mixed_dimensions() {
         .await
         .unwrap();
 
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));
@@ -764,7 +770,7 @@ async fn test_resume_mid_reindex_completes_without_duplicate_chunks() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -836,8 +842,9 @@ async fn test_resume_mid_reindex_completes_without_duplicate_chunks() {
     job_manager.update_progress(&job.job_id, 1).await.unwrap();
 
     // 5. Start supervisor (simulates restart) and wait for completion.
+    let config = Config::from_env().unwrap();
     let rag_engine = Arc::new(RwLock::new(
-        RagEngine::new(data_dir.to_str().unwrap(), &Config::default())
+        RagEngine::new(data_dir.to_str().unwrap(), &config)
             .await
             .unwrap(),
     ));

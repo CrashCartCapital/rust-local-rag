@@ -117,7 +117,7 @@ Proposed:
     - Unit: loopback binds accepted; `0.0.0.0` rejected unless override.
   - DoD: Meets R2.
 
-- [ ] T0.3 — Fix “tests that lie” + prove batch-size is honored
+- [x] T0.3 — Fix “tests that lie” + prove batch-size is honored
   - Files: `tests/rag_integration.rs`, `tests/worker_integration.rs`, any other tests setting `EMBEDDING_BATCH_SIZE`
   - Tests:
     - Update env var name to `RAG_EMBEDDING_BATCH_SIZE`.

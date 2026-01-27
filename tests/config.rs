@@ -66,3 +66,20 @@ fn test_config_cache_size_limit() {
         std::env::remove_var("RAG_EMBEDDING_CACHE_SIZE");
     }
 }
+
+#[test]
+fn test_prd_t0_3_no_legacy_embedding_batch_size_env_var_in_tests() {
+    const LEGACY_TOKEN: &str = "\"EMBEDDING_BATCH_SIZE\"";
+
+    let rag_integration = include_str!("rag_integration.rs");
+    assert!(
+        !rag_integration.contains(LEGACY_TOKEN),
+        "tests/rag_integration.rs still references legacy env var {LEGACY_TOKEN}"
+    );
+
+    let worker_integration = include_str!("worker_integration.rs");
+    assert!(
+        !worker_integration.contains(LEGACY_TOKEN),
+        "tests/worker_integration.rs still references legacy env var {LEGACY_TOKEN}"
+    );
+}

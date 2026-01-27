@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-fn create_valid_pdf() -> Vec<u8> {
+fn create_pdf_with_text(text: &str) -> Vec<u8> {
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
     let font_id = doc.add_object(Dictionary::from_iter(vec![
@@ -26,7 +26,7 @@ fn create_valid_pdf() -> Vec<u8> {
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec!["F1".into(), 48.into()]),
             Operation::new("Td", vec![100.into(), 600.into()]),
-            Operation::new("Tj", vec![Object::string_literal("Hello World")]),
+            Operation::new("Tj", vec![Object::string_literal(text)]),
             Operation::new("ET", vec![]),
         ],
     };
@@ -55,6 +55,18 @@ fn create_valid_pdf() -> Vec<u8> {
     let mut buffer = Vec::new();
     doc.save_to(&mut buffer).unwrap();
     buffer
+}
+
+fn create_valid_pdf() -> Vec<u8> {
+    create_pdf_with_text("Hello World")
+}
+
+fn create_multi_chunk_pdf() -> Vec<u8> {
+    let long_text = (0..200)
+        .map(|i| format!("Sentence {i:03} has enough text to force chunking."))
+        .collect::<Vec<_>>()
+        .join(" ");
+    create_pdf_with_text(&long_text)
 }
 
 #[tokio::test]
@@ -86,10 +98,11 @@ async fn test_e2e_indexing_and_search() {
     unsafe {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
-    let engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &Config::default())
+    let config = Config::from_env().unwrap();
+    let engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)
         .await
         .expect("Failed to create RagEngine");
 
@@ -116,6 +129,71 @@ async fn test_e2e_indexing_and_search() {
     assert_eq!(results[0].document, "test.pdf");
     // Depending on extraction, might be "Hello World" or "Hello World"
     assert!(results[0].text.contains("Hello World"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_prd_t0_3_batch_size_produces_batch_embed_request_shape() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                { "name": "nomic-embed-text:latest" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Return a single-embedding payload for all requests; we only assert request shape.
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": vec![0.1f32; 384]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("OLLAMA_URL", mock_server.uri());
+        std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "2");
+    }
+
+    let config = Config::from_env().unwrap();
+    let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)
+        .await
+        .expect("Failed to create RagEngine");
+
+    let pdf_bytes = create_multi_chunk_pdf();
+    let chunks = engine
+        .add_document("multi-chunk.pdf", &pdf_bytes, None)
+        .await
+        .expect("Failed to add document");
+
+    assert!(chunks >= 2, "Expected multi-chunk PDF to yield >= 2 chunks");
+
+    let requests = mock_server.received_requests().await.unwrap();
+    let mut saw_batch_request = false;
+    for req in requests {
+        if req.method.as_str() != "POST" || req.url.path() != "/api/embed" {
+            continue;
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&req.body) else {
+            continue;
+        };
+        if body.get("input").is_some_and(|v| v.is_array()) {
+            saw_batch_request = true;
+            break;
+        }
+    }
+
+    assert!(
+        saw_batch_request,
+        "Expected at least one /api/embed request with array `input` when RAG_EMBEDDING_BATCH_SIZE > 1"
+    );
 }
 
 #[tokio::test]
@@ -230,13 +308,11 @@ async fn test_reranker_timeout_fallback() {
         std::env::set_var("OLLAMA_URL", mock_server.uri());
         std::env::set_var("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text");
         std::env::set_var("OLLAMA_RERANK_MODEL", "my-reranker");
-        std::env::set_var("EMBEDDING_BATCH_SIZE", "1");
+        std::env::set_var("RAG_EMBEDDING_BATCH_SIZE", "1");
     }
 
-    let config = Config {
-        reranker_timeout: Duration::from_millis(200),
-        ..Default::default()
-    };
+    let mut config = Config::from_env().unwrap();
+    config.reranker_timeout = Duration::from_millis(200);
 
     let mut engine = RagEngine::new(temp_dir.path().to_str().unwrap(), &config)
         .await
