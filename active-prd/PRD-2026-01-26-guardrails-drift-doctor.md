@@ -111,7 +111,7 @@ Proposed:
     - Unit: remote URL accepted with override.
   - DoD: Meets R1.
 
-- [ ] T0.2 — Add `MCP_HTTP_BIND` guardrail
+- [x] T0.2 — Add `MCP_HTTP_BIND` guardrail
   - Files: `src/main.rs`, new `src/guardrails.rs`
   - Tests:
     - Unit: loopback binds accepted; `0.0.0.0` rejected unless override.

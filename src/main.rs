@@ -94,6 +94,8 @@ async fn main() -> Result<()> {
     let bind_addr: std::net::SocketAddr = std::env::var("MCP_HTTP_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8140".to_string())
         .parse()?;
+
+    rust_local_rag::guardrails::check_mcp_http_bind(bind_addr)?;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
     rust_local_rag::mcp_server::start_mcp_server(

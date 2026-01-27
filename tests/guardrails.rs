@@ -77,3 +77,34 @@ fn test_prd_t0_1_ollama_url_invalid_url_rejected() {
     assert!(err.to_string().to_lowercase().contains("invalid"));
 }
 
+#[test]
+#[serial]
+fn test_prd_t0_2_mcp_http_bind_loopback_allowed() {
+    let _guard = EnvVarGuard::unset("RAG_ALLOW_REMOTE_BIND");
+
+    rust_local_rag::guardrails::check_mcp_http_bind("127.0.0.1:8140".parse().unwrap()).unwrap();
+    rust_local_rag::guardrails::check_mcp_http_bind("[::1]:8140".parse().unwrap()).unwrap();
+    rust_local_rag::guardrails::check_mcp_http_bind("127.0.0.1:0".parse().unwrap()).unwrap();
+}
+
+#[test]
+#[serial]
+fn test_prd_t0_2_mcp_http_bind_non_loopback_rejected_without_override() {
+    let _guard = EnvVarGuard::unset("RAG_ALLOW_REMOTE_BIND");
+
+    let err =
+        rust_local_rag::guardrails::check_mcp_http_bind("0.0.0.0:8140".parse().unwrap())
+            .unwrap_err();
+    let msg = err.to_string();
+
+    assert!(msg.contains("0.0.0.0:8140"));
+    assert!(msg.contains("RAG_ALLOW_REMOTE_BIND"));
+    assert!(msg.to_lowercase().contains("no auth"));
+}
+
+#[test]
+#[serial]
+fn test_prd_t0_2_mcp_http_bind_non_loopback_allowed_with_override() {
+    let _guard = EnvVarGuard::set("RAG_ALLOW_REMOTE_BIND", "1");
+    rust_local_rag::guardrails::check_mcp_http_bind("0.0.0.0:8140".parse().unwrap()).unwrap();
+}

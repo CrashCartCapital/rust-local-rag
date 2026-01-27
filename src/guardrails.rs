@@ -1,14 +1,17 @@
 use std::net::IpAddr;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardrailKind {
     OllamaUrl,
+    McpHttpBind,
 }
 
 impl GuardrailKind {
     fn override_env_var(self) -> &'static str {
         match self {
             GuardrailKind::OllamaUrl => "RAG_ALLOW_REMOTE_OLLAMA",
+            GuardrailKind::McpHttpBind => "RAG_ALLOW_REMOTE_BIND",
         }
     }
 }
@@ -35,10 +38,19 @@ impl GuardrailError {
         let override_env_var = kind.override_env_var();
         let kind_name = match kind {
             GuardrailKind::OllamaUrl => "OLLAMA_URL",
+            GuardrailKind::McpHttpBind => "MCP_HTTP_BIND",
+        };
+        let risk = match kind {
+            GuardrailKind::OllamaUrl => {
+                "This will send document/query text to that endpoint."
+            }
+            GuardrailKind::McpHttpBind => {
+                "This will expose the server over the network with no auth."
+            }
         };
         Self {
             message: format!(
-                "Refusing non-loopback {kind_name} '{value}'. This will send document/query text to that endpoint. If you intended this, set {override_env_var}=1."
+                "Refusing non-loopback {kind_name} '{value}'. {risk} If you intended this, set {override_env_var}=1."
             ),
         }
     }
@@ -88,5 +100,31 @@ pub fn check_ollama_url(ollama_url: &str) -> Result<(), GuardrailError> {
     Err(GuardrailError::non_loopback(
         GuardrailKind::OllamaUrl,
         ollama_url,
+    ))
+}
+
+pub fn is_loopback_bind(bind_addr: SocketAddr) -> bool {
+    bind_addr.ip().is_loopback()
+}
+
+fn is_remote_bind_override_enabled() -> bool {
+    std::env::var(GuardrailKind::McpHttpBind.override_env_var())
+        .ok()
+        .is_some_and(|v| v == "1")
+}
+
+pub fn check_mcp_http_bind(bind_addr: SocketAddr) -> Result<(), GuardrailError> {
+    if is_loopback_bind(bind_addr) {
+        return Ok(());
+    }
+
+    if is_remote_bind_override_enabled() {
+        return Ok(());
+    }
+
+    let bind_value = bind_addr.to_string();
+    Err(GuardrailError::non_loopback(
+        GuardrailKind::McpHttpBind,
+        &bind_value,
     ))
 }
