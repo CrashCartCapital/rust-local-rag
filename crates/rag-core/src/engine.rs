@@ -506,7 +506,7 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         Ok(candidates)
     }
 
-    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights), err))]
+    #[cfg_attr(feature = "tracing", instrument(skip(self, query), fields(query_len = query.len(), top_k = top_k, weights = ?weights, ann_search_ms = field::Empty, lexical_search_ms = field::Empty, scoring_ms = field::Empty, rerank_ms = field::Empty, ann_candidates = field::Empty, lexical_candidates = field::Empty, total_candidates = field::Empty), err))]
     async fn search_internal(
         &self,
         query: &str,
@@ -537,6 +537,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
 
         crate::search::normalize(&mut query_embedding);
 
+        #[cfg(feature = "tracing")]
+        let ann_start = std::time::Instant::now();
+
         let ann_candidate_iter: Box<dyn Iterator<Item = String>> = match &self.ann_index {
             Some(index) => Box::new(
                 index
@@ -546,7 +549,17 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             None => Box::new(self.state.chunks.keys().cloned()),
         };
 
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("ann_search_ms", ann_start.elapsed().as_millis());
+
+        #[cfg(feature = "tracing")]
+        let lex_start = std::time::Instant::now();
+
         let lexical_candidates = self.lexical_index.score(query, top_k.saturating_mul(5));
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("lexical_search_ms", lex_start.elapsed().as_millis());
+
         let lexical_map: HashMap<String, f32> = lexical_candidates.into_iter().collect();
 
         let mut candidate_ids: HashSet<String> = ann_candidate_iter.collect();
@@ -557,14 +570,20 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
         candidate_ids.extend(lexical_map.keys().cloned());
 
         #[cfg(feature = "tracing")]
-        tracing::debug!(
-            ann_candidates = ann_count,
-            lexical_candidates = lexical_map.len(),
-            candidates_overlap =
-                (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
-            total_unique_candidates = candidate_ids.len(),
-            "Candidate selection complete"
-        );
+        {
+            tracing::Span::current().record("ann_candidates", ann_count);
+            tracing::Span::current().record("lexical_candidates", lexical_map.len());
+            tracing::Span::current().record("total_candidates", candidate_ids.len());
+
+            tracing::debug!(
+                ann_candidates = ann_count,
+                lexical_candidates = lexical_map.len(),
+                candidates_overlap =
+                    (ann_count + lexical_map.len()).saturating_sub(candidate_ids.len()),
+                total_unique_candidates = candidate_ids.len(),
+                "Candidate selection complete"
+            );
+        }
 
         if candidate_ids.is_empty() {
             return Ok(vec![]);
@@ -577,6 +596,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
             .max(f32::EPSILON);
 
         let mut scores: Vec<(f32, f32, f32, &DocumentChunk)> = Vec::new();
+
+        #[cfg(feature = "tracing")]
+        let scoring_start = std::time::Instant::now();
 
         for chunk_id in candidate_ids {
             if let Some(chunk) = self.state.chunks.get(&chunk_id) {
@@ -592,6 +614,9 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 scores.push((combined_score, embedding_score, lexical_score, chunk));
             }
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::Span::current().record("scoring_ms", scoring_start.elapsed().as_millis());
 
         let initial_k = scores.len().min(top_k.saturating_mul(3).max(top_k));
         if initial_k < scores.len() {
@@ -662,12 +687,16 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                     });
 
                 #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    duration_ms = ?rerank_start.elapsed().as_millis(),
-                    input_count = reranker_inputs.len(),
-                    output_count = res.len(),
-                    "Reranking complete"
-                );
+                {
+                    let elapsed = rerank_start.elapsed().as_millis();
+                    tracing::Span::current().record("rerank_ms", elapsed);
+                    tracing::debug!(
+                        duration_ms = ?elapsed,
+                        input_count = reranker_inputs.len(),
+                        output_count = res.len(),
+                        "Reranking complete"
+                    );
+                }
                 res
             }
             None => Vec::new(),
