@@ -13,20 +13,36 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            embedding_timeout: Duration::from_secs(1200),
-            embedding_cache_size: NonZeroUsize::new(1000).expect("1000 is non-zero"),
-            embedding_batch_size: NonZeroUsize::new(32).expect("32 is non-zero"),
-            reranker_timeout: Duration::from_secs(60),
-            reranker_concurrency: NonZeroUsize::new(1).expect("1 is non-zero"),
-            default_logprob_fallback: -10.0,
-        }
+        Self::standard_defaults().expect("Hardcoded defaults must be valid")
     }
 }
 
 impl Config {
+    fn standard_defaults() -> Result<Self, ConfigError> {
+        Ok(Self {
+            embedding_timeout: Duration::from_secs(1200),
+            embedding_cache_size: NonZeroUsize::new(1000).ok_or(ConfigError {
+                var: "DEFAULT_EMBEDDING_CACHE_SIZE",
+                value: "1000".to_string(),
+                message: "1000 is non-zero".to_string(),
+            })?,
+            embedding_batch_size: NonZeroUsize::new(32).ok_or(ConfigError {
+                var: "DEFAULT_EMBEDDING_BATCH_SIZE",
+                value: "32".to_string(),
+                message: "32 is non-zero".to_string(),
+            })?,
+            reranker_timeout: Duration::from_secs(60),
+            reranker_concurrency: NonZeroUsize::new(1).ok_or(ConfigError {
+                var: "DEFAULT_RERANKER_CONCURRENCY",
+                value: "1".to_string(),
+                message: "1 is non-zero".to_string(),
+            })?,
+            default_logprob_fallback: -10.0,
+        })
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
-        let mut config = Self::default();
+        let mut config = Self::standard_defaults()?;
 
         if let Some(batch_size) = parse_env_nonzero_usize("RAG_EMBEDDING_BATCH_SIZE")? {
             if batch_size.get() > 1024 {
@@ -209,6 +225,14 @@ mod tests {
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
+    }
+
+    #[test]
+    fn test_standard_defaults_values() {
+        let config = Config::standard_defaults().expect("defaults should be valid");
+        assert_eq!(config.embedding_cache_size.get(), 1000);
+        assert_eq!(config.embedding_batch_size.get(), 32);
+        assert_eq!(config.reranker_concurrency.get(), 1);
     }
 
     #[test]
