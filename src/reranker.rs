@@ -120,16 +120,14 @@ struct TopLogprob {
 /// Note: `total_cmp` provides a deterministic ordering for floats (including NaNs). For ranking
 /// purposes, we treat NaN scores as the *least* relevant to avoid promoting invalid scores.
 fn sort_reranked_results(results: &mut [RerankedResult]) {
-    results.sort_by(|a, b| {
-        match (a.relevance.is_nan(), b.relevance.is_nan()) {
-            (true, true) => a.chunk_id.cmp(&b.chunk_id),
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            (false, false) => b
-                .relevance
-                .total_cmp(&a.relevance)
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id)),
-        }
+    results.sort_by(|a, b| match (a.relevance.is_nan(), b.relevance.is_nan()) {
+        (true, true) => a.chunk_id.cmp(&b.chunk_id),
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b
+            .relevance
+            .total_cmp(&a.relevance)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id)),
     });
 }
 

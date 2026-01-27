@@ -20,4 +20,3 @@ fn test_prd_t2_1_model_prefix_exists() {
         "missing-model"
     ));
 }
-

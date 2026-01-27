@@ -49,8 +49,7 @@ fn test_prd_t0_1_ollama_url_loopback_allowed() {
 fn test_prd_t0_1_ollama_url_remote_rejected_without_override() {
     let _guard = EnvVarGuard::unset("RAG_ALLOW_REMOTE_OLLAMA");
 
-    let err =
-        rust_local_rag::guardrails::check_ollama_url("http://example.com:11434").unwrap_err();
+    let err = rust_local_rag::guardrails::check_ollama_url("http://example.com:11434").unwrap_err();
     let msg = err.to_string();
 
     assert!(msg.contains("example.com"));
@@ -92,9 +91,8 @@ fn test_prd_t0_2_mcp_http_bind_loopback_allowed() {
 fn test_prd_t0_2_mcp_http_bind_non_loopback_rejected_without_override() {
     let _guard = EnvVarGuard::unset("RAG_ALLOW_REMOTE_BIND");
 
-    let err =
-        rust_local_rag::guardrails::check_mcp_http_bind("0.0.0.0:8140".parse().unwrap())
-            .unwrap_err();
+    let err = rust_local_rag::guardrails::check_mcp_http_bind("0.0.0.0:8140".parse().unwrap())
+        .unwrap_err();
     let msg = err.to_string();
 
     assert!(msg.contains("0.0.0.0:8140"));

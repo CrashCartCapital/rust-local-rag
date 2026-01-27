@@ -41,9 +41,7 @@ impl GuardrailError {
             GuardrailKind::McpHttpBind => "MCP_HTTP_BIND",
         };
         let risk = match kind {
-            GuardrailKind::OllamaUrl => {
-                "This will send document/query text to that endpoint."
-            }
+            GuardrailKind::OllamaUrl => "This will send document/query text to that endpoint.",
             GuardrailKind::McpHttpBind => {
                 "This will expose the server over the network with no auth."
             }

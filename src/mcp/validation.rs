@@ -1,7 +1,7 @@
 use crate::rag_engine::QueryWeights;
 
-use super::models::SearchRequest;
 use super::MAX_TOP_K;
+use super::models::SearchRequest;
 
 const DEFAULT_TOP_K: usize = 5;
 const DEFAULT_DIVERSITY_FACTOR: f32 = 0.3;
@@ -28,4 +28,3 @@ pub(crate) fn validate_search_request(request: SearchRequest) -> ValidatedSearch
         weights: request.weights,
     }
 }
-

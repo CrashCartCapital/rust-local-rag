@@ -149,7 +149,10 @@ async fn fetch_ollama_tags(ollama_url: &str) -> anyhow::Result<serde_json::Value
         anyhow::bail!("Ollama /api/tags returned {status}: {body}");
     }
 
-    Ok(response.json().await.context("Failed to parse Ollama /api/tags JSON")?)
+    response
+        .json()
+        .await
+        .context("Failed to parse Ollama /api/tags JSON")
 }
 
 #[tokio::main]
@@ -281,4 +284,3 @@ async fn main() -> ExitCode {
         ExitCode::SUCCESS
     }
 }
-

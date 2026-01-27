@@ -493,7 +493,6 @@ impl WorkerSupervisor {
 
         tokio::task::spawn_blocking({
             let dir = documents_dir.to_string();
-            let allow_symlinks = allow_symlinks;
             move || {
                 let walker = WalkDir::new(&dir).follow_links(allow_symlinks);
                 let mut paths = Vec::new();
@@ -1025,11 +1024,9 @@ mod tests {
         symlink(&outside_folder, &linked_dir).unwrap();
         let linked_dir_pdf = linked_dir.join("inside.pdf");
 
-        let paths = WorkerSupervisor::discover_pdf_paths(
-            documents_dir.path().to_str().unwrap(),
-        )
-        .await
-        .unwrap();
+        let paths = WorkerSupervisor::discover_pdf_paths(documents_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         assert!(paths.contains(&real_pdf));
         assert!(!paths.contains(&linked_pdf));
@@ -1062,11 +1059,9 @@ mod tests {
         symlink(&outside_folder, &linked_dir).unwrap();
         let linked_dir_pdf = linked_dir.join("inside.pdf");
 
-        let paths = WorkerSupervisor::discover_pdf_paths(
-            documents_dir.path().to_str().unwrap(),
-        )
-        .await
-        .unwrap();
+        let paths = WorkerSupervisor::discover_pdf_paths(documents_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
 
         assert!(paths.contains(&real_pdf));
         assert!(paths.contains(&linked_pdf));

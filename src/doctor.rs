@@ -9,4 +9,3 @@ pub fn model_prefix_exists(tags: &serde_json::Value, prefix: &str) -> bool {
             })
         })
 }
-

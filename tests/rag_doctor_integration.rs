@@ -94,4 +94,3 @@ async fn test_prd_t2_1_rag_doctor_fails_when_embedding_model_missing() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[FAIL] OLLAMA_EMBEDDING_MODEL"));
 }
-

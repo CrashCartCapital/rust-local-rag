@@ -1,12 +1,12 @@
+use super::MAX_TOP_K;
 use super::formatting::format_search_results;
 use super::models::SearchRequest;
 use super::validation::validate_search_request;
-use super::MAX_TOP_K;
 use crate::embeddings::EmbeddingService;
 use crate::job_manager::JobManager;
+use crate::rag_engine::QueryWeights;
 use crate::rag_engine::RagEngine;
 use crate::rag_engine::SearchResult;
-use crate::rag_engine::QueryWeights;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream};
 use serial_test::serial;
