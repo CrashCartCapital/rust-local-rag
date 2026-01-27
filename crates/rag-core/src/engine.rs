@@ -329,8 +329,23 @@ impl<B: EmbeddingBackend, R> RagEngine<B, R> {
                 .map(|c| c.embedding.len())
         };
 
-        if let Some(dim) = target_dim {
-            for chunk in &prepared.chunks {
+        for chunk in &prepared.chunks {
+            for val in &chunk.embedding {
+                if val.is_nan() {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::NaN,
+                    ));
+                }
+                if val.is_infinite() {
+                    return Err(EngineError::validation(
+                        chunk.id.clone(),
+                        crate::error::ValidationKind::Inf,
+                    ));
+                }
+            }
+
+            if let Some(dim) = target_dim {
                 if !chunk.embedding.is_empty() && chunk.embedding.len() != dim {
                     return Err(EngineError::validation(
                         chunk.id.clone(),
@@ -1298,6 +1313,42 @@ mod tests {
                 "Expected Timeout error, got Ok. Generated {} chunks.",
                 res.map(|d| d.chunks.len()).unwrap_or(0)
             ),
+        }
+    }
+
+
+    #[tokio::test]
+    async fn test_reject_nan_embedding() {
+        let mut engine = RagEngine::new(MockBackend);
+
+        let bad_chunk = DocumentChunk {
+            id: Uuid::new_v4().to_string(),
+            document_name: "doc1.txt".to_string(),
+            text: "NaN check".to_string(),
+            embedding: vec![1.0, f32::NAN],
+            chunk_index: 0,
+            page_number: 0,
+            section: None,
+            metadata: crate::types::ChunkMetadata::default(),
+            tags: std::collections::HashSet::new(),
+            resolution: crate::types::Resolution::default(),
+            parent_id: None,
+        };
+
+        let prepared = PreparedDocument {
+            document_name: "doc1.txt".to_string(),
+            document_hash: None,
+            chunks: vec![bad_chunk],
+        };
+
+        let result = engine.upsert_prepared_document(prepared);
+        assert!(result.is_err());
+        match result {
+            Err(EngineError::Validation {
+                kind: crate::error::ValidationKind::NaN,
+                ..
+            }) => {} // OK
+            _ => panic!("Expected NaN validation error"),
         }
     }
 
