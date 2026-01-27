@@ -10,74 +10,7 @@ theme: guardrails + drift reduction + self-diagnosis
 
 # PRD: Guardrails, Drift Reduction, and “Doctor” Workflow
 
-## 0) Executive Summary
-
-This PRD turns the two 2026-01-26 status reports into a **surgical, high-ROI** work plan that strengthens the repo’s core promise:
-
-> “Search and analyze PDF documents … without sending data to external services.” (README)
-
-The selected scope focuses on **silent-footgun prevention**, **test trust**, and **interface drift reduction**, while explicitly avoiding heavy refactors (e.g., RagEngine decomposition) unless they become blocking.
-
-### Outcomes (what “done” looks like)
-1) The server **refuses or loudly warns** before it can leak document/query text due to `OLLAMA_URL` or `MCP_HTTP_BIND` misconfiguration.
-2) Integration tests stop “lying” (they exercise the real config/env var paths used in production).
-3) MCP vs HTTP behavior stops drifting for shared search parameters (top_k, diversity, weights).
-4) A fast “doctor” command exists to regain momentum in minutes.
-
----
-
-## 1) Inputs (Source Reports + Code Anchors)
-
-### Reports (2026-01-26)
-- `STAT-REPORT-rust-local-rag-2026-01-26-112518.md` (commit `d2fee7f`)
-- `STAT-REPORT-rust-local-rag-2026-01-26-143000.md` (commit `d2fee7f`)
-
-### Code anchors (current repo observations)
-- `src/embeddings.rs`: POSTs raw text `input` to `{OLLAMA_URL}/api/embed` (privacy boundary).
-- `src/main.rs`: binds server to `MCP_HTTP_BIND` default `127.0.0.1:8140`.
-- `src/config.rs`: reads `RAG_EMBEDDING_BATCH_SIZE` (tests currently use `EMBEDDING_BATCH_SIZE`).
-- `src/mcp/tools.rs` vs `src/mcp/http.rs`: both clamp top_k/diversity, but HTTP lacks `weights` support.
-- `docs/configuration.md`: documents `LOG_MAX_MB`, but `src/` has no implementation.
-- `start-server.sh`: uses `export $(grep -v '^#' .env | xargs)` (fragile parsing).
-
----
-
-## 2) Screening: Relevance × Pragmatism × Robustness (Analytics)
-
-### 2.1 Rubric
-Scores are 1–5 (higher is better) unless noted.
-
-- **Relevance**: improves the repo’s primary value (local-first RAG via MCP).
-- **Robustness Impact**: reduces severity/likelihood of “it still works but it’s unsafe/wrong”.
-- **Effort**: estimated engineering hours (lower is better).
-- **Maintenance Burden**: likelihood the change becomes ongoing overhead (lower is better).
-
-Derived:
-- **ROI** ≈ (Relevance + Robustness Impact) / Effort, adjusted down for higher burden.
-
-### 2.2 Candidate backlog scoring (screened)
-| Candidate | Relevance | Robustness | Effort (h) | Burden | ROI | Decision |
-|---|---:|---:|---:|---:|---:|---|
-| Guardrails for `OLLAMA_URL` + `MCP_HTTP_BIND` | 5 | 5 | 3 | 1 | 3.3 | **P0** |
-| Fix “tests that lie” env mismatch | 4 | 3 | 1 | 1 | 7.0 | **P0** |
-| Docs/code drift (transport + `LOG_MAX_MB` + knob list) | 3 | 3 | 1 | 1 | 6.0 | **P0** |
-| Shared validation/service layer for MCP + HTTP (incl. `weights`) | 4 | 3 | 3 | 2 | 2.3 | **P1** |
-| Replace/remove `start-server.sh` env parsing footgun | 3 | 3 | 2 | 1 | 3.0 | **P1** |
-| “doctor” / smoke-check command | 4 | 2 | 4 | 2 | 1.5 | **P2** |
-| Ignore bulky derived dirs (`frontend/node_modules`, `frontend/dist`) | 2 | 1 | 1 | 1 | 3.0 | **P2 (opportunistic)** |
-| Golden eval fixtures / baseline | 4 | 3 | 2–4 | 2 | 1.8 | **P2** |
-| “Two DB distributed transaction gap” | ? | ? | ? | ? | ? | **Reconcile first** |
-
-### 2.3 Reconciliation note: “two DB” risk
-One report claims separate `jobs.db` and `index.db`. Current code appears to point **both job management and index store** at `sqlite:{DATA_DIR}/jobs.db` (e.g., `src/main.rs`, `src/rag_engine.rs`).
-
-Decision:
-- Treat “unify DBs” as **NOT** a current requirement.
-- Replace it with a smaller, higher-signal task: **prove** crash-recovery correctness with a targeted test and/or document a recovery procedure (“rerun reindex”).
-
----
-
-## 3) Requirements (What Must Be True)
+## Requirements
 
 ### R0 — Definitions
 - **Loopback URL**: `localhost`, `127.0.0.1`, or `::1` (or an equivalent loopback IP).
@@ -136,7 +69,7 @@ Acceptance criteria:
 
 ---
 
-## 4) Design (How We’ll Implement Without Burden)
+## Design
 
 ### D1 — Guardrails should be pure + testable
 Add a small module (proposed: `src/guardrails.rs`) with pure helpers:
@@ -167,79 +100,76 @@ Proposed:
 
 ---
 
-## 5) Work Plan (Tasks)
+## Tasks
 
-### P0 — Stop the bleeding (trust + safety)
+### Section: P0 — Stop the bleeding (trust + safety)
+- [ ] T0.1 — Add `OLLAMA_URL` guardrail
+  - Files: `src/embeddings.rs`, new `src/guardrails.rs`
+  - Tests:
+    - Unit: remote URL rejected without override.
+    - Unit: loopback URL accepted.
+    - Unit: remote URL accepted with override.
+  - DoD: Meets R1.
 
-**T0.1 — Add `OLLAMA_URL` guardrail**
-- Files: `src/embeddings.rs`, new `src/guardrails.rs`
-- Tests:
-  - Unit: remote URL rejected without override.
-  - Unit: loopback URL accepted.
-  - Unit: remote URL accepted with override.
-- DoD: Meets R1.
+- [ ] T0.2 — Add `MCP_HTTP_BIND` guardrail
+  - Files: `src/main.rs`, new `src/guardrails.rs`
+  - Tests:
+    - Unit: loopback binds accepted; `0.0.0.0` rejected unless override.
+  - DoD: Meets R2.
 
-**T0.2 — Add `MCP_HTTP_BIND` guardrail**
-- Files: `src/main.rs`, new `src/guardrails.rs`
-- Tests:
-  - Unit: loopback binds accepted; `0.0.0.0` rejected unless override.
-- DoD: Meets R2.
+- [ ] T0.3 — Fix “tests that lie” + prove batch-size is honored
+  - Files: `tests/rag_integration.rs`, `tests/worker_integration.rs`, any other tests setting `EMBEDDING_BATCH_SIZE`
+  - Tests:
+    - Update env var name to `RAG_EMBEDDING_BATCH_SIZE`.
+    - Add/extend one integration test to assert batch request shape (array `input`) occurs when batch size > 1.
+  - DoD: Meets R3.
 
-**T0.3 — Fix “tests that lie” + prove batch-size is honored**
-- Files: `tests/rag_integration.rs`, `tests/worker_integration.rs`, any other tests setting `EMBEDDING_BATCH_SIZE`
-- Tests:
-  - Update env var name to `RAG_EMBEDDING_BATCH_SIZE`.
-  - Add/extend one integration test to assert batch request shape (array `input`) occurs when batch size > 1.
-- DoD: Meets R3.
+- [ ] T0.4 — Docs/code alignment pass
+  - Files: `docs/configuration.md`, `docs/architecture.md`, `README.md` (if necessary)
+  - Changes:
+    - Remove/clarify `LOG_MAX_MB`.
+    - Ensure transport description matches Streamable HTTP MCP server.
+    - Ensure env var list is correct and consistent with `src/config.rs` and runtime env reads.
+  - DoD: Meets R4.
 
-**T0.4 — Docs/code alignment pass**
-- Files: `docs/configuration.md`, `docs/architecture.md`, `README.md` (if necessary)
-- Changes:
-  - Remove/clarify `LOG_MAX_MB`.
-  - Ensure transport description matches Streamable HTTP MCP server.
-  - Ensure env var list is correct and consistent with `src/config.rs` and runtime env reads.
-- DoD: Meets R4.
+### Section: P1 — Reduce drift + remove footguns
+- [ ] T1.1 — Unify search validation + add HTTP `weights`
+  - Files: `src/mcp/http.rs`, `src/mcp/tools.rs`, `src/mcp/models.rs`, new `src/mcp/validation.rs`
+  - Tests:
+    - Unit tests for validator clamp behavior.
+    - Minimal integration test verifying HTTP and MCP clamp equivalently (table-driven).
+  - DoD: Meets R5.
 
-### P1 — Reduce drift + remove footguns
+- [ ] T1.2 — Replace/remove `start-server.sh`
+  - Files: `start-server.sh` (rewrite) or delete; docs update as needed.
+  - DoD: Meets R6.
 
-**T1.1 — Unify search validation + add HTTP `weights`**
-- Files: `src/mcp/http.rs`, `src/mcp/tools.rs`, `src/mcp/models.rs`, new `src/mcp/validation.rs`
-- Tests:
-  - Unit tests for validator clamp behavior.
-  - Minimal integration test verifying HTTP and MCP clamp equivalently (table-driven).
-- DoD: Meets R5.
+- [ ] T1.3 — (Optional) Skip symlinks by default during ingestion
+  - Motivation: avoid accidental indexing of outside-tree files via symlinks in `DOCUMENTS_DIR`.
+  - Files: `src/rag_engine.rs` (doc discovery), docs
+  - DoD: Warn and skip symlinked files unless `RAG_ALLOW_SYMLINKS=1`.
 
-**T1.2 — Replace/remove `start-server.sh`**
-- Files: `start-server.sh` (rewrite) or delete; docs update as needed.
-- DoD: Meets R6.
+### Section: P2 — Compounding ROI
+- [ ] T2.1 — Add `rag-doctor` command
+  - Files: new `src/bin/rag_doctor.rs`, shared helpers in `src/guardrails.rs` or `src/doctor/`
+  - Tests:
+    - Unit tests for the pure checks.
+    - (Optional) integration test using wiremock for `/api/tags`.
+  - DoD: Meets R7.
 
-**T1.3 — (Optional) Skip symlinks by default during ingestion**
-- Motivation: avoid accidental indexing of outside-tree files via symlinks in `DOCUMENTS_DIR`.
-- Files: `src/rag_engine.rs` (doc discovery), docs
-- DoD: Warn and skip symlinked files unless `RAG_ALLOW_SYMLINKS=1`.
+- [ ] T2.2 — Repo hygiene
+  - Files: `.gitignore` (or relevant tooling ignore)
+  - DoD: ignore `frontend/node_modules`, `frontend/dist` (and any other bulky derived outputs).
 
-### P2 — Compounding ROI
-
-**T2.1 — Add `rag-doctor` command**
-- Files: new `src/bin/rag_doctor.rs`, shared helpers in `src/guardrails.rs` or `src/doctor/`
-- Tests:
-  - Unit tests for the pure checks.
-  - (Optional) integration test using wiremock for `/api/tags`.
-- DoD: Meets R7.
-
-**T2.2 — Repo hygiene**
-- Files: `.gitignore` (or relevant tooling ignore)
-- DoD: ignore `frontend/node_modules`, `frontend/dist` (and any other bulky derived outputs).
-
-**T2.3 — Golden eval fixtures**
-- Files: `eval/` harness + new fixtures in `eval/fixtures/` (or similar)
-- DoD:
-  - 2–3 stable queries with expected doc IDs/sections.
-  - One baseline run command documented.
+- [ ] T2.3 — Golden eval fixtures
+  - Files: `eval/` harness + new fixtures in `eval/fixtures/` (or similar)
+  - DoD:
+    - 2–3 stable queries with expected doc IDs/sections.
+    - One baseline run command documented.
 
 ---
 
-## 6) Test Strategy (TDD-first, minimal)
+## Testing Strategy
 
 1) Put guardrail logic behind pure functions → easy unit tests and clear error messages.
 2) Use existing wiremock-based integration tests to prove config wiring (batch request shape).
@@ -247,7 +177,76 @@ Proposed:
 
 ---
 
-## 7) Rollout / Compatibility
+## Addenda
+
+### Executive Summary
+
+This PRD turns the two 2026-01-26 status reports into a **surgical, high-ROI** work plan that strengthens the repo’s core promise:
+
+> “Search and analyze PDF documents … without sending data to external services.” (README)
+
+The selected scope focuses on **silent-footgun prevention**, **test trust**, and **interface drift reduction**, while explicitly avoiding heavy refactors (e.g., RagEngine decomposition) unless they become blocking.
+
+#### Outcomes (what “done” looks like)
+1) The server **refuses or loudly warns** before it can leak document/query text due to `OLLAMA_URL` or `MCP_HTTP_BIND` misconfiguration.
+2) Integration tests stop “lying” (they exercise the real config/env var paths used in production).
+3) MCP vs HTTP behavior stops drifting for shared search parameters (top_k, diversity, weights).
+4) A fast “doctor” command exists to regain momentum in minutes.
+
+---
+
+### Inputs (Source Reports + Code Anchors)
+
+#### Reports (2026-01-26)
+- `STAT-REPORT-rust-local-rag-2026-01-26-112518.md` (commit `d2fee7f`)
+- `STAT-REPORT-rust-local-rag-2026-01-26-143000.md` (commit `d2fee7f`)
+
+#### Code anchors (current repo observations)
+- `src/embeddings.rs`: POSTs raw text `input` to `{OLLAMA_URL}/api/embed` (privacy boundary).
+- `src/main.rs`: binds server to `MCP_HTTP_BIND` default `127.0.0.1:8140`.
+- `src/config.rs`: reads `RAG_EMBEDDING_BATCH_SIZE` (tests currently use `EMBEDDING_BATCH_SIZE`).
+- `src/mcp/tools.rs` vs `src/mcp/http.rs`: both clamp top_k/diversity, but HTTP lacks `weights` support.
+- `docs/configuration.md`: documents `LOG_MAX_MB`, but `src/` has no implementation.
+- `start-server.sh`: uses `export $(grep -v '^#' .env | xargs)` (fragile parsing).
+
+---
+
+### Screening: Relevance × Pragmatism × Robustness (Analytics)
+
+#### Rubric
+Scores are 1–5 (higher is better) unless noted.
+
+- **Relevance**: improves the repo’s primary value (local-first RAG via MCP).
+- **Robustness Impact**: reduces severity/likelihood of “it still works but it’s unsafe/wrong”.
+- **Effort**: estimated engineering hours (lower is better).
+- **Maintenance Burden**: likelihood the change becomes ongoing overhead (lower is better).
+
+Derived:
+- **ROI** ≈ (Relevance + Robustness Impact) / Effort, adjusted down for higher burden.
+
+#### Candidate backlog scoring (screened)
+| Candidate | Relevance | Robustness | Effort (h) | Burden | ROI | Decision |
+|---|---:|---:|---:|---:|---:|---|
+| Guardrails for `OLLAMA_URL` + `MCP_HTTP_BIND` | 5 | 5 | 3 | 1 | 3.3 | **P0** |
+| Fix “tests that lie” env mismatch | 4 | 3 | 1 | 1 | 7.0 | **P0** |
+| Docs/code drift (transport + `LOG_MAX_MB` + knob list) | 3 | 3 | 1 | 1 | 6.0 | **P0** |
+| Shared validation/service layer for MCP + HTTP (incl. `weights`) | 4 | 3 | 3 | 2 | 2.3 | **P1** |
+| Replace/remove `start-server.sh` env parsing footgun | 3 | 3 | 2 | 1 | 3.0 | **P1** |
+| “doctor” / smoke-check command | 4 | 2 | 4 | 2 | 1.5 | **P2** |
+| Ignore bulky derived dirs (`frontend/node_modules`, `frontend/dist`) | 2 | 1 | 1 | 1 | 3.0 | **P2 (opportunistic)** |
+| Golden eval fixtures / baseline | 4 | 3 | 2–4 | 2 | 1.8 | **P2** |
+| “Two DB distributed transaction gap” | ? | ? | ? | ? | ? | **Reconcile first** |
+
+#### Reconciliation note: “two DB” risk
+One report claims separate `jobs.db` and `index.db`. Current code appears to point **both job management and index store** at `sqlite:{DATA_DIR}/jobs.db` (e.g., `src/main.rs`, `src/rag_engine.rs`).
+
+Decision:
+- Treat “unify DBs” as **NOT** a current requirement.
+- Replace it with a smaller, higher-signal task: **prove** crash-recovery correctness with a targeted test and/or document a recovery procedure (“rerun reindex”).
+
+---
+
+### Rollout / Compatibility
 
 - Guardrails are potentially breaking for users who intentionally point to remote Ollama or bind to LAN.
 - Provide explicit opt-outs (`RAG_ALLOW_REMOTE_OLLAMA`, `RAG_ALLOW_REMOTE_BIND`) and document them.
@@ -255,11 +254,10 @@ Proposed:
 
 ---
 
-## 8) Out of Scope (Backlog, not in this PRD)
+### Out of Scope (Backlog, not in this PRD)
 
 These were mentioned in one report but are intentionally deferred unless they become blocking:
 - Decompose `RagEngine` into services (large refactor, not required for current goals).
 - Extraction quality gates (entropy/language metrics) beyond basic validation.
 - Prometheus metrics endpoint.
 - Reranker prompt-injection hardening (worth revisiting later, but keep current iteration focused).
-

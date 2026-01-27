@@ -1,0 +1,11 @@
+{
+  "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
+  "last_updated": "2026-01-27T00:42:26Z",
+  "current_phase": "Phase 2: Executive Summary & Approval",
+  "current_section": null,
+  "current_task": null,
+  "tdd_state": "COMPLETE",
+  "completed_tasks": [],
+  "blocked_tasks": [],
+  "notes": "Phase 0 PRD normalization complete; Phase 1 discovery complete; awaiting approval to start implementation."
+}
