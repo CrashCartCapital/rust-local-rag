@@ -124,7 +124,7 @@ Proposed:
     - Add/extend one integration test to assert batch request shape (array `input`) occurs when batch size > 1.
   - DoD: Meets R3.
 
-- [ ] T0.4 — Docs/code alignment pass
+- [x] T0.4 — Docs/code alignment pass
   - Files: `docs/configuration.md`, `docs/architecture.md`, `README.md` (if necessary)
   - Changes:
     - Remove/clarify `LOG_MAX_MB`.

@@ -1,15 +1,16 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T01:23:56Z",
+  "last_updated": "2026-01-27T01:34:50Z",
   "current_phase": "Phase 3: Task Execution Loop",
   "current_section": "P0",
-  "current_task": "T0.3",
+  "current_task": "T0.4",
   "tdd_state": "COMPLETE",
   "completed_tasks": [
     "T0.1",
     "T0.2",
-    "T0.3"
+    "T0.3",
+    "T0.4"
   ],
   "blocked_tasks": [],
-  "notes": "Completed T0.3 with meta-test for legacy env var + batching request-shape integration proof."
+  "notes": "Completed T0.4: docs now match Streamable HTTP transport and env vars; removed LOG_MAX_MB; documented active HTTP endpoints."
 }

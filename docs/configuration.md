@@ -18,7 +18,6 @@ Add to your `claude_desktop_config.json`:
                 "DOCUMENTS_DIR": "/Users/yourusername/Documents/rag",
                 "LOG_DIR": "/tmp/rust-local-rag",
                 "LOG_LEVEL": "info",
-                "LOG_MAX_MB": "10",
                 "OLLAMA_EMBEDDING_MODEL": "nomic-embed-text"
             }
         }
@@ -38,12 +37,13 @@ All configuration values can be defined in the `env` section of `claude_desktop_
 | `DOCUMENTS_DIR` | PDF documents directory to scan | `./documents` |
 | `LOG_DIR` | Log output directory. Uses `/var/log/rust-local-rag` if `/var/log` exists, otherwise `./logs` | Auto-detected |
 | `LOG_LEVEL` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `info` |
-| `LOG_MAX_MB` | Max log file size in MB before truncation | `5` |
 | `OLLAMA_URL` | Base URL for the Ollama API | `http://localhost:11434` |
 | `OLLAMA_EMBEDDING_MODEL` | Embedding model name (must be installed via `ollama pull`) | `nomic-embed-text` |
 | `OLLAMA_RERANK_MODEL` | LLM model for reranking search results | `dengcao/Qwen3-Reranker-4B:Q5_K_M` |
+| `RAG_ALLOW_REMOTE_OLLAMA` | Allow non-loopback `OLLAMA_URL` (unsafe; sends document/query text off-machine) | _unset_ |
+| `RAG_ALLOW_REMOTE_BIND` | Allow non-loopback `MCP_HTTP_BIND` (unsafe; exposes unauthenticated server) | _unset_ |
 | `PROMPTS_DIR` | Directory for prompt template overrides | `./prompts` |
-| `MCP_HTTP_BIND` | HTTP health endpoint address | `127.0.0.1:8140` |
+| `MCP_HTTP_BIND` | Server bind address for MCP, REST endpoints, and health checks | `127.0.0.1:8140` |
 | `MCP_HTTP_ENDPOINT` | HTTP MCP endpoint path | `/mcp` |
 | `DEVELOPMENT` or `DEV` | Prefer console logging (development friendly) | _unset_ |
 | `CONSOLE_LOGS` | Force console logging regardless of environment | _unset_ |

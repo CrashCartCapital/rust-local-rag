@@ -5,11 +5,11 @@
 ## High-Level Architecture
 
 ```
-┌─────────────────┐    MCP Protocol     ┌──────────────────┐
-│                 │    (stdin/stdout)   │                  │
-│  Claude Desktop │ ◄─────────────────► │   Rust RAG       │
-│                 │                     │   MCP Server     │
-└─────────────────┘                     └──────────────────┘
+┌─────────────────┐   MCP Streamable HTTP   ┌──────────────────┐
+│                 │   (JSON-RPC over HTTP)  │                  │
+│  Claude Desktop │ ◄─────────────────────► │   Rust RAG       │
+│                 │   http://host:port/mcp  │   MCP Server     │
+└─────────────────┘                         └──────────────────┘
                                                │
                                                ▼
                                        ┌──────────────────┐
@@ -53,3 +53,11 @@ To prevent timeouts in the MCP protocol, long-running operations like reindexing
 *   **Atomic Creation**: Jobs are created atomically in a SQLite database.
 *   **Worker**: A background thread processes the job queue.
 *   **Status**: Clients poll `get_job_status` to track progress.
+
+## HTTP Surface
+
+The server runs a single HTTP listener (configurable via `MCP_HTTP_BIND`) that serves:
+
+- MCP endpoint: `MCP_HTTP_ENDPOINT` (default: `/mcp`)
+- Health: `GET /healthz` (alias: `GET /health`) and `GET /readyz`
+- Evaluation endpoints: `POST /search`, `GET /stats`, `GET /documents`, `POST /reindex`, `GET /jobs/active`, `GET /jobs/{job_id}`
