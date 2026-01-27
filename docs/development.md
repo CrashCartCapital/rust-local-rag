@@ -7,6 +7,7 @@ This guide covers building, running, and contributing to `rust-local-rag`.
 *   Rust toolchain (stable)
 *   Ollama (running)
 *   Poppler (optional, for fallback PDF extraction)
+*   uv (optional, for running evaluation harness)
 
 ## Common Commands
 
@@ -46,11 +47,15 @@ make ci                     # check + lint + test + build
 ## Installation
 
 ```bash
+make setup                  # Complete development environment setup (tools + ollama)
 make install                # Install release binary to ~/.cargo/bin
 make install-release        # Install optimized release binary (explicit profile)
 make install-production     # Build release + install
 make uninstall              # Remove from system
 make which-installed        # Check if installed and location
+make clean-all              # Deep clean (build cache + optional Ollama models)
+make upgrade                # Upgrade dependencies (including breaking changes)
+make install-tools          # Install development tools (cargo-watch, etc.)
 ```
 
 ## Ollama Management
@@ -63,6 +68,12 @@ make ollama-start           # Start Ollama server
 make ollama-stop            # Stop Ollama server
 make ollama-status          # Check status and list models
 make ollama-models          # Pull required models
+```
+
+## System Check
+
+```bash
+cargo run --bin rag-doctor  # Run system health checks (DB, Ollama, Models)
 ```
 
 ## Repository Layout
@@ -78,14 +89,22 @@ make ollama-models          # Pull required models
 *   `src/reranker.rs`: Ollama-based reranker.
 *   `src/job_manager.rs`: SQLite job persistence.
 *   `src/worker.rs`: Background worker for indexing.
+*   `src/doctor.rs`: System health checks logic.
+*   `src/guardrails.rs`: Input validation and safety checks.
+*   `src/index_store.rs`: Vector index storage and management.
+*   `src/job_payload.rs`: Job data structures.
+*   `src/progress_logger.rs`: Progress logging utilities.
 *   `crates/rag-core/`: Reusable core library: chunking, retrieval, scoring, persistence.
+*   `crates/rag-core-py/`: Python bindings for `rag-core`.
 *   `src/bin/rag_tui/`: TUI client application.
+*   `src/bin/rag_doctor.rs`: System health check binary.
 
 ### Data & Configuration
 *   `documents/`: Directory for PDF documents to be indexed.
 *   `data/`: Local data storage (SQLite DB, embeddings).
 *   `logs/`: Application logs.
 *   `prompts/`: System prompts (e.g. for reranker).
+*   `frontend/`: Frontend application.
 
 ### Documentation & Analysis
 *   `docs/`: User and developer documentation.
