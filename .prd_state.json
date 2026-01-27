@@ -1,9 +1,9 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T02:39:27Z",
+  "last_updated": "2026-01-27T02:42:35Z",
   "current_phase": "Phase 3: Task Execution Loop",
   "current_section": "P2",
-  "current_task": "T2.2",
+  "current_task": "T2.3",
   "tdd_state": "RED",
   "completed_tasks": [
     "T0.1",
@@ -13,8 +13,9 @@
     "T1.1",
     "T1.2",
     "T1.3",
-    "T2.1"
+    "T2.1",
+    "T2.2"
   ],
   "blocked_tasks": [],
-  "notes": "Completed T2.1. Next: T2.2 repo hygiene (.gitignore)."
+  "notes": "Completed T2.2. Next: T2.3 add golden eval fixtures."
 }

@@ -157,7 +157,7 @@ Proposed:
     - (Optional) integration test using wiremock for `/api/tags`.
   - DoD: Meets R7.
 
-- [ ] T2.2 — Repo hygiene
+- [x] T2.2 — Repo hygiene
   - Files: `.gitignore` (or relevant tooling ignore)
   - DoD: ignore `frontend/node_modules`, `frontend/dist` (and any other bulky derived outputs).
 
