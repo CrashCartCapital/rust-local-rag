@@ -1,10 +1,10 @@
 {
   "prd_file": "active-prd/PRD-2026-01-26-guardrails-drift-doctor.md",
-  "last_updated": "2026-01-27T01:38:47Z",
-  "current_phase": "Phase 4: Post-Section Review",
-  "current_section": "P0",
-  "current_task": "P0-review",
-  "tdd_state": "COMPLETE",
+  "last_updated": "2026-01-27T01:41:29Z",
+  "current_phase": "Phase 3: Task Execution Loop",
+  "current_section": "P1",
+  "current_task": "T1.1",
+  "tdd_state": "RED",
   "completed_tasks": [
     "T0.1",
     "T0.2",
@@ -12,5 +12,5 @@
     "T0.4"
   ],
   "blocked_tasks": [],
-  "notes": "P0 section review complete (guardrails + tests + docs coherent)."
+  "notes": "Starting T1.1: unify MCP+HTTP search validation and add HTTP weights support."
 }
