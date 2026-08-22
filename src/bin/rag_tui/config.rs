@@ -40,10 +40,12 @@ impl Config {
                 .unwrap_or_else(|_| "./documents".to_string()),
             ollama_url: std::env::var("OLLAMA_URL")
                 .unwrap_or_else(|_| "localhost:11434".to_string()),
-            poll_interval_secs: std::env::var("RAG_TUI_POLL_INTERVAL_S")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_POLL_INTERVAL_SECS),
+            poll_interval_secs: parse_env_u64_clamped(
+                "RAG_TUI_POLL_INTERVAL_S",
+                DEFAULT_POLL_INTERVAL_SECS,
+                1,
+                300,
+            ),
             top_k: std::env::var("RAG_TUI_TOP_K")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -67,9 +69,39 @@ impl Default for Config {
     }
 }
 
+/// Helper to parse an env var as u64, clamp to range, or return default
+fn parse_env_u64_clamped(var_name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(var_name)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|v| v.clamp(min, max))
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_env_var<F>(key: &str, value: &str, f: F)
+    where
+        F: FnOnce(),
+    {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: We hold the mutex so no other test in this module can access the environment.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            std::env::remove_var(key);
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
 
     #[test]
     fn test_config_defaults() {
@@ -109,5 +141,38 @@ mod tests {
         let config = Config::from_env();
         // Theme should have a value (dark is default)
         assert!(!config.theme.is_empty());
+    }
+
+    #[test]
+    fn test_poll_interval_parsing() {
+        // Valid
+        with_env_var("RAG_TUI_POLL_INTERVAL_S", "10", || {
+            let config = Config::from_env();
+            assert_eq!(config.poll_interval_secs, 10);
+        });
+
+        // Zero -> Clamped to 1
+        with_env_var("RAG_TUI_POLL_INTERVAL_S", "0", || {
+            let config = Config::from_env();
+            assert_eq!(config.poll_interval_secs, 1);
+        });
+
+        // Huge -> Clamped to 300
+        with_env_var("RAG_TUI_POLL_INTERVAL_S", "1000", || {
+            let config = Config::from_env();
+            assert_eq!(config.poll_interval_secs, 300);
+        });
+
+        // Invalid -> Default (2)
+        with_env_var("RAG_TUI_POLL_INTERVAL_S", "abc", || {
+            let config = Config::from_env();
+            assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        });
+
+        // Negative (as u64 parse error) -> Default (2)
+        with_env_var("RAG_TUI_POLL_INTERVAL_S", "-5", || {
+            let config = Config::from_env();
+            assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        });
     }
 }
