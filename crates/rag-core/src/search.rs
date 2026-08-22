@@ -517,18 +517,12 @@ impl LexicalIndex {
         // instead of sorting the whole vector in O(N log N).
         if limit > 0 && results.len() > limit {
             results.select_nth_unstable_by(limit, |a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
+                b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
             });
             results.truncate(limit);
         }
 
-        results.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         #[cfg(feature = "tracing")]
         {
@@ -786,8 +780,7 @@ impl IndexSet {
         // Sort by combined score descending, with deterministic tie-breaker
         candidates.sort_by(|a, b| {
             b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.combined_score)
                 .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
@@ -1499,5 +1492,69 @@ mod tests {
         let mut results2 = index2.search(&v, 3);
         results2.sort();
         assert_eq!(results2, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sort_stability_with_nans() {
+        // Construct candidates with manually injected NaNs to verify stability
+        let mut candidates = vec![
+            CandidateScore {
+                chunk_id: "a".to_string(),
+                embedding_score: 1.0,
+                lexical_score: 0.0,
+                combined_score: 1.0,
+            },
+            CandidateScore {
+                chunk_id: "b".to_string(),
+                embedding_score: f32::NAN,
+                lexical_score: 0.0,
+                combined_score: f32::NAN,
+            },
+            CandidateScore {
+                chunk_id: "c".to_string(),
+                embedding_score: 2.0,
+                lexical_score: 0.0,
+                combined_score: 2.0,
+            },
+            CandidateScore {
+                chunk_id: "d".to_string(),
+                embedding_score: 1.0,
+                lexical_score: 0.0,
+                combined_score: 1.0,
+            },
+        ];
+
+        // Sort using the same logic as IndexSet::search_candidates
+        candidates.sort_by(|a, b| {
+            b.combined_score
+                .total_cmp(&a.combined_score)
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
+
+        let ids: Vec<&str> = candidates.iter().map(|c| c.chunk_id.as_str()).collect();
+
+        // Verify "c" (2.0) comes before "a" (1.0)
+        let idx_c = ids.iter().position(|&x| x == "c").unwrap();
+        let idx_a = ids.iter().position(|&x| x == "a").unwrap();
+        assert!(
+            idx_c < idx_a,
+            "Higher score 'c' should come before 'a'. Order: {:?}",
+            ids
+        );
+
+        // Verify deterministic tie-breaking: "a" (1.0) comes before "d" (1.0)
+        let idx_d = ids.iter().position(|&x| x == "d").unwrap();
+        assert!(
+            idx_a < idx_d,
+            "'a' should come before 'd' due to tie breaking. Order: {:?}",
+            ids
+        );
+
+        // Verify NaN presence doesn't crash or disappear
+        assert!(
+            ids.contains(&"b"),
+            "NaN candidate 'b' should be preserved. Order: {:?}",
+            ids
+        );
     }
 }
