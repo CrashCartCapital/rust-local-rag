@@ -92,3 +92,38 @@ async fn test_load_from_dir_handles_invalid_utf8() {
     );
     assert_eq!(engine.chunk_count(), 0, "Engine should be empty");
 }
+
+#[tokio::test]
+async fn test_load_truncated_file_recovery() {
+    let temp_dir = TempDir::new().unwrap();
+    let backend = MockBackend;
+    let mut engine = RagEngine::new(backend);
+
+    let index_path = rag_core::persistence::index_path(temp_dir.path(), "mock-model");
+    std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+
+    let truncated_json = r#"
+    {
+        "schema_version": 2,
+        "embedding_model_id": "mock-model",
+        "embedding_dim": 2,
+        "chunks": {
+            "chunk1": {
+                "id": "chunk1",
+                "text": "truncation happens he
+    "#;
+
+    std::fs::write(&index_path, truncated_json).unwrap();
+
+    let result = engine.load_from_dir(temp_dir.path());
+
+    assert!(
+        result.is_ok(),
+        "load_from_dir should succeed gracefully despite corruption"
+    );
+    assert!(
+        engine.needs_reindex(),
+        "Engine should signal need for reindex"
+    );
+    assert_eq!(engine.chunk_count(), 0);
+}
